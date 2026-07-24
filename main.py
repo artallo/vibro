@@ -1,5 +1,6 @@
 import struct
 from dataclasses import dataclass
+from typing import Any
 
 import serial
 import numpy as np
@@ -39,6 +40,11 @@ FFT_THRESHOLD = 2.1        # пик должен быть выше средне�
 PROMINENCE = 0.3          # 30% от максимума
 MIN_DISTANCE_HZ = 1.0
 
+# ----------------------------------------------------------
+# Peak detection
+# ----------------------------------------------------------
+MIN_STABILITY = 5.0
+
 COLORS = {
     "X": "tab:blue",
     "Y": "tab:orange",
@@ -53,9 +59,6 @@ class FFTResult:
     freq: np.ndarray
     amplitude: np.ndarray
     resolution: float
-    peaks: np.ndarray
-    peak_freq: float
-    peak_amplitude: float
 
 
 @dataclass
@@ -69,9 +72,6 @@ class PSDResult:
     freq: np.ndarray
     psd: np.ndarray
     resolution: float
-    peaks: np.ndarray
-    peak_freq: float
-    peak_psd: float
 
 
 @dataclass
@@ -105,6 +105,84 @@ class StatisticsResult:
     x: AxisStatistics
     y: AxisStatistics
     z: AxisStatistics
+
+
+@dataclass
+class AxisPeaks:
+    frequencies: np.ndarray
+    amplitudes: np.ndarray
+    properties: dict[str, Any]
+
+
+@dataclass
+class PeakResult:
+    x: AxisPeaks
+    y: AxisPeaks
+    z: AxisPeaks
+
+
+def find_psd_peaks(
+    statistics: StatisticsResult,
+    sessions: list[SessionResult],
+) -> PeakResult:
+    if not sessions:
+        raise ValueError("At least one completed session is required")
+
+    freq = sessions[0].x.psd.freq
+
+    if len(freq) != len(statistics.x.median):
+        raise ValueError("Frequency axis length does not match X median PSD length")
+    if len(freq) != len(statistics.y.median):
+        raise ValueError("Frequency axis length does not match Y median PSD length")
+    if len(freq) != len(statistics.z.median):
+        raise ValueError("Frequency axis length does not match Z median PSD length")
+
+    def detect_axis_peaks(
+        median_psd: np.ndarray,
+        stability: np.ndarray,
+        freq: np.ndarray,
+    ) -> AxisPeaks:
+        if len(median_psd) == 0:
+            return AxisPeaks(
+                frequencies=np.array([]),
+                amplitudes=np.array([]),
+                properties={}
+            )
+
+        if len(freq) < 2:
+            raise ValueError("Frequency axis must contain at least two values")
+
+        if len(stability) != len(median_psd):
+            raise ValueError("Stability length does not match median PSD length")
+
+        prominence = np.max(median_psd) * PROMINENCE
+        resolution = freq[1] - freq[0]
+        distance = max(int(MIN_DISTANCE_HZ / resolution), 1)
+
+        peak_indices, properties = find_peaks(
+            median_psd,
+            prominence=prominence,
+            distance=distance,
+        )
+
+        stable_peak_mask = stability[peak_indices] >= MIN_STABILITY
+        peak_indices = peak_indices[stable_peak_mask]
+        properties = {
+            name: values[stable_peak_mask]
+            for name, values in properties.items()
+        }
+
+        return AxisPeaks(
+            frequencies=freq[peak_indices],
+            amplitudes=median_psd[peak_indices],
+            properties=properties,
+        )
+
+    return PeakResult(
+        x=detect_axis_peaks(statistics.x.median, statistics.x.stability, freq),
+        y=detect_axis_peaks(statistics.y.median, statistics.y.stability, freq),
+        z=detect_axis_peaks(statistics.z.median, statistics.z.stability, freq),
+    )
 
 
 def compute_statistics(
@@ -218,35 +296,10 @@ def compute_fft(signal, fs):
 
     resolution = fs / len(signal)
 
-    # peak_index = np.argmax(amplitude)
-    '''mask = (freq >= FFT_MIN_FREQ) & (freq <= FFT_MAX_FREQ)
-    peak_local = np.argmax(amplitude[mask])
-    peak_index = np.where(mask)[0][peak_local]'''
-    
-    mask = (freq >= FFT_MIN_FREQ) & (freq <= FFT_MAX_FREQ)
-    freq_search = freq[mask]
-    amp_search = amplitude[mask]
-    
-    distance = max(int(MIN_DISTANCE_HZ / resolution), 1)
-    peaks, _ = find_peaks(
-        amp_search,
-        prominence=np.mean(amp_search) * FFT_THRESHOLD,
-        distance=distance
-    )
-    if len(peaks):
-        dominant = peaks[np.argmax(amp_search[peaks])]
-        peak_freq = freq_search[dominant]
-        peak_amplitude = amp_search[dominant]
-    else:
-        peak_freq = np.nan
-        peak_amplitude = np.nan
     return FFTResult(
         freq=freq,
         amplitude=amplitude,
-        resolution=resolution,
-        peaks=np.where(mask)[0][peaks],
-        peak_freq=peak_freq,
-        peak_amplitude=peak_amplitude
+        resolution=resolution
     )
 
 def compute_average_fft(signal, fs):
@@ -302,35 +355,11 @@ def compute_psd(signal, fs):
 
     resolution = fs / min(NPERSEG, len(signal))
 
-    distance = max(int(MIN_DISTANCE_HZ / resolution), 1)
-
-    peaks, properties = find_peaks(
-        psd,
-        prominence=np.max(psd) * PROMINENCE,
-        distance=distance
-    )
-
-    if len(peaks):
-
-        dominant = peaks[np.argmax(psd[peaks])]
-
-        peak_freq = freq[dominant]
-        peak_psd = psd[dominant]
-
-    else:
-
-        peak_freq = np.nan
-        peak_psd = np.nan
-
     return PSDResult(
         freq=freq,
         psd=psd,
-        resolution=resolution,
-        peaks=peaks,
-        peak_freq=peak_freq,
-        peak_psd=peak_psd
+        resolution=resolution
     )
-
 
 def process_session(session, session_fs, number):
 
@@ -453,9 +482,11 @@ while True:
 print()
 
 statistics: StatisticsResult | None = None
+peaks: PeakResult | None = None
 
 if sessions:
     statistics = compute_statistics(sessions)
+    peaks = find_psd_peaks(statistics, sessions)
 
 # ==========================================================
 
@@ -518,52 +549,7 @@ for axis, signal in signals.items():
         "psd": psd,
     }
 
-'''axis = "Y"
 
-signal = results[axis]["signal"]
-
-fft = results[axis]["fft"]
-
-avg = results[axis]["avg"]
-
-psd = results[axis]["psd"]
-# ==========================================================
-
-print()
-print("Measurement summary")
-print("--------------------------------------------------")
-print(f"Axis            : {axis}")
-print(f"Duration        : {duration:.2f} s")
-print(f"Samples         : {len(signal)}")
-print(f"Sampling rate   : {fs:.3f} Hz")
-print(f"FFT resolution  : {fft.resolution:.4f} Hz")
-print(f"PSD resolution  : {psd.resolution:.4f} Hz")
-
-if len(psd.peaks):
-
-    print()
-    print("Dominant peak")
-    print("--------------------------------------------------")
-    print(f"FFT frequency   : {fft.peak_freq:.3f} Hz")
-    print(f"FFT amplitude   : {fft.peak_amplitude:.4f} g")
-    print(f"PSD frequency   : {psd.peak_freq:.3f} Hz")
-    print(f"PSD             : {psd.peak_psd:.3e} g²/Hz")
-
-    print()
-    print("Detected peaks")
-    print("--------------------------------------------------")
-
-    for p in psd.peaks:
-
-        print(
-            f"{psd.freq[p]:7.2f} Hz    PSD={psd.psd[p]:.3e}"
-        )
-
-else:
-
-    print()
-
-    print("No significant peaks detected.")'''
     
 print()
 print("Measurement summary")
@@ -584,23 +570,6 @@ for axis, result in results.items():
     print(f"FFT resolution  : {fft.resolution:.4f} Hz")
     print(f"PSD resolution  : {psd.resolution:.4f} Hz")
 
-    if len(psd.peaks):
-
-        print(f"FFT peak        : {fft.peak_freq:.3f} Hz")
-        print(f"FFT amplitude   : {fft.peak_amplitude:.4f} g")
-        print(f"PSD peak        : {psd.peak_freq:.3f} Hz")
-        print(f"PSD             : {psd.peak_psd:.3e} g²/Hz")
-
-        print("Detected PSD peaks:")
-
-        for p in psd.peaks:
-            print(
-                f"  {psd.freq[p]:7.2f} Hz    PSD={psd.psd[p]:.3e}"
-            )
-
-    else:
-
-        print("No significant peaks.")
 
 # ==========================================================
 # Графики
@@ -637,15 +606,6 @@ lines = {
     "psd": {},
 }
 
-markers = {
-    "fft": {},
-    "psd": {},
-}
-
-annotations = {
-    "fft": {},
-    "psd": {},
-}
 
 # ----------------------------------------------------------
 # Временной сигнал
@@ -707,30 +667,6 @@ for axis, result in results.items():
 
     lines["fft"][axis] = line
 
-    markers["fft"][axis] = []
-    annotations["fft"][axis] = []
-
-    for p in fft.peaks:
-
-        marker, = ax[1].plot(
-            fft.freq[p],
-            fft.amplitude[p],
-            "o",
-            color=COLORS[axis]
-        )
-
-        text = ax[1].annotate(
-            f"{fft.freq[p]:.2f} Hz",
-            (fft.freq[p], fft.amplitude[p]),
-            xytext=(0, 10),
-            textcoords="offset points",
-            ha="center",
-            fontsize=8,
-            color=COLORS[axis]
-        )
-
-        markers["fft"][axis].append(marker)
-        annotations["fft"][axis].append(text)
 
 # ax[1].legend()
 ax[1].set_xlim(0, FFT_MAX_FREQ)
@@ -790,30 +726,6 @@ for axis, result in results.items():
 
     lines["psd"][axis] = line
 
-    markers["psd"][axis] = []
-    annotations["psd"][axis] = []
-
-    for p in psd.peaks:
-
-        marker, = ax[3].plot(
-            psd.freq[p],
-            psd.psd[p],
-            "o",
-            color=COLORS[axis]
-        )
-
-        text = ax[3].annotate(
-            f"{psd.freq[p]:.2f} Hz",
-            (psd.freq[p], psd.psd[p]),
-            xytext=(0, 10),
-            textcoords="offset points",
-            ha="center",
-            fontsize=8,
-            color=COLORS[axis]
-        )
-
-        markers["psd"][axis].append(marker)
-        annotations["psd"][axis].append(text)
 
 ax[3].legend()
 ax[3].set_xlim(PSD_MIN_FREQ, PSD_MAX_FREQ)
@@ -832,13 +744,6 @@ def toggle_axis(label):
     for group in lines.values():
         group[label].set_visible(visible)
 
-    for group in markers.values():
-        for marker in group[label]:
-            marker.set_visible(visible)
-
-    for group in annotations.values():
-        for text in group[label]:
-            text.set_visible(visible)
 
     fig.canvas.draw_idle()
 
