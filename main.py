@@ -92,6 +92,27 @@ class SessionResult:
     z: AxisResult
 
 
+@dataclass
+class AxisStatistics:
+    median: np.ndarray
+    mean: np.ndarray
+    std: np.ndarray
+    stability: np.ndarray
+
+
+@dataclass
+class StatisticsResult:
+    x: AxisStatistics
+    y: AxisStatistics
+    z: AxisStatistics
+
+
+def compute_statistics(
+    sessions: list[SessionResult],
+) -> StatisticsResult:
+    raise NotImplementedError("Statistics stage not implemented yet")
+
+
 # ==========================================================
 
 ser = serial.Serial(PORT, BAUD, timeout=2)
