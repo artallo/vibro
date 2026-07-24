@@ -92,6 +92,54 @@ class SessionResult:
     z: AxisResult
 
 
+@dataclass
+class AxisStatistics:
+    median: np.ndarray
+    mean: np.ndarray
+    std: np.ndarray
+    stability: np.ndarray
+
+
+@dataclass
+class StatisticsResult:
+    x: AxisStatistics
+    y: AxisStatistics
+    z: AxisStatistics
+
+
+def compute_statistics(
+    sessions: list[SessionResult],
+) -> StatisticsResult:
+    def compute_axis_statistics(axis: str) -> AxisStatistics:
+        psd_stack = np.stack(
+            [getattr(session, axis).psd.psd for session in sessions],
+            axis=0
+        )
+
+        median = np.median(psd_stack, axis=0)
+        mean = np.mean(psd_stack, axis=0)
+        std = np.std(psd_stack, axis=0)
+        stability = np.divide(
+            mean,
+            std,
+            out=np.zeros_like(mean),
+            where=std != 0
+        )
+
+        return AxisStatistics(
+            median=median,
+            mean=mean,
+            std=std,
+            stability=stability
+        )
+
+    return StatisticsResult(
+        x=compute_axis_statistics("x"),
+        y=compute_axis_statistics("y"),
+        z=compute_axis_statistics("z")
+    )
+
+
 # ==========================================================
 
 ser = serial.Serial(PORT, BAUD, timeout=2)
@@ -403,6 +451,11 @@ while True:
         break
 
 print()
+
+statistics: StatisticsResult | None = None
+
+if sessions:
+    statistics = compute_statistics(sessions)
 
 # ==========================================================
 
