@@ -33,16 +33,12 @@ FFT_MAX_FREQ = 20
 PSD_MIN_FREQ = 0.5
 PSD_MAX_FREQ = 20
 
-# Поиск пиков FFT
-FFT_THRESHOLD = 2.1        # пик должен быть выше среднего уровня в 2.1 раза
-
-# Поиск пиков PSD
-PROMINENCE = 0.3          # 30% от максимума
-MIN_DISTANCE_HZ = 1.0
-
 # ----------------------------------------------------------
 # Peak detection
 # ----------------------------------------------------------
+
+PROMINENCE = 0.3          # 30% от максимума
+MIN_DISTANCE_HZ = 1.0
 MIN_STABILITY = 5.0
 
 COLORS = {
@@ -487,6 +483,11 @@ peaks: PeakResult | None = None
 if sessions:
     statistics = compute_statistics(sessions)
     peaks = find_psd_peaks(statistics, sessions)
+
+if not sessions:
+    print("No completed sessions available for analysis.")
+    ser.close()
+    raise SystemExit(0)
 
 # ==========================================================
 
