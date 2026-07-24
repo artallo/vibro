@@ -33,16 +33,12 @@ FFT_MAX_FREQ = 20
 PSD_MIN_FREQ = 0.5
 PSD_MAX_FREQ = 20
 
-# Поиск пиков FFT
-FFT_THRESHOLD = 2.1        # пик должен быть выше среднего уровня в 2.1 раза
-
-# Поиск пиков PSD
-PROMINENCE = 0.3          # 30% от максимума
-MIN_DISTANCE_HZ = 1.0
-
 # ----------------------------------------------------------
 # Peak detection
 # ----------------------------------------------------------
+
+PROMINENCE = 0.3          # 30% от максимума
+MIN_DISTANCE_HZ = 1.0
 MIN_STABILITY = 5.0
 
 COLORS = {
@@ -119,6 +115,81 @@ class PeakResult:
     x: AxisPeaks
     y: AxisPeaks
     z: AxisPeaks
+
+
+@dataclass
+class VisualizationAxis:
+    frequency: np.ndarray
+    median_psd: np.ndarray
+    mean_psd: np.ndarray
+    std_psd: np.ndarray
+    stability: np.ndarray
+    peak_frequencies: np.ndarray
+    peak_amplitudes: np.ndarray
+
+
+@dataclass
+class VisualizationData:
+    x: VisualizationAxis
+    y: VisualizationAxis
+    z: VisualizationAxis
+
+
+def build_visualization_data(
+    statistics: StatisticsResult,
+    peaks: PeakResult,
+    sessions: list[SessionResult],
+) -> VisualizationData:
+    if not sessions:
+        raise ValueError("At least one completed session is required")
+
+    session = sessions[0]
+    frequency = session.x.psd.freq
+
+    if not np.array_equal(frequency, session.y.psd.freq):
+        raise ValueError("PSD frequency axes do not match")
+    if not np.array_equal(frequency, session.z.psd.freq):
+        raise ValueError("PSD frequency axes do not match")
+
+    def build_axis(
+        axis_name: str,
+        axis_statistics: AxisStatistics,
+        axis_peaks: AxisPeaks,
+    ) -> VisualizationAxis:
+        expected_length = len(frequency)
+        arrays = {
+            "median": axis_statistics.median,
+            "mean": axis_statistics.mean,
+            "std": axis_statistics.std,
+            "stability": axis_statistics.stability,
+        }
+
+        for array_name, array in arrays.items():
+            if len(array) != expected_length:
+                raise ValueError(
+                    f"Frequency axis length does not match {axis_name} {array_name} PSD length"
+                )
+
+        if len(axis_peaks.frequencies) != len(axis_peaks.amplitudes):
+            raise ValueError(
+                f"Peak frequency and amplitude lengths do not match for {axis_name}"
+            )
+
+        return VisualizationAxis(
+            frequency=frequency,
+            median_psd=axis_statistics.median,
+            mean_psd=axis_statistics.mean,
+            std_psd=axis_statistics.std,
+            stability=axis_statistics.stability,
+            peak_frequencies=axis_peaks.frequencies,
+            peak_amplitudes=axis_peaks.amplitudes,
+        )
+
+    return VisualizationData(
+        x=build_axis("X", statistics.x, peaks.x),
+        y=build_axis("Y", statistics.y, peaks.y),
+        z=build_axis("Z", statistics.z, peaks.z),
+    )
 
 
 def find_psd_peaks(
@@ -483,10 +554,21 @@ print()
 
 statistics: StatisticsResult | None = None
 peaks: PeakResult | None = None
+visualization_data: VisualizationData | None = None
 
 if sessions:
     statistics = compute_statistics(sessions)
     peaks = find_psd_peaks(statistics, sessions)
+    visualization_data = build_visualization_data(
+        statistics,
+        peaks,
+        sessions,
+    )
+
+if not sessions:
+    print("No completed sessions available for analysis.")
+    ser.close()
+    raise SystemExit(0)
 
 # ==========================================================
 
@@ -755,6 +837,55 @@ fig.suptitle(
     f"FFT Δf={results['X']['fft'].resolution:.4f} Hz    "
     f"PSD Δf={results['X']['psd'].resolution:.4f} Hz"
 )
+
+
+# ==========================================================
+# Statistical PSD visualization
+# ==========================================================
+
+if visualization_data is None:
+    raise RuntimeError("Visualization data was not built")
+
+stat_fig, stat_axes = plt.subplots(
+    3,
+    1,
+    figsize=(14, 10),
+    sharex=True,
+)
+
+visualization_axes = {
+    "X": visualization_data.x,
+    "Y": visualization_data.y,
+    "Z": visualization_data.z,
+}
+
+for plot_axis, (axis_name, axis_data) in zip(
+    stat_axes,
+    visualization_axes.items(),
+):
+    plot_axis.semilogy(
+        axis_data.frequency,
+        axis_data.median_psd,
+        color=COLORS[axis_name],
+        label=f"{axis_name} Median PSD",
+    )
+    plot_axis.scatter(
+        axis_data.peak_frequencies,
+        axis_data.peak_amplitudes,
+        color=COLORS[axis_name],
+        marker="x",
+        label="Stable peaks",
+    )
+    plot_axis.set_title(f"Axis {axis_name} — Median PSD")
+    plot_axis.set_ylabel("PSD [g²/Hz]")
+    plot_axis.set_xlim(PSD_MIN_FREQ, PSD_MAX_FREQ)
+    plot_axis.grid(True, which="major", alpha=0.6)
+    plot_axis.grid(True, which="minor", alpha=0.2)
+    plot_axis.legend()
+
+stat_axes[-1].set_xlabel("Frequency [Hz]")
+stat_fig.suptitle("Statistical PSD and stable peaks")
+stat_fig.tight_layout(rect=(0, 0, 1, 0.96))
 
 
 plt.show()
