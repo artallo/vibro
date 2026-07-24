@@ -74,6 +74,24 @@ class PSDResult:
     peak_psd: float
 
 
+@dataclass
+class AxisResult:
+    fft: FFTResult
+    average_fft: AverageFFTResult
+    psd: PSDResult
+
+
+@dataclass
+class SessionResult:
+    number: int
+    fs: float
+    duration: float
+    samples: int
+    x: AxisResult
+    y: AxisResult
+    z: AxisResult
+
+
 # ==========================================================
 
 ser = serial.Serial(PORT, BAUD, timeout=2)
@@ -266,6 +284,45 @@ def compute_psd(signal, fs):
     )
 
 
+def process_session(session, session_fs, number):
+
+    if any(len(session[axis]) != PACKETS_PER_SESSION for axis in ("X", "Y", "Z")):
+        raise ValueError("Cannot process incomplete session")
+
+    if len(session_fs) != PACKETS_PER_SESSION:
+        raise ValueError("Cannot process incomplete session")
+
+    fs = np.mean(session_fs)
+
+    axis_results = {}
+
+    for axis in ("X", "Y", "Z"):
+
+        signal = np.concatenate(session[axis])
+
+        signal = signal - np.mean(signal)
+
+        axis_results[axis] = AxisResult(
+            fft=compute_fft(signal, fs),
+            average_fft=compute_average_fft(signal, fs),
+            psd=compute_psd(signal, fs)
+        )
+
+    samples = len(np.concatenate(session["X"]))
+
+    duration = samples / fs
+
+    return SessionResult(
+        number=number,
+        fs=fs,
+        duration=duration,
+        samples=samples,
+        x=axis_results["X"],
+        y=axis_results["Y"],
+        z=axis_results["Z"]
+    )
+
+
 # ==========================================================
 
 print()
@@ -298,6 +355,8 @@ while True:
         packet = read_packet()
     except KeyboardInterrupt:
         stop_requested = True
+        if len(current_session["X"]) == 0:
+            break
         continue
 
     if packet is None:
@@ -319,10 +378,12 @@ while True:
     session_packets = len(current_session["X"])
 
     if session_packets == PACKETS_PER_SESSION:
-        sessions.append({
-            "signals": current_session,
-            "fs": current_session_fs,
-        })
+        session_result = process_session(
+            current_session,
+            current_session_fs,
+            len(sessions) + 1,
+        )
+        sessions.append(session_result)
         current_session = {
             "X": [],
             "Y": [],
