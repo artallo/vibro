@@ -117,6 +117,81 @@ class PeakResult:
     z: AxisPeaks
 
 
+@dataclass
+class VisualizationAxis:
+    frequency: np.ndarray
+    median_psd: np.ndarray
+    mean_psd: np.ndarray
+    std_psd: np.ndarray
+    stability: np.ndarray
+    peak_frequencies: np.ndarray
+    peak_amplitudes: np.ndarray
+
+
+@dataclass
+class VisualizationData:
+    x: VisualizationAxis
+    y: VisualizationAxis
+    z: VisualizationAxis
+
+
+def build_visualization_data(
+    statistics: StatisticsResult,
+    peaks: PeakResult,
+    sessions: list[SessionResult],
+) -> VisualizationData:
+    if not sessions:
+        raise ValueError("At least one completed session is required")
+
+    session = sessions[0]
+    frequency = session.x.psd.freq
+
+    if not np.array_equal(frequency, session.y.psd.freq):
+        raise ValueError("PSD frequency axes do not match")
+    if not np.array_equal(frequency, session.z.psd.freq):
+        raise ValueError("PSD frequency axes do not match")
+
+    def build_axis(
+        axis_name: str,
+        axis_statistics: AxisStatistics,
+        axis_peaks: AxisPeaks,
+    ) -> VisualizationAxis:
+        expected_length = len(frequency)
+        arrays = {
+            "median": axis_statistics.median,
+            "mean": axis_statistics.mean,
+            "std": axis_statistics.std,
+            "stability": axis_statistics.stability,
+        }
+
+        for array_name, array in arrays.items():
+            if len(array) != expected_length:
+                raise ValueError(
+                    f"Frequency axis length does not match {axis_name} {array_name} PSD length"
+                )
+
+        if len(axis_peaks.frequencies) != len(axis_peaks.amplitudes):
+            raise ValueError(
+                f"Peak frequency and amplitude lengths do not match for {axis_name}"
+            )
+
+        return VisualizationAxis(
+            frequency=frequency,
+            median_psd=axis_statistics.median,
+            mean_psd=axis_statistics.mean,
+            std_psd=axis_statistics.std,
+            stability=axis_statistics.stability,
+            peak_frequencies=axis_peaks.frequencies,
+            peak_amplitudes=axis_peaks.amplitudes,
+        )
+
+    return VisualizationData(
+        x=build_axis("X", statistics.x, peaks.x),
+        y=build_axis("Y", statistics.y, peaks.y),
+        z=build_axis("Z", statistics.z, peaks.z),
+    )
+
+
 def find_psd_peaks(
     statistics: StatisticsResult,
     sessions: list[SessionResult],
@@ -479,10 +554,16 @@ print()
 
 statistics: StatisticsResult | None = None
 peaks: PeakResult | None = None
+visualization_data: VisualizationData | None = None
 
 if sessions:
     statistics = compute_statistics(sessions)
     peaks = find_psd_peaks(statistics, sessions)
+    visualization_data = build_visualization_data(
+        statistics,
+        peaks,
+        sessions,
+    )
 
 if not sessions:
     print("No completed sessions available for analysis.")
