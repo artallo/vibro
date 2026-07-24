@@ -452,6 +452,11 @@ while True:
 
 print()
 
+statistics: StatisticsResult | None = None
+
+if sessions:
+    statistics = compute_statistics(sessions)
+
 # ==========================================================
 
 # signal = np.concatenate(signals)
