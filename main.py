@@ -5,8 +5,6 @@ from typing import Any
 import serial
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.widgets import CheckButtons
-
 from scipy.signal import welch
 from scipy.signal import find_peaks
 
@@ -482,11 +480,6 @@ print("Recording...")
 print("Press Ctrl+C to stop.")
 print()
 
-signals = {
-    "X": [],
-    "Y": [],
-    "Z": [],
-}
 current_session = {
     "X": [],
     "Y": [],
@@ -512,10 +505,6 @@ while True:
 
     fs, x, y, z = packet
 
-    signals["X"].append(x)
-    signals["Y"].append(y)
-    signals["Z"].append(z)
-
     current_session["X"].append(x)
     current_session["Y"].append(y)
     current_session["Z"].append(z)
@@ -539,7 +528,7 @@ while True:
         }
         current_session_fs = []
     
-    packets = len(signals["X"])
+    packets = len(fs_list)
     print(
         f"\rPackets: {packets:4d}"
         f"   Duration: {packets * len(x) / np.mean(fs_list):6.1f} s"
@@ -571,275 +560,6 @@ if not sessions:
     raise SystemExit(0)
 
 # ==========================================================
-
-# signal = np.concatenate(signals)
-signals = {
-    axis: np.concatenate(data)
-    for axis, data in signals.items()
-}
-
-print()
-for axis, signal in signals.items():
-    print(
-        axis,
-        signal.min(),
-        signal.max(),
-        np.mean(signal)
-    )
-
-fs = np.mean(fs_list)
-
-duration = len(signals["X"]) / fs
-
-print()
-print("--------------------------------------")
-print(f"Samples   : {len(signals['X'])}")
-print(f"Duration  : {duration:.2f} s")
-print(f"Fs        : {fs:.3f} Hz")
-print("--------------------------------------")
-
-# ==========================================================
-# Предобработка
-# ==========================================================
-
-# signal = signal - np.mean(signal)
-
-# ==========================================================
-# FFT и PSD
-# ==========================================================
-
-'''fft = compute_fft(signal, fs)
-avg_freq, avg_amp = compute_average_fft(signal, fs)
-psd = compute_psd(signal, fs)'''
-
-results = {}
-
-for axis, signal in signals.items():
-
-    signal = signal - np.mean(signal)
-
-    fft = compute_fft(signal, fs)
-
-    avg = compute_average_fft(signal, fs)
-
-    psd = compute_psd(signal, fs)
-
-    results[axis] = {
-        "signal": signal,
-        "fft": fft,
-        "avg": avg,
-        "psd": psd,
-    }
-
-
-    
-print()
-print("Measurement summary")
-print("==================================================")
-print(f"Duration      : {duration:.2f} s")
-print(f"Sampling rate : {fs:.3f} Hz")
-
-for axis, result in results.items():
-
-    signal = result["signal"]
-    fft = result["fft"]
-    psd = result["psd"]
-
-    print()
-    print(f"Axis {axis}")
-    print("--------------------------------------------------")
-    print(f"Samples         : {len(signal)}")
-    print(f"FFT resolution  : {fft.resolution:.4f} Hz")
-    print(f"PSD resolution  : {psd.resolution:.4f} Hz")
-
-
-# ==========================================================
-# Графики
-# ==========================================================
-
-fig, ax = plt.subplots(4, 1, figsize=(14, 12))
-fig.subplots_adjust(
-    left=0.08,
-    right=0.84,
-    top=0.93,
-    bottom=0.06,
-    hspace=0.45
-)
-#check_ax = plt.axes([0.87, 0.80, 0.08, 0.14])
-check_ax = plt.axes([0.80, 0.78, 0.08, 0.13])
-
-check = CheckButtons(
-    check_ax,
-    ["X", "Y", "Z"],
-    [True, True, True]
-)
-for label, axis in zip(check.labels, ["X", "Y", "Z"]):
-    label.set_color(COLORS[axis])
-    label.set_fontweight("bold")
-check_ax.set_frame_on(False)
-check_ax.set_facecolor("none")
-for label in check.labels:
-    label.set_fontsize(11)
-
-lines = {
-    "time": {},
-    "fft": {},
-    "avg": {},
-    "psd": {},
-}
-
-
-# ----------------------------------------------------------
-# Временной сигнал
-# ----------------------------------------------------------
-
-'''t = np.arange(len(signal)) / fs
-
-ax[0].plot(t, signal, linewidth=1)
-
-ax[0].set_title("Acceleration")
-
-ax[0].set_xlabel("Time [s]")
-
-ax[0].set_ylabel("g")
-
-ax[0].grid(True)'''
-
-for axis, result in results.items():
-
-    signal = result["signal"]
-
-    t = np.arange(len(signal)) / fs
-
-    line, = ax[0].plot(
-        t,
-        signal,
-        color=COLORS[axis],
-        label=axis,
-        linewidth=1
-    )
-
-    lines["time"][axis] = line
-
-# ax[0].legend()
-
-# ----------------------------------------------------------
-# FFT
-# ----------------------------------------------------------
-
-'''mask_fft = fft.freq <= FFT_MAX_FREQ
-
-ax[1].plot(
-    fft.freq[mask_fft],
-    fft.amplitude[mask_fft]
-)'''
-
-for axis, result in results.items():
-
-    fft = result["fft"]
-
-    mask_fft = fft.freq <= FFT_MAX_FREQ
-
-    line, = ax[1].plot(
-        fft.freq[mask_fft],
-        fft.amplitude[mask_fft],
-        color=COLORS[axis],
-        label=axis
-    )
-
-    lines["fft"][axis] = line
-
-
-# ax[1].legend()
-ax[1].set_xlim(0, FFT_MAX_FREQ)
-ax[1].grid(True)
-ax[1].set_title("FFT")
-ax[1].set_xlabel("Frequency [Hz]")
-ax[1].set_ylabel("Amplitude [g]")
-
-# FFT_SMOOTH
-
-'''mask_avg = avg.freq <= FFT_MAX_FREQ
-
-ax[2].plot(
-    avg.freq[mask_avg],
-    avg.amplitude[mask_avg]
-)'''
-
-for axis, result in results.items():
-
-    avg = result["avg"]
-
-    mask_avg = avg.freq <= FFT_MAX_FREQ
-
-    line, = ax[2].plot(
-        avg.freq[mask_avg],
-        avg.amplitude[mask_avg],
-        color=COLORS[axis],
-        label=axis
-    )
-
-    lines["avg"][axis] = line
-
-ax[2].legend()
-
-ax[2].set_xlim(0, FFT_MAX_FREQ)
-ax[2].grid(True)
-ax[2].set_title("Average FFT")
-ax[2].set_xlabel("Frequency [Hz]")
-ax[2].set_ylabel("Amplitude [g]")
-
-# ----------------------------------------------------------
-# PSD
-# ----------------------------------------------------------
-
-#ax[3].semilogy(psd.freq, psd.psd)
-
-for axis, result in results.items():
-
-    psd = result["psd"]
-
-    line, = ax[3].semilogy(
-        psd.freq,
-        psd.psd,
-        color=COLORS[axis],
-        label=axis
-    )
-
-    lines["psd"][axis] = line
-
-
-ax[3].legend()
-ax[3].set_xlim(PSD_MIN_FREQ, PSD_MAX_FREQ)
-ax[3].grid(True, which="major", alpha=0.6)
-ax[3].grid(True, which="minor", alpha=0.2)
-ax[3].set_title("PSD (Welch)")
-ax[3].set_xlabel("Frequency [Hz]")
-ax[3].set_ylabel("PSD [g²/Hz]")
-
-# ----------------------------------------------------------
-
-def toggle_axis(label):
-
-    visible = not lines["time"][label].get_visible()
-
-    for group in lines.values():
-        group[label].set_visible(visible)
-
-
-    fig.canvas.draw_idle()
-
-check.on_clicked(toggle_axis)
-
-fig.suptitle(
-    f"Fs={fs:.2f} Hz    "
-    f"Duration={duration:.1f} s    "
-    f"FFT Δf={results['X']['fft'].resolution:.4f} Hz    "
-    f"PSD Δf={results['X']['psd'].resolution:.4f} Hz"
-)
-
-
-# ==========================================================
 # Statistical PSD visualization
 # ==========================================================
 
@@ -847,9 +567,9 @@ if visualization_data is None:
     raise RuntimeError("Visualization data was not built")
 
 stat_fig, stat_axes = plt.subplots(
-    3,
+    6,
     1,
-    figsize=(14, 10),
+    figsize=(14, 16),
     sharex=True,
 )
 
@@ -859,33 +579,63 @@ visualization_axes = {
     "Z": visualization_data.z,
 }
 
-for plot_axis, (axis_name, axis_data) in zip(
-    stat_axes,
-    visualization_axes.items(),
-):
-    plot_axis.semilogy(
+for axis_index, (axis_name, axis_data) in enumerate(visualization_axes.items()):
+    psd_axis = stat_axes[axis_index * 2]
+    stability_axis = stat_axes[axis_index * 2 + 1]
+
+    psd_axis.semilogy(
         axis_data.frequency,
         axis_data.median_psd,
         color=COLORS[axis_name],
         label=f"{axis_name} Median PSD",
     )
-    plot_axis.scatter(
+    psd_axis.scatter(
         axis_data.peak_frequencies,
         axis_data.peak_amplitudes,
         color=COLORS[axis_name],
         marker="x",
         label="Stable peaks",
     )
-    plot_axis.set_title(f"Axis {axis_name} — Median PSD")
-    plot_axis.set_ylabel("PSD [g²/Hz]")
-    plot_axis.set_xlim(PSD_MIN_FREQ, PSD_MAX_FREQ)
-    plot_axis.grid(True, which="major", alpha=0.6)
-    plot_axis.grid(True, which="minor", alpha=0.2)
-    plot_axis.legend()
+    psd_axis.set_title(f"Axis {axis_name} — Median PSD")
+    psd_axis.set_ylabel("PSD [g²/Hz]")
+    psd_axis.set_xlim(PSD_MIN_FREQ, PSD_MAX_FREQ)
+    psd_axis.grid(True, which="major", alpha=0.6)
+    psd_axis.grid(True, which="minor", alpha=0.2)
+    psd_axis.legend()
+
+    peak_stability = np.interp(
+        axis_data.peak_frequencies,
+        axis_data.frequency,
+        axis_data.stability,
+    )
+    stability_axis.plot(
+        axis_data.frequency,
+        axis_data.stability,
+        color=COLORS[axis_name],
+        label="Stability",
+    )
+    stability_axis.axhline(
+        MIN_STABILITY,
+        linestyle="--",
+        color="black",
+        label="Threshold",
+    )
+    stability_axis.scatter(
+        axis_data.peak_frequencies,
+        peak_stability,
+        color=COLORS[axis_name],
+        marker="x",
+        label="Stable peaks",
+    )
+    stability_axis.set_title(f"Axis {axis_name} — Stability")
+    stability_axis.set_ylabel("Mean / Std")
+    stability_axis.set_xlim(PSD_MIN_FREQ, PSD_MAX_FREQ)
+    stability_axis.grid(True, which="major", alpha=0.6)
+    stability_axis.legend()
 
 stat_axes[-1].set_xlabel("Frequency [Hz]")
-stat_fig.suptitle("Statistical PSD and stable peaks")
-stat_fig.tight_layout(rect=(0, 0, 1, 0.96))
+stat_fig.suptitle("Statistical PSD, stability, and stable peaks")
+stat_fig.tight_layout(rect=(0, 0, 1, 0.97))
 
 
 plt.show()
