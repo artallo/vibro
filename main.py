@@ -24,6 +24,7 @@ HEADER_SIZE = 10
 # Welch
 NPERSEG = 1024
 NOVERLAP = 512
+PACKETS_PER_SESSION = 8
 
 # Диапазоны анализа
 FFT_MIN_FREQ = 0.5
@@ -281,6 +282,8 @@ signals = {
     "Y": [],
     "Z": [],
 }
+sessions = []
+stop_requested = False
 fs_list = []
 
 try:
