@@ -18,16 +18,14 @@ BAUD = 115200
 # AXIS = "X"          # X / Y / Z
 
 MAGIC = b"VIB2"
-HEADER_SIZE = 10
 
 # Welch
 NPERSEG = 1024
 NOVERLAP = 512
 PACKETS_PER_SESSION = 8
+MIN_RECOMMENDED_SESSIONS = 5
 
 # Диапазоны анализа
-FFT_MIN_FREQ = 0.5
-FFT_MAX_FREQ = 20
 PSD_MIN_FREQ = 0.5
 PSD_MAX_FREQ = 20
 
@@ -197,7 +195,13 @@ def find_psd_peaks(
     if not sessions:
         raise ValueError("At least one completed session is required")
 
-    freq = sessions[0].x.psd.freq
+    session = sessions[0]
+    freq = session.x.psd.freq
+
+    if not np.array_equal(freq, session.y.psd.freq):
+        raise ValueError("PSD frequency axes do not match")
+    if not np.array_equal(freq, session.z.psd.freq):
+        raise ValueError("PSD frequency axes do not match")
 
     if len(freq) != len(statistics.x.median):
         raise ValueError("Frequency axis length does not match X median PSD length")
@@ -558,6 +562,12 @@ if not sessions:
     print("No completed sessions available for analysis.")
     ser.close()
     raise SystemExit(0)
+
+if len(sessions) < MIN_RECOMMENDED_SESSIONS:
+    print(
+        f"Warning: only {len(sessions)} completed session(s); "
+        f"at least {MIN_RECOMMENDED_SESSIONS} are recommended."
+    )
 
 # ==========================================================
 # Statistical PSD visualization
