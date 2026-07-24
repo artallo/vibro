@@ -282,6 +282,12 @@ signals = {
     "Y": [],
     "Z": [],
 }
+current_session = {
+    "X": [],
+    "Y": [],
+    "Z": [],
+}
+current_session_fs = []
 sessions = []
 stop_requested = False
 fs_list = []
@@ -303,7 +309,26 @@ while True:
     signals["Y"].append(y)
     signals["Z"].append(z)
 
+    current_session["X"].append(x)
+    current_session["Y"].append(y)
+    current_session["Z"].append(z)
+    current_session_fs.append(fs)
+
     fs_list.append(fs)
+
+    session_packets = len(current_session["X"])
+
+    if session_packets == PACKETS_PER_SESSION:
+        sessions.append({
+            "signals": current_session,
+            "fs": current_session_fs,
+        })
+        current_session = {
+            "X": [],
+            "Y": [],
+            "Z": [],
+        }
+        current_session_fs = []
     
     packets = len(signals["X"])
     print(
@@ -313,7 +338,7 @@ while True:
         end=""
     )
 
-    if stop_requested:
+    if stop_requested and session_packets == PACKETS_PER_SESSION:
         break
 
 print()
