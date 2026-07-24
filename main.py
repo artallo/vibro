@@ -399,6 +399,46 @@ while True:
         end=""
     )
 
+        continue
+
+    if packet is None:
+        continue
+
+    fs, x, y, z = packet
+
+    signals["X"].append(x)
+    signals["Y"].append(y)
+    signals["Z"].append(z)
+
+    current_session["X"].append(x)
+    current_session["Y"].append(y)
+    current_session["Z"].append(z)
+    current_session_fs.append(fs)
+
+    fs_list.append(fs)
+
+    session_packets = len(current_session["X"])
+
+    if session_packets == PACKETS_PER_SESSION:
+        sessions.append({
+            "signals": current_session,
+            "fs": current_session_fs,
+        })
+        current_session = {
+            "X": [],
+            "Y": [],
+            "Z": [],
+        }
+        current_session_fs = []
+    
+    packets = len(signals["X"])
+    print(
+        f"\rPackets: {packets:4d}"
+        f"   Duration: {packets * len(x) / np.mean(fs_list):6.1f} s"
+        f"   Fs={np.mean(fs_list):6.2f}",
+        end=""
+    )
+
     if stop_requested and session_packets == PACKETS_PER_SESSION:
         break
 
