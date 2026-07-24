@@ -839,4 +839,53 @@ fig.suptitle(
 )
 
 
+# ==========================================================
+# Statistical PSD visualization
+# ==========================================================
+
+if visualization_data is None:
+    raise RuntimeError("Visualization data was not built")
+
+stat_fig, stat_axes = plt.subplots(
+    3,
+    1,
+    figsize=(14, 10),
+    sharex=True,
+)
+
+visualization_axes = {
+    "X": visualization_data.x,
+    "Y": visualization_data.y,
+    "Z": visualization_data.z,
+}
+
+for plot_axis, (axis_name, axis_data) in zip(
+    stat_axes,
+    visualization_axes.items(),
+):
+    plot_axis.semilogy(
+        axis_data.frequency,
+        axis_data.median_psd,
+        color=COLORS[axis_name],
+        label=f"{axis_name} Median PSD",
+    )
+    plot_axis.scatter(
+        axis_data.peak_frequencies,
+        axis_data.peak_amplitudes,
+        color=COLORS[axis_name],
+        marker="x",
+        label="Stable peaks",
+    )
+    plot_axis.set_title(f"Axis {axis_name} — Median PSD")
+    plot_axis.set_ylabel("PSD [g²/Hz]")
+    plot_axis.set_xlim(PSD_MIN_FREQ, PSD_MAX_FREQ)
+    plot_axis.grid(True, which="major", alpha=0.6)
+    plot_axis.grid(True, which="minor", alpha=0.2)
+    plot_axis.legend()
+
+stat_axes[-1].set_xlabel("Frequency [Hz]")
+stat_fig.suptitle("Statistical PSD and stable peaks")
+stat_fig.tight_layout(rect=(0, 0, 1, 0.96))
+
+
 plt.show()
