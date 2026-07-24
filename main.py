@@ -286,34 +286,37 @@ sessions = []
 stop_requested = False
 fs_list = []
 
-try:
+while True:
 
-    while True:
-
+    try:
         packet = read_packet()
+    except KeyboardInterrupt:
+        stop_requested = True
+        continue
 
-        if packet is None:
-            continue
+    if packet is None:
+        continue
 
-        fs, x, y, z = packet
+    fs, x, y, z = packet
 
-        signals["X"].append(x)
-        signals["Y"].append(y)
-        signals["Z"].append(z)
+    signals["X"].append(x)
+    signals["Y"].append(y)
+    signals["Z"].append(z)
 
-        fs_list.append(fs)
-        
-        packets = len(signals["X"])
-        print(
-            f"\rPackets: {packets:4d}"
-            f"   Duration: {packets * len(x) / np.mean(fs_list):6.1f} s"
-            f"   Fs={np.mean(fs_list):6.2f}",
-            end=""
-        )
+    fs_list.append(fs)
+    
+    packets = len(signals["X"])
+    print(
+        f"\rPackets: {packets:4d}"
+        f"   Duration: {packets * len(x) / np.mean(fs_list):6.1f} s"
+        f"   Fs={np.mean(fs_list):6.2f}",
+        end=""
+    )
 
-except KeyboardInterrupt:
+    if stop_requested:
+        break
 
-    print()
+print()
 
 # ==========================================================
 
