@@ -767,6 +767,7 @@ stat_fig, stat_axes = plt.subplots(
     1,
     figsize=(14, 16),
     sharex=True,
+    constrained_layout=True,
 )
 
 visualization_axes = {
@@ -793,12 +794,12 @@ for axis_index, (axis_name, axis_data) in enumerate(visualization_axes.items()):
         marker="x",
         label="Stable peaks",
     )
-    psd_axis.set_title(f"Axis {axis_name} — Median PSD")
+    psd_axis.set_title(f"{axis_name} axis — Median PSD")
     psd_axis.set_ylabel("PSD [g²/Hz]")
     psd_axis.set_xlim(PSD_MIN_FREQ, PSD_MAX_FREQ)
-    psd_axis.grid(True, which="major", alpha=0.6)
-    psd_axis.grid(True, which="minor", alpha=0.2)
-    psd_axis.legend()
+    psd_axis.grid(True, alpha=0.25, linewidth=0.6)
+    if axis_index == 0:
+        psd_axis.legend()
 
     peak_stability = np.interp(
         axis_data.peak_frequencies,
@@ -824,15 +825,15 @@ for axis_index, (axis_name, axis_data) in enumerate(visualization_axes.items()):
         marker="x",
         label="Stable peaks",
     )
-    stability_axis.set_title(f"Axis {axis_name} — Stability")
+    stability_axis.set_title(f"{axis_name} axis — Stability")
     stability_axis.set_ylabel("Mean / Std")
     stability_axis.set_xlim(PSD_MIN_FREQ, PSD_MAX_FREQ)
-    stability_axis.grid(True, which="major", alpha=0.6)
-    stability_axis.legend()
+    stability_axis.grid(True, alpha=0.25, linewidth=0.6)
+    if axis_index == 0:
+        stability_axis.legend()
 
-stat_axes[-1].set_xlabel("Frequency [Hz]")
-stat_fig.suptitle("Statistical PSD, stability, and stable peaks")
-stat_fig.tight_layout(rect=(0, 0, 1, 0.97))
+stat_axes[-1].set_xlabel("Frequency, Hz")
+stat_fig.suptitle("Statistical vibration analysis")
 
 
 plt.show()
