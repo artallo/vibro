@@ -28,9 +28,6 @@ MIN_RECOMMENDED_SESSIONS = 5
 # Диапазоны анализа
 PSD_MIN_FREQ = 0.5
 PSD_MAX_FREQ = 20
-ANALYSIS_BANDS = [
-    ("Full", PSD_MIN_FREQ, PSD_MAX_FREQ),
-]
 
 # ----------------------------------------------------------
 # Peak detection
@@ -39,6 +36,17 @@ ANALYSIS_BANDS = [
 PROMINENCE = 0.3          # 30% от максимума
 MIN_DISTANCE_HZ = 1.0
 MIN_STABILITY = 5.0
+
+ANALYSIS_BANDS = [
+    (
+        "Full",
+        PSD_MIN_FREQ,
+        PSD_MAX_FREQ,
+        PROMINENCE,
+        MIN_DISTANCE_HZ,
+        MIN_STABILITY,
+    ),
+]
 
 COLORS = {
     "X": "tab:blue",
@@ -54,6 +62,9 @@ class AnalysisBand:
     name: str
     min_frequency: float
     max_frequency: float
+    prominence: float
+    min_distance_hz: float
+    min_stability: float
 
 
 def build_analysis_bands() -> list[AnalysisBand]:
@@ -62,12 +73,20 @@ def build_analysis_bands() -> list[AnalysisBand]:
 
     bands = []
     for entry in ANALYSIS_BANDS:
-        if not isinstance(entry, (tuple, list)) or len(entry) != 3:
+        if not isinstance(entry, (tuple, list)) or len(entry) != 6:
             raise ValueError(
-                "Each analysis band must contain name, min_frequency, and max_frequency"
+                "Each analysis band must contain name, min_frequency, max_frequency, "
+                "prominence, min_distance_hz, and min_stability"
             )
 
-        name, min_frequency, max_frequency = entry
+        (
+            name,
+            min_frequency,
+            max_frequency,
+            prominence,
+            min_distance_hz,
+            min_stability,
+        ) = entry
         if not isinstance(name, str) or not name.strip():
             raise ValueError("Analysis band name must be a non-empty string")
 
@@ -88,11 +107,32 @@ def build_analysis_bands() -> list[AnalysisBand]:
                 "Analysis band maximum frequency must not exceed PSD_MAX_FREQ"
             )
 
+        try:
+            prominence = float(prominence)
+            min_distance_hz = float(min_distance_hz)
+            min_stability = float(min_stability)
+        except (TypeError, ValueError):
+            raise ValueError(
+                "Analysis band detection parameters must be numeric"
+            ) from None
+
+        if prominence < 0:
+            raise ValueError("Analysis band prominence must be non-negative")
+        if min_distance_hz <= 0:
+            raise ValueError("Analysis band minimum distance must be positive")
+        if min_stability < 0:
+            raise ValueError(
+                "Analysis band minimum stability must be non-negative"
+            )
+
         bands.append(
             AnalysisBand(
                 name=name.strip(),
                 min_frequency=min_frequency,
                 max_frequency=max_frequency,
+                prominence=prominence,
+                min_distance_hz=min_distance_hz,
+                min_stability=min_stability,
             )
         )
 
@@ -293,7 +333,6 @@ def _find_axis_peaks_by_bands(
         raise ValueError("Stability length does not match median PSD length")
 
     resolution = freq[1] - freq[0]
-    distance = max(int(MIN_DISTANCE_HZ / resolution), 1)
     peaks_by_index = {}
     property_dtypes = {}
 
@@ -308,10 +347,10 @@ def _find_axis_peaks_by_bands(
 
         band_median = median[band_mask]
         band_stability = stability[band_mask]
-        prominence = np.max(band_median) * PROMINENCE
+        distance = max(int(band.min_distance_hz / resolution), 1)
         local_peak_indices, properties = find_peaks(
             band_median,
-            prominence=prominence,
+            prominence=band.prominence,
             distance=distance,
         )
         property_dtypes.update(
@@ -319,7 +358,7 @@ def _find_axis_peaks_by_bands(
         )
 
         stable_peak_mask = (
-            band_stability[local_peak_indices] >= MIN_STABILITY
+            band_stability[local_peak_indices] >= band.min_stability
         )
         local_peak_indices = local_peak_indices[stable_peak_mask]
         properties = {
@@ -329,9 +368,6 @@ def _find_axis_peaks_by_bands(
         global_peak_indices = global_indices[local_peak_indices]
 
         for position, global_peak_index in enumerate(global_peak_indices):
-            if global_peak_index in peaks_by_index:
-                continue
-
             peak_properties = {
                 name: values[position]
                 for name, values in properties.items()
@@ -339,7 +375,14 @@ def _find_axis_peaks_by_bands(
             for name in ("left_bases", "right_bases"):
                 if name in peak_properties:
                     peak_properties[name] = global_indices[peak_properties[name]]
-            peaks_by_index[global_peak_index] = peak_properties
+
+            existing_properties = peaks_by_index.get(global_peak_index)
+            if (
+                existing_properties is None
+                or peak_properties["prominences"]
+                > existing_properties["prominences"]
+            ):
+                peaks_by_index[global_peak_index] = peak_properties
 
     peak_indices = np.array(sorted(peaks_by_index), dtype=int)
     merged_properties = {
