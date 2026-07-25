@@ -184,6 +184,38 @@ class VisualizationData:
     z: VisualizationAxis
 
 
+def draw_analysis_bands(
+    ax,
+    analysis_bands: list[AnalysisBand],
+) -> None:
+    boundaries = sorted({
+        boundary
+        for band in analysis_bands
+        for boundary in (band.min_frequency, band.max_frequency)
+    })
+
+    for boundary in boundaries:
+        ax.axvline(
+            boundary,
+            linestyle="--",
+            linewidth=0.8,
+            alpha=0.5,
+        )
+
+    for band in analysis_bands:
+        label_frequency = (band.min_frequency + band.max_frequency) / 2
+        ax.text(
+            label_frequency,
+            0.97,
+            band.name,
+            transform=ax.get_xaxis_transform(),
+            ha="center",
+            va="top",
+            fontsize="small",
+            alpha=0.7,
+        )
+
+
 def build_visualization_data(
     statistics: StatisticsResult,
     peaks: PeakResult,
@@ -704,6 +736,7 @@ for axis_index, (axis_name, axis_data) in enumerate(visualization_axes.items()):
     psd_axis = stat_axes[axis_index * 2]
     stability_axis = stat_axes[axis_index * 2 + 1]
 
+    draw_analysis_bands(psd_axis, analysis_bands)
     psd_axis.semilogy(
         axis_data.frequency,
         axis_data.median_psd,
