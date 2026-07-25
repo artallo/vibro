@@ -28,6 +28,9 @@ MIN_RECOMMENDED_SESSIONS = 5
 # Диапазоны анализа
 PSD_MIN_FREQ = 0.5
 PSD_MAX_FREQ = 20
+ANALYSIS_BANDS = [
+    ("Full", PSD_MIN_FREQ, PSD_MAX_FREQ),
+]
 
 # ----------------------------------------------------------
 # Peak detection
@@ -44,6 +47,56 @@ COLORS = {
 }
 
 # ==========================================================
+
+
+@dataclass
+class AnalysisBand:
+    name: str
+    min_frequency: float
+    max_frequency: float
+
+
+def build_analysis_bands() -> list[AnalysisBand]:
+    if not ANALYSIS_BANDS:
+        raise ValueError("At least one analysis band is required")
+
+    bands = []
+    for entry in ANALYSIS_BANDS:
+        if not isinstance(entry, (tuple, list)) or len(entry) != 3:
+            raise ValueError(
+                "Each analysis band must contain name, min_frequency, and max_frequency"
+            )
+
+        name, min_frequency, max_frequency = entry
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("Analysis band name must be a non-empty string")
+
+        try:
+            min_frequency = float(min_frequency)
+            max_frequency = float(max_frequency)
+        except (TypeError, ValueError):
+            raise ValueError("Analysis band frequencies must be numeric") from None
+
+        if min_frequency < 0:
+            raise ValueError("Analysis band minimum frequency must be non-negative")
+        if min_frequency >= max_frequency:
+            raise ValueError(
+                "Analysis band minimum frequency must be less than maximum frequency"
+            )
+        if max_frequency > PSD_MAX_FREQ:
+            raise ValueError(
+                "Analysis band maximum frequency must not exceed PSD_MAX_FREQ"
+            )
+
+        bands.append(
+            AnalysisBand(
+                name=name.strip(),
+                min_frequency=min_frequency,
+                max_frequency=max_frequency,
+            )
+        )
+
+    return bands
 
 
 @dataclass
@@ -292,6 +345,8 @@ def compute_statistics(
 
 
 # ==========================================================
+
+analysis_bands = build_analysis_bands()
 
 ser = serial.Serial(PORT, BAUD, timeout=2)
 
