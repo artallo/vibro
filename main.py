@@ -241,12 +241,99 @@ def build_visualization_data(
     )
 
 
+def _find_axis_peaks_by_bands(
+    freq: np.ndarray,
+    median: np.ndarray,
+    stability: np.ndarray,
+    analysis_bands: list[AnalysisBand],
+) -> AxisPeaks:
+    if len(median) == 0:
+        return AxisPeaks(
+            frequencies=np.array([]),
+            amplitudes=np.array([]),
+            properties={}
+        )
+
+    if len(freq) < 2:
+        raise ValueError("Frequency axis must contain at least two values")
+
+    if len(stability) != len(median):
+        raise ValueError("Stability length does not match median PSD length")
+
+    resolution = freq[1] - freq[0]
+    distance = max(int(MIN_DISTANCE_HZ / resolution), 1)
+    peaks_by_index = {}
+    property_dtypes = {}
+
+    for band in analysis_bands:
+        band_mask = (
+            (freq >= band.min_frequency)
+            & (freq <= band.max_frequency)
+        )
+        global_indices = np.flatnonzero(band_mask)
+        if len(global_indices) < 2:
+            continue
+
+        band_median = median[band_mask]
+        band_stability = stability[band_mask]
+        prominence = np.max(band_median) * PROMINENCE
+        local_peak_indices, properties = find_peaks(
+            band_median,
+            prominence=prominence,
+            distance=distance,
+        )
+        property_dtypes.update(
+            (name, values.dtype) for name, values in properties.items()
+        )
+
+        stable_peak_mask = (
+            band_stability[local_peak_indices] >= MIN_STABILITY
+        )
+        local_peak_indices = local_peak_indices[stable_peak_mask]
+        properties = {
+            name: values[stable_peak_mask]
+            for name, values in properties.items()
+        }
+        global_peak_indices = global_indices[local_peak_indices]
+
+        for position, global_peak_index in enumerate(global_peak_indices):
+            if global_peak_index in peaks_by_index:
+                continue
+
+            peak_properties = {
+                name: values[position]
+                for name, values in properties.items()
+            }
+            for name in ("left_bases", "right_bases"):
+                if name in peak_properties:
+                    peak_properties[name] = global_indices[peak_properties[name]]
+            peaks_by_index[global_peak_index] = peak_properties
+
+    peak_indices = np.array(sorted(peaks_by_index), dtype=int)
+    merged_properties = {
+        name: np.asarray([
+            peaks_by_index[peak_index][name]
+            for peak_index in peak_indices
+        ], dtype=dtype)
+        for name, dtype in property_dtypes.items()
+    }
+
+    return AxisPeaks(
+        frequencies=freq[peak_indices],
+        amplitudes=median[peak_indices],
+        properties=merged_properties,
+    )
+
+
 def find_psd_peaks(
     statistics: StatisticsResult,
     sessions: list[SessionResult],
+    analysis_bands: list[AnalysisBand],
 ) -> PeakResult:
     if not sessions:
         raise ValueError("At least one completed session is required")
+    if not analysis_bands:
+        raise ValueError("At least one analysis band is required")
 
     session = sessions[0]
     freq = session.x.psd.freq
@@ -263,51 +350,16 @@ def find_psd_peaks(
     if len(freq) != len(statistics.z.median):
         raise ValueError("Frequency axis length does not match Z median PSD length")
 
-    def detect_axis_peaks(
-        median_psd: np.ndarray,
-        stability: np.ndarray,
-        freq: np.ndarray,
-    ) -> AxisPeaks:
-        if len(median_psd) == 0:
-            return AxisPeaks(
-                frequencies=np.array([]),
-                amplitudes=np.array([]),
-                properties={}
-            )
-
-        if len(freq) < 2:
-            raise ValueError("Frequency axis must contain at least two values")
-
-        if len(stability) != len(median_psd):
-            raise ValueError("Stability length does not match median PSD length")
-
-        prominence = np.max(median_psd) * PROMINENCE
-        resolution = freq[1] - freq[0]
-        distance = max(int(MIN_DISTANCE_HZ / resolution), 1)
-
-        peak_indices, properties = find_peaks(
-            median_psd,
-            prominence=prominence,
-            distance=distance,
-        )
-
-        stable_peak_mask = stability[peak_indices] >= MIN_STABILITY
-        peak_indices = peak_indices[stable_peak_mask]
-        properties = {
-            name: values[stable_peak_mask]
-            for name, values in properties.items()
-        }
-
-        return AxisPeaks(
-            frequencies=freq[peak_indices],
-            amplitudes=median_psd[peak_indices],
-            properties=properties,
-        )
-
     return PeakResult(
-        x=detect_axis_peaks(statistics.x.median, statistics.x.stability, freq),
-        y=detect_axis_peaks(statistics.y.median, statistics.y.stability, freq),
-        z=detect_axis_peaks(statistics.z.median, statistics.z.stability, freq),
+        x=_find_axis_peaks_by_bands(
+            freq, statistics.x.median, statistics.x.stability, analysis_bands
+        ),
+        y=_find_axis_peaks_by_bands(
+            freq, statistics.y.median, statistics.y.stability, analysis_bands
+        ),
+        z=_find_axis_peaks_by_bands(
+            freq, statistics.z.median, statistics.z.stability, analysis_bands
+        ),
     )
 
 
@@ -606,7 +658,11 @@ visualization_data: VisualizationData | None = None
 
 if sessions:
     statistics = compute_statistics(sessions)
-    peaks = find_psd_peaks(statistics, sessions)
+    peaks = find_psd_peaks(
+        statistics,
+        sessions,
+        analysis_bands,
+    )
     visualization_data = build_visualization_data(
         statistics,
         peaks,
