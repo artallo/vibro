@@ -998,4 +998,3 @@ stat_fig.suptitle("Statistical vibration analysis")
 
 
 plt.show()
-
