@@ -341,6 +341,15 @@ def _find_axis_peaks_by_bands(
     stability: np.ndarray,
     analysis_bands: list[AnalysisBand],
 ) -> AxisPeaks:
+    if len(median) != len(freq):
+        raise ValueError("Frequency axis length does not match median PSD length")
+
+    if not np.all(np.isfinite(median)):
+        raise ValueError("Median PSD must contain only finite values")
+
+    if np.any(median < 0):
+        raise ValueError("Median PSD must not contain negative values")
+
     if len(median) == 0:
         return AxisPeaks(
             frequencies=np.array([]),
@@ -353,6 +362,12 @@ def _find_axis_peaks_by_bands(
 
     if len(stability) != len(median):
         raise ValueError("Stability length does not match median PSD length")
+
+    safe_median = np.maximum(
+        median,
+        np.finfo(float).tiny,
+    )
+    median_db = 10.0 * np.log10(safe_median)
 
     resolution = freq[1] - freq[0]
     peaks_by_index = {}
@@ -367,11 +382,11 @@ def _find_axis_peaks_by_bands(
         if len(global_indices) < 2:
             continue
 
-        band_median = median[band_mask]
+        band_median_db = median_db[band_mask]
         band_stability = stability[band_mask]
         distance = max(int(band.min_distance_hz / resolution), 1)
         local_peak_indices, properties = find_peaks(
-            band_median,
+            band_median_db,
             prominence=band.prominence_db,
             distance=distance,
         )
