@@ -26,4 +26,3 @@ max_frequency = 50.0
 prominence_db = 6.0
 min_distance_hz = 1.0
 min_stability = 5.0
-
