@@ -1,5 +1,7 @@
 import struct
+import tomllib
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import serial
@@ -12,44 +14,11 @@ from scipy.signal import find_peaks
 # Настройки
 # ==========================================================
 
-PORT = "COM8"
-BAUD = 115200
+CONFIG_PATH = Path(__file__).with_name("config.toml")
 
 # AXIS = "X"          # X / Y / Z
 
 MAGIC = b"VIB2"
-
-# Welch
-NPERSEG = 1024
-NOVERLAP = 512
-PACKETS_PER_SESSION = 8
-MIN_RECOMMENDED_SESSIONS = 5
-
-# Диапазоны анализа
-PSD_MIN_FREQ = 0.5
-PSD_MAX_FREQ = 20
-
-# ----------------------------------------------------------
-# Peak detection
-# ----------------------------------------------------------
-
-# Minimum local PSD peak prominence in decibels.
-# 6 dB means the peak PSD is approximately four times
-# its local prominence base in linear power units.
-PROMINENCE_DB = 6.0
-MIN_DISTANCE_HZ = 1.0
-MIN_STABILITY = 5.0
-
-ANALYSIS_BANDS = [
-    (
-        "Full",
-        PSD_MIN_FREQ,
-        PSD_MAX_FREQ,
-        PROMINENCE_DB,
-        MIN_DISTANCE_HZ,
-        MIN_STABILITY,
-    ),
-]
 
 COLORS = {
     "X": "tab:blue",
@@ -60,7 +29,7 @@ COLORS = {
 # ==========================================================
 
 
-@dataclass
+@dataclass(frozen=True)
 class AnalysisBand:
     name: str
     min_frequency: float
@@ -70,78 +39,172 @@ class AnalysisBand:
     min_stability: float
 
 
-def build_analysis_bands() -> list[AnalysisBand]:
-    if not ANALYSIS_BANDS:
+@dataclass(frozen=True)
+class SerialConfig:
+    port: str
+    baud: int
+    timeout_seconds: float
+
+
+@dataclass(frozen=True)
+class SessionConfig:
+    packets_per_session: int
+    min_recommended_sessions: int
+
+
+@dataclass(frozen=True)
+class WelchConfig:
+    nperseg: int
+    noverlap: int
+
+
+@dataclass(frozen=True)
+class ApplicationConfig:
+    serial: SerialConfig
+    session: SessionConfig
+    welch: WelchConfig
+    analysis_bands: list[AnalysisBand]
+
+
+def validate_config(config: ApplicationConfig) -> None:
+    def require_positive_integer(value: Any, name: str) -> None:
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ValueError(f"{name} must be a positive integer")
+
+    def require_non_negative_integer(value: Any, name: str) -> None:
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(f"{name} must be a non-negative integer")
+
+    def require_finite_number(value: Any, name: str) -> None:
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not np.isfinite(value)
+        ):
+            raise ValueError(f"{name} must be a finite number")
+
+    if not isinstance(config.serial.port, str) or not config.serial.port.strip():
+        raise ValueError("Serial port must be a non-empty string")
+    require_positive_integer(config.serial.baud, "Serial baud")
+    require_finite_number(
+        config.serial.timeout_seconds,
+        "Serial timeout_seconds",
+    )
+    if config.serial.timeout_seconds < 0:
+        raise ValueError("Serial timeout_seconds must be non-negative")
+
+    require_positive_integer(
+        config.session.packets_per_session,
+        "Session packets_per_session",
+    )
+    require_positive_integer(
+        config.session.min_recommended_sessions,
+        "Session min_recommended_sessions",
+    )
+
+    require_positive_integer(config.welch.nperseg, "Welch nperseg")
+    require_non_negative_integer(config.welch.noverlap, "Welch noverlap")
+    if config.welch.noverlap >= config.welch.nperseg:
+        raise ValueError("Welch noverlap must be less than nperseg")
+
+    if not isinstance(config.analysis_bands, list) or not config.analysis_bands:
         raise ValueError("At least one analysis band is required")
 
-    bands = []
-    for entry in ANALYSIS_BANDS:
-        if not isinstance(entry, (tuple, list)) or len(entry) != 6:
-            raise ValueError(
-                "Each analysis band must contain name, min_frequency, max_frequency, "
-                "prominence_db, min_distance_hz, and min_stability"
-            )
-
-        (
-            name,
-            min_frequency,
-            max_frequency,
-            prominence_db,
-            min_distance_hz,
-            min_stability,
-        ) = entry
-        if not isinstance(name, str) or not name.strip():
+    for band in config.analysis_bands:
+        if not isinstance(band.name, str) or not band.name.strip():
             raise ValueError("Analysis band name must be a non-empty string")
 
-        try:
-            min_frequency = float(min_frequency)
-            max_frequency = float(max_frequency)
-        except (TypeError, ValueError):
-            raise ValueError("Analysis band frequencies must be numeric") from None
-
-        if min_frequency < 0:
-            raise ValueError("Analysis band minimum frequency must be non-negative")
-        if min_frequency >= max_frequency:
-            raise ValueError(
-                "Analysis band minimum frequency must be less than maximum frequency"
-            )
-        if max_frequency > PSD_MAX_FREQ:
-            raise ValueError(
-                "Analysis band maximum frequency must not exceed PSD_MAX_FREQ"
-            )
-
-        try:
-            prominence_db = float(prominence_db)
-            min_distance_hz = float(min_distance_hz)
-            min_stability = float(min_stability)
-        except (TypeError, ValueError):
-            raise ValueError(
-                "Analysis band detection parameters must be numeric"
-            ) from None
-
-        if prominence_db < 0:
-            raise ValueError(
-                "Analysis band prominence_db must be non-negative"
-            )
-        if min_distance_hz < 0:
-            raise ValueError("Analysis band minimum distance must be non-negative")
-        if min_stability < 0:
-            raise ValueError(
-                "Analysis band minimum stability must be non-negative"
-            )
-
-        bands.append(
-            AnalysisBand(
-                name=name.strip(),
-                min_frequency=min_frequency,
-                max_frequency=max_frequency,
-                prominence_db=prominence_db,
-                min_distance_hz=min_distance_hz,
-                min_stability=min_stability,
-            )
+        band_name = f"Analysis band {band.name!r}"
+        require_finite_number(
+            band.min_frequency,
+            f"{band_name} minimum frequency",
+        )
+        require_finite_number(
+            band.max_frequency,
+            f"{band_name} maximum frequency",
+        )
+        require_finite_number(
+            band.prominence_db,
+            f"{band_name} prominence_db",
+        )
+        require_finite_number(
+            band.min_distance_hz,
+            f"{band_name} min_distance_hz",
+        )
+        require_finite_number(
+            band.min_stability,
+            f"{band_name} min_stability",
         )
 
-    return bands
+        if band.min_frequency < 0:
+            raise ValueError(
+                f"{band_name} minimum frequency must be non-negative"
+            )
+        if band.max_frequency <= band.min_frequency:
+            raise ValueError(
+                f"{band_name} maximum frequency "
+                "must be greater than minimum frequency"
+            )
+        if band.prominence_db < 0:
+            raise ValueError(f"{band_name} prominence_db must be non-negative")
+        if band.min_distance_hz < 0:
+            raise ValueError(
+                f"{band_name} min_distance_hz must be non-negative"
+            )
+        if band.min_stability < 0:
+            raise ValueError(
+                f"{band_name} min_stability must be non-negative"
+            )
+
+
+def load_config(path: Path) -> ApplicationConfig:
+    with path.open("rb") as file:
+        raw_config = tomllib.load(file)
+
+    serial_data = raw_config["serial"]
+    session_data = raw_config["session"]
+    welch_data = raw_config["welch"]
+    band_entries = raw_config["analysis"]["bands"]
+
+    analysis_bands = [
+        AnalysisBand(
+            name=entry["name"],
+            min_frequency=entry["min_frequency"],
+            max_frequency=entry["max_frequency"],
+            prominence_db=entry["prominence_db"],
+            min_distance_hz=entry["min_distance_hz"],
+            min_stability=entry["min_stability"],
+        )
+        for entry in band_entries
+    ]
+
+    config = ApplicationConfig(
+        serial=SerialConfig(
+            port=serial_data["port"],
+            baud=serial_data["baud"],
+            timeout_seconds=serial_data["timeout_seconds"],
+        ),
+        session=SessionConfig(
+            packets_per_session=session_data["packets_per_session"],
+            min_recommended_sessions=session_data["min_recommended_sessions"],
+        ),
+        welch=WelchConfig(
+            nperseg=welch_data["nperseg"],
+            noverlap=welch_data["noverlap"],
+        ),
+        analysis_bands=analysis_bands,
+    )
+    validate_config(config)
+    return config
+
+
+def get_analysis_frequency_limits(
+    analysis_bands: list[AnalysisBand],
+) -> tuple[float, float]:
+    return (
+        min(band.min_frequency for band in analysis_bands),
+        max(band.max_frequency for band in analysis_bands),
+    )
 
 
 @dataclass
@@ -534,11 +597,27 @@ def compute_statistics(
 
 # ==========================================================
 
-analysis_bands = build_analysis_bands()
+try:
+    config = load_config(CONFIG_PATH)
+except FileNotFoundError:
+    raise SystemExit(f"Configuration file not found: {CONFIG_PATH}")
+except tomllib.TOMLDecodeError as error:
+    raise SystemExit(f"Invalid TOML configuration: {error}")
+except (KeyError, TypeError, ValueError) as error:
+    raise SystemExit(f"Invalid configuration: {error}")
 
-ser = serial.Serial(PORT, BAUD, timeout=2)
+analysis_bands = config.analysis_bands
+analysis_min_frequency, analysis_max_frequency = (
+    get_analysis_frequency_limits(analysis_bands)
+)
 
-print("Connected:", PORT)
+ser = serial.Serial(
+    config.serial.port,
+    config.serial.baud,
+    timeout=config.serial.timeout_seconds,
+)
+
+print("Connected:", config.serial.port)
 
 
 # ==========================================================
@@ -620,8 +699,8 @@ def compute_fft(signal, fs):
 
 def compute_average_fft(signal, fs):
 
-    nperseg = min(NPERSEG, len(signal))
-    noverlap = min(NOVERLAP, nperseg // 2)
+    nperseg = min(config.welch.nperseg, len(signal))
+    noverlap = min(config.welch.noverlap, nperseg // 2)
     step = nperseg - noverlap
 
     window = np.hanning(nperseg)
@@ -659,17 +738,20 @@ def compute_psd(signal, fs):
         signal,
         fs=fs,
         window="hann",
-        nperseg=min(NPERSEG, len(signal)),
-        noverlap=min(NOVERLAP, len(signal)//2),
+        nperseg=min(config.welch.nperseg, len(signal)),
+        noverlap=min(config.welch.noverlap, len(signal)//2),
         scaling="density"
     )
 
-    mask = (freq >= PSD_MIN_FREQ) & (freq <= PSD_MAX_FREQ)
+    mask = (
+        (freq >= analysis_min_frequency)
+        & (freq <= analysis_max_frequency)
+    )
 
     freq = freq[mask]
     psd = psd[mask]
 
-    resolution = fs / min(NPERSEG, len(signal))
+    resolution = fs / min(config.welch.nperseg, len(signal))
 
     return PSDResult(
         freq=freq,
@@ -679,10 +761,13 @@ def compute_psd(signal, fs):
 
 def process_session(session, session_fs, number):
 
-    if any(len(session[axis]) != PACKETS_PER_SESSION for axis in ("X", "Y", "Z")):
+    if any(
+        len(session[axis]) != config.session.packets_per_session
+        for axis in ("X", "Y", "Z")
+    ):
         raise ValueError("Cannot process incomplete session")
 
-    if len(session_fs) != PACKETS_PER_SESSION:
+    if len(session_fs) != config.session.packets_per_session:
         raise ValueError("Cannot process incomplete session")
 
     fs = np.mean(session_fs)
@@ -761,7 +846,7 @@ while True:
 
     session_packets = len(current_session["X"])
 
-    if session_packets == PACKETS_PER_SESSION:
+    if session_packets == config.session.packets_per_session:
         session_result = process_session(
             current_session,
             current_session_fs,
@@ -783,7 +868,10 @@ while True:
         end=""
     )
 
-    if stop_requested and session_packets == PACKETS_PER_SESSION:
+    if (
+        stop_requested
+        and session_packets == config.session.packets_per_session
+    ):
         break
 
 print()
@@ -810,10 +898,10 @@ if not sessions:
     ser.close()
     raise SystemExit(0)
 
-if len(sessions) < MIN_RECOMMENDED_SESSIONS:
+if len(sessions) < config.session.min_recommended_sessions:
     print(
         f"Warning: only {len(sessions)} completed session(s); "
-        f"at least {MIN_RECOMMENDED_SESSIONS} are recommended."
+        f"at least {config.session.min_recommended_sessions} are recommended."
     )
 
 # ==========================================================
@@ -862,7 +950,7 @@ for axis_index, (axis_name, axis_data) in enumerate(visualization_axes.items()):
     )
     psd_axis.set_title(f"{axis_name} axis — Median PSD")
     psd_axis.set_ylabel("PSD [g²/Hz]")
-    psd_axis.set_xlim(PSD_MIN_FREQ, PSD_MAX_FREQ)
+    psd_axis.set_xlim(analysis_min_frequency, analysis_max_frequency)
     psd_axis.grid(True, alpha=0.25, linewidth=0.6)
     if axis_index == 0:
         psd_axis.legend()
@@ -878,13 +966,16 @@ for axis_index, (axis_name, axis_data) in enumerate(visualization_axes.items()):
         color=COLORS[axis_name],
         label="Stability",
     )
-    stability_axis.axhline(
-        MIN_STABILITY,
-        linestyle="--",
-        linewidth=1.0,
-        alpha=0.6,
-        label="Minimum stability",
-    )
+    for band_index, band in enumerate(analysis_bands):
+        stability_axis.hlines(
+            band.min_stability,
+            band.min_frequency,
+            band.max_frequency,
+            linestyle="--",
+            linewidth=1.0,
+            alpha=0.6,
+            label="Minimum stability" if band_index == 0 else None,
+        )
     stability_axis.scatter(
         axis_data.peak_frequencies,
         peak_stability,
@@ -894,7 +985,10 @@ for axis_index, (axis_name, axis_data) in enumerate(visualization_axes.items()):
     )
     stability_axis.set_title(f"{axis_name} axis — Stability")
     stability_axis.set_ylabel("Mean / Std")
-    stability_axis.set_xlim(PSD_MIN_FREQ, PSD_MAX_FREQ)
+    stability_axis.set_xlim(
+        analysis_min_frequency,
+        analysis_max_frequency,
+    )
     stability_axis.grid(True, alpha=0.25, linewidth=0.6)
     if axis_index == 0:
         stability_axis.legend()

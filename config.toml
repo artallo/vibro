@@ -1,0 +1,28 @@
+[serial]
+port = "COM8"
+baud = 115200
+timeout_seconds = 2.0
+
+[session]
+packets_per_session = 8
+min_recommended_sessions = 5
+
+[welch]
+nperseg = 1024
+noverlap = 512
+
+[[analysis.bands]]
+name = "Low frequency"
+min_frequency = 0.5
+max_frequency = 10.0
+prominence_db = 6.0
+min_distance_hz = 1.0
+min_stability = 5.0
+
+[[analysis.bands]]
+name = "High frequency"
+min_frequency = 10.0
+max_frequency = 50.0
+prominence_db = 6.0
+min_distance_hz = 1.0
+min_stability = 5.0
