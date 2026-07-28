@@ -413,11 +413,16 @@ def _find_axis_peaks_by_bands(
                 if name in peak_properties:
                     peak_properties[name] = global_indices[peak_properties[name]]
 
+            candidate_prominence_db = peak_properties["prominences"]
             existing_properties = peaks_by_index.get(global_peak_index)
+            existing_prominence_db = (
+                existing_properties["prominences"]
+                if existing_properties is not None
+                else None
+            )
             if (
-                existing_properties is None
-                or peak_properties["prominences"]
-                > existing_properties["prominences"]
+                existing_prominence_db is None
+                or candidate_prominence_db > existing_prominence_db
             ):
                 peaks_by_index[global_peak_index] = peak_properties
 
