@@ -33,7 +33,10 @@ PSD_MAX_FREQ = 20
 # Peak detection
 # ----------------------------------------------------------
 
-PROMINENCE = 0.3          # 30% от максимума
+# Minimum local PSD peak prominence in decibels.
+# 6 dB means the peak PSD is approximately four times
+# its local prominence base in linear power units.
+PROMINENCE_DB = 6.0
 MIN_DISTANCE_HZ = 1.0
 MIN_STABILITY = 5.0
 
@@ -42,7 +45,7 @@ ANALYSIS_BANDS = [
         "Full",
         PSD_MIN_FREQ,
         PSD_MAX_FREQ,
-        PROMINENCE,
+        PROMINENCE_DB,
         MIN_DISTANCE_HZ,
         MIN_STABILITY,
     ),
@@ -62,7 +65,7 @@ class AnalysisBand:
     name: str
     min_frequency: float
     max_frequency: float
-    prominence: float
+    prominence_db: float
     min_distance_hz: float
     min_stability: float
 
@@ -76,14 +79,14 @@ def build_analysis_bands() -> list[AnalysisBand]:
         if not isinstance(entry, (tuple, list)) or len(entry) != 6:
             raise ValueError(
                 "Each analysis band must contain name, min_frequency, max_frequency, "
-                "prominence, min_distance_hz, and min_stability"
+                "prominence_db, min_distance_hz, and min_stability"
             )
 
         (
             name,
             min_frequency,
             max_frequency,
-            prominence,
+            prominence_db,
             min_distance_hz,
             min_stability,
         ) = entry
@@ -108,7 +111,7 @@ def build_analysis_bands() -> list[AnalysisBand]:
             )
 
         try:
-            prominence = float(prominence)
+            prominence_db = float(prominence_db)
             min_distance_hz = float(min_distance_hz)
             min_stability = float(min_stability)
         except (TypeError, ValueError):
@@ -116,10 +119,12 @@ def build_analysis_bands() -> list[AnalysisBand]:
                 "Analysis band detection parameters must be numeric"
             ) from None
 
-        if prominence < 0:
-            raise ValueError("Analysis band prominence must be non-negative")
-        if min_distance_hz <= 0:
-            raise ValueError("Analysis band minimum distance must be positive")
+        if prominence_db < 0:
+            raise ValueError(
+                "Analysis band prominence_db must be non-negative"
+            )
+        if min_distance_hz < 0:
+            raise ValueError("Analysis band minimum distance must be non-negative")
         if min_stability < 0:
             raise ValueError(
                 "Analysis band minimum stability must be non-negative"
@@ -130,7 +135,7 @@ def build_analysis_bands() -> list[AnalysisBand]:
                 name=name.strip(),
                 min_frequency=min_frequency,
                 max_frequency=max_frequency,
-                prominence=prominence,
+                prominence_db=prominence_db,
                 min_distance_hz=min_distance_hz,
                 min_stability=min_stability,
             )
@@ -341,6 +346,29 @@ def _find_axis_peaks_by_bands(
     stability: np.ndarray,
     analysis_bands: list[AnalysisBand],
 ) -> AxisPeaks:
+    if len(median) != len(freq):
+        raise ValueError("Frequency axis length does not match median PSD length")
+
+    if not np.all(np.isfinite(median)):
+        raise ValueError("Median PSD must contain only finite values")
+
+    if np.any(median < 0):
+        raise ValueError("Median PSD must not contain negative values")
+
+    for band in analysis_bands:
+        if band.prominence_db < 0:
+            raise ValueError(
+                "Analysis band prominence_db must be non-negative"
+            )
+        if band.min_distance_hz < 0:
+            raise ValueError("Analysis band minimum distance must be non-negative")
+        if band.min_stability < 0:
+            raise ValueError("Analysis band minimum stability must be non-negative")
+        if band.max_frequency <= band.min_frequency:
+            raise ValueError(
+                "Analysis band maximum frequency must be greater than minimum frequency"
+            )
+
     if len(median) == 0:
         return AxisPeaks(
             frequencies=np.array([]),
@@ -353,6 +381,12 @@ def _find_axis_peaks_by_bands(
 
     if len(stability) != len(median):
         raise ValueError("Stability length does not match median PSD length")
+
+    safe_median = np.maximum(
+        median,
+        np.finfo(float).tiny,
+    )
+    median_db = 10.0 * np.log10(safe_median)
 
     resolution = freq[1] - freq[0]
     peaks_by_index = {}
@@ -367,12 +401,12 @@ def _find_axis_peaks_by_bands(
         if len(global_indices) < 2:
             continue
 
-        band_median = median[band_mask]
+        band_median_db = median_db[band_mask]
         band_stability = stability[band_mask]
         distance = max(int(band.min_distance_hz / resolution), 1)
         local_peak_indices, properties = find_peaks(
-            band_median,
-            prominence=band.prominence,
+            band_median_db,
+            prominence=band.prominence_db,
             distance=distance,
         )
         property_dtypes.update(
@@ -398,11 +432,16 @@ def _find_axis_peaks_by_bands(
                 if name in peak_properties:
                     peak_properties[name] = global_indices[peak_properties[name]]
 
+            candidate_prominence_db = peak_properties["prominences"]
             existing_properties = peaks_by_index.get(global_peak_index)
+            existing_prominence_db = (
+                existing_properties["prominences"]
+                if existing_properties is not None
+                else None
+            )
             if (
-                existing_properties is None
-                or peak_properties["prominences"]
-                > existing_properties["prominences"]
+                existing_prominence_db is None
+                or candidate_prominence_db > existing_prominence_db
             ):
                 peaks_by_index[global_peak_index] = peak_properties
 
