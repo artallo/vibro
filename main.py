@@ -842,8 +842,9 @@ for axis_index, (axis_name, axis_data) in enumerate(visualization_axes.items()):
     stability_axis.axhline(
         MIN_STABILITY,
         linestyle="--",
-        color="black",
-        label="Threshold",
+        linewidth=1.0,
+        alpha=0.6,
+        label="Minimum stability",
     )
     stability_axis.scatter(
         axis_data.peak_frequencies,
