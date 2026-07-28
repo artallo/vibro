@@ -256,6 +256,28 @@ def draw_analysis_bands(
         )
 
 
+def annotate_peak_frequencies(
+    ax,
+    peak_frequencies,
+    peak_values,
+) -> None:
+    if len(peak_frequencies) != len(peak_values):
+        raise ValueError("Peak frequency and value arrays must have equal lengths")
+
+    for index in range(len(peak_frequencies)):
+        frequency = peak_frequencies[index]
+        value = peak_values[index]
+        ax.annotate(
+            f"{frequency:.1f} Hz",
+            xy=(frequency, value),
+            xytext=(0, 6),
+            textcoords="offset points",
+            ha="center",
+            va="bottom",
+            fontsize=8,
+        )
+
+
 def build_visualization_data(
     statistics: StatisticsResult,
     peaks: PeakResult,
@@ -793,6 +815,11 @@ for axis_index, (axis_name, axis_data) in enumerate(visualization_axes.items()):
         color=COLORS[axis_name],
         marker="x",
         label="Stable peaks",
+    )
+    annotate_peak_frequencies(
+        psd_axis,
+        axis_data.peak_frequencies,
+        axis_data.peak_amplitudes,
     )
     psd_axis.set_title(f"{axis_name} axis — Median PSD")
     psd_axis.set_ylabel("PSD [g²/Hz]")
