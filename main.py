@@ -33,7 +33,7 @@ PSD_MAX_FREQ = 20
 # Peak detection
 # ----------------------------------------------------------
 
-PROMINENCE = 0.3          # 30% от максимума
+PROMINENCE_DB = 6.0
 MIN_DISTANCE_HZ = 1.0
 MIN_STABILITY = 5.0
 
@@ -42,7 +42,7 @@ ANALYSIS_BANDS = [
         "Full",
         PSD_MIN_FREQ,
         PSD_MAX_FREQ,
-        PROMINENCE,
+        PROMINENCE_DB,
         MIN_DISTANCE_HZ,
         MIN_STABILITY,
     ),
@@ -62,7 +62,7 @@ class AnalysisBand:
     name: str
     min_frequency: float
     max_frequency: float
-    prominence: float
+    prominence_db: float
     min_distance_hz: float
     min_stability: float
 
@@ -130,7 +130,7 @@ def build_analysis_bands() -> list[AnalysisBand]:
                 name=name.strip(),
                 min_frequency=min_frequency,
                 max_frequency=max_frequency,
-                prominence=prominence,
+                prominence_db=prominence,
                 min_distance_hz=min_distance_hz,
                 min_stability=min_stability,
             )
@@ -372,7 +372,7 @@ def _find_axis_peaks_by_bands(
         distance = max(int(band.min_distance_hz / resolution), 1)
         local_peak_indices, properties = find_peaks(
             band_median,
-            prominence=band.prominence,
+            prominence=band.prominence_db,
             distance=distance,
         )
         property_dtypes.update(
