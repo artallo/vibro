@@ -33,6 +33,9 @@ PSD_MAX_FREQ = 20
 # Peak detection
 # ----------------------------------------------------------
 
+# Minimum local PSD peak prominence in decibels.
+# 6 dB means the peak PSD is approximately four times
+# its local prominence base in linear power units.
 PROMINENCE_DB = 6.0
 MIN_DISTANCE_HZ = 1.0
 MIN_STABILITY = 5.0
