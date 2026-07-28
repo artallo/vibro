@@ -11,7 +11,7 @@ from scipy.signal import welch
 from scipy.signal import find_peaks
 
 # ==========================================================
-# РќР°СЃС‚СЂРѕР№РєРё
+# Настройки
 # ==========================================================
 
 CONFIG_PATH = Path(__file__).with_name("config.toml")
@@ -621,7 +621,7 @@ print("Connected:", config.serial.port)
 
 
 # ==========================================================
-# РџРѕРёСЃРє РЅР°С‡Р°Р»Р° РїР°РєРµС‚Р°
+# Поиск начала пакета
 # ==========================================================
 
 def find_magic():
@@ -948,8 +948,8 @@ for axis_index, (axis_name, axis_data) in enumerate(visualization_axes.items()):
         axis_data.peak_frequencies,
         axis_data.peak_amplitudes,
     )
-    psd_axis.set_title(f"{axis_name} axis вЂ” Median PSD")
-    psd_axis.set_ylabel("PSD [gВІ/Hz]")
+    psd_axis.set_title(f"{axis_name} axis — Median PSD")
+    psd_axis.set_ylabel("PSD [g²/Hz]")
     psd_axis.set_xlim(analysis_min_frequency, analysis_max_frequency)
     psd_axis.grid(True, alpha=0.25, linewidth=0.6)
     if axis_index == 0:
@@ -983,7 +983,7 @@ for axis_index, (axis_name, axis_data) in enumerate(visualization_axes.items()):
         marker="x",
         label="Stable peaks",
     )
-    stability_axis.set_title(f"{axis_name} axis вЂ” Stability")
+    stability_axis.set_title(f"{axis_name} axis — Stability")
     stability_axis.set_ylabel("Mean / Std")
     stability_axis.set_xlim(
         analysis_min_frequency,
