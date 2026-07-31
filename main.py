@@ -264,6 +264,43 @@ def build_frequency_window_mask(
     return window_mask
 
 
+def compute_window_power(
+    frequency: np.ndarray,
+    psd: np.ndarray,
+    window_mask: np.ndarray,
+) -> float:
+    arrays = {
+        "Frequency": frequency,
+        "PSD": psd,
+        "Frequency window mask": window_mask,
+    }
+    for name, array in arrays.items():
+        if not isinstance(array, np.ndarray) or array.ndim != 1:
+            raise ValueError(f"{name} must be a one-dimensional array")
+
+    if len(frequency) != len(psd) or len(frequency) != len(window_mask):
+        raise ValueError("Frequency, PSD, and window mask lengths must match")
+    if window_mask.dtype != np.bool_:
+        raise ValueError("Frequency window mask must have boolean dtype")
+    if not np.all(np.isfinite(psd)):
+        raise ValueError("PSD must contain only finite values")
+    if np.any(psd < 0):
+        raise ValueError("PSD must not contain negative values")
+    if np.count_nonzero(window_mask) < 2:
+        raise ValueError("Frequency window must contain at least two points")
+
+    window_power = np.trapezoid(
+        psd[window_mask],
+        frequency[window_mask],
+    )
+    if not np.isfinite(window_power):
+        raise ValueError("Frequency window power must be finite")
+    if window_power < 0:
+        raise ValueError("Frequency window power must be non-negative")
+
+    return float(window_power)
+
+
 @dataclass
 class FFTResult:
     freq: np.ndarray
