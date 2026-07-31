@@ -471,15 +471,21 @@ def annotate_peak_frequencies(
     ax,
     peak_frequencies,
     peak_values,
+    peak_frequency_std_hz,
 ) -> None:
     if len(peak_frequencies) != len(peak_values):
         raise ValueError("Peak frequency and value arrays must have equal lengths")
+    if len(peak_frequencies) != len(peak_frequency_std_hz):
+        raise ValueError(
+            "Peak frequency and frequency spread arrays must have equal lengths"
+        )
 
     for index in range(len(peak_frequencies)):
         frequency = peak_frequencies[index]
         value = peak_values[index]
         ax.annotate(
-            f"{frequency:.1f} Hz",
+            f"{frequency:.1f} Hz\n"
+            f"σf {peak_frequency_std_hz[index]:.2f} Hz",
             xy=(frequency, value),
             xytext=(0, 6),
             textcoords="offset points",
@@ -1244,6 +1250,7 @@ for axis_index, (axis_name, axis_data) in enumerate(visualization_axes.items()):
         psd_axis,
         axis_data.peak_frequencies,
         axis_data.peak_amplitudes,
+        axis_data.peak_frequency_std_hz,
     )
     psd_axis.set_title(f"{axis_name} axis — Median PSD")
     psd_axis.set_ylabel("PSD [g²/Hz]")
@@ -1252,16 +1259,11 @@ for axis_index, (axis_name, axis_data) in enumerate(visualization_axes.items()):
     if axis_index == 0:
         psd_axis.legend()
 
-    peak_stability = np.interp(
-        axis_data.peak_frequencies,
-        axis_data.frequency,
-        axis_data.stability,
-    )
     stability_axis.plot(
         axis_data.frequency,
         axis_data.stability,
         color=COLORS[axis_name],
-        label="Stability",
+        label="Bin stability",
     )
     for band_index, band in enumerate(analysis_bands):
         stability_axis.hlines(
@@ -1271,14 +1273,14 @@ for axis_index, (axis_name, axis_data) in enumerate(visualization_axes.items()):
             linestyle="--",
             linewidth=1.0,
             alpha=0.6,
-            label="Minimum stability" if band_index == 0 else None,
+            label="Minimum peak stability" if band_index == 0 else None,
         )
     stability_axis.scatter(
         axis_data.peak_frequencies,
-        peak_stability,
+        axis_data.peak_window_power_stability,
         color=COLORS[axis_name],
         marker="x",
-        label="Stable peaks",
+        label="Stable peaks — window power",
     )
     stability_axis.set_title(f"{axis_name} axis — Stability")
     stability_axis.set_ylabel("Mean / Std")
