@@ -612,7 +612,6 @@ def _find_axis_peaks_by_bands(
             continue
 
         band_median_db = median_db[band_mask]
-        band_stability = stability[band_mask]
         distance = max(int(band.min_distance_hz / resolution), 1)
         local_peak_indices, properties = find_peaks(
             band_median_db,
@@ -670,7 +669,7 @@ def _find_axis_peaks_by_bands(
                 ),
             }
 
-            if band_stability[local_peak_index] < band.min_stability:
+            if window_power_stability < band.min_stability:
                 continue
 
             peak_properties = {
