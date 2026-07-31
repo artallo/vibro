@@ -301,6 +301,40 @@ def compute_window_power(
     return float(window_power)
 
 
+def find_session_peak_in_window(
+    frequency: np.ndarray,
+    psd: np.ndarray,
+    window_mask: np.ndarray,
+) -> tuple[float, float]:
+    arrays = {
+        "Frequency": frequency,
+        "PSD": psd,
+        "Frequency window mask": window_mask,
+    }
+    for name, array in arrays.items():
+        if not isinstance(array, np.ndarray) or array.ndim != 1:
+            raise ValueError(f"{name} must be a one-dimensional array")
+
+    if len(frequency) != len(psd) or len(frequency) != len(window_mask):
+        raise ValueError("Frequency, PSD, and window mask lengths must match")
+    if window_mask.dtype != np.bool_:
+        raise ValueError("Frequency window mask must have boolean dtype")
+    if not np.any(window_mask):
+        raise ValueError("Frequency window must contain at least one point")
+    if not np.all(np.isfinite(frequency)):
+        raise ValueError("Frequency must contain only finite values")
+    if not np.all(np.isfinite(psd)):
+        raise ValueError("PSD must contain only finite values")
+    if np.any(psd < 0):
+        raise ValueError("PSD must not contain negative values")
+
+    window_indices = np.flatnonzero(window_mask)
+    local_index = np.argmax(psd[window_mask])
+    global_index = window_indices[local_index]
+
+    return float(frequency[global_index]), float(psd[global_index])
+
+
 @dataclass
 class FFTResult:
     freq: np.ndarray
