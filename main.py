@@ -37,6 +37,7 @@ class AnalysisBand:
     prominence_db: float
     min_distance_hz: float
     min_stability: float
+    frequency_tolerance_hz: float
 
 
 @dataclass(frozen=True)
@@ -135,6 +136,10 @@ def validate_config(config: ApplicationConfig) -> None:
             band.min_stability,
             f"{band_name} min_stability",
         )
+        require_finite_number(
+            band.frequency_tolerance_hz,
+            f"{band_name} frequency_tolerance_hz",
+        )
 
         if band.min_frequency < 0:
             raise ValueError(
@@ -155,6 +160,10 @@ def validate_config(config: ApplicationConfig) -> None:
             raise ValueError(
                 f"{band_name} min_stability must be non-negative"
             )
+        if band.frequency_tolerance_hz < 0:
+            raise ValueError(
+                f"{band_name} frequency_tolerance_hz must be non-negative"
+            )
 
 
 def load_config(path: Path) -> ApplicationConfig:
@@ -174,6 +183,7 @@ def load_config(path: Path) -> ApplicationConfig:
             prominence_db=entry["prominence_db"],
             min_distance_hz=entry["min_distance_hz"],
             min_stability=entry["min_stability"],
+            frequency_tolerance_hz=entry["frequency_tolerance_hz"],
         )
         for entry in band_entries
     ]
@@ -205,6 +215,124 @@ def get_analysis_frequency_limits(
         min(band.min_frequency for band in analysis_bands),
         max(band.max_frequency for band in analysis_bands),
     )
+
+
+def build_frequency_window_mask(
+    frequency: np.ndarray,
+    center_frequency: float,
+    tolerance_hz: float,
+) -> np.ndarray:
+    if not isinstance(frequency, np.ndarray) or frequency.ndim != 1:
+        raise ValueError("Frequency must be a one-dimensional array")
+    if frequency.size == 0:
+        raise ValueError("Frequency array must not be empty")
+
+    try:
+        frequency_is_finite = np.all(np.isfinite(frequency))
+    except TypeError:
+        frequency_is_finite = False
+    if not frequency_is_finite:
+        raise ValueError("Frequency must contain only finite values")
+    if np.any(np.diff(frequency) <= 0):
+        raise ValueError("Frequency must be strictly increasing")
+
+    valid_number_types = (int, float, np.integer, np.floating)
+    invalid_boolean_types = (bool, np.bool_)
+    if (
+        not isinstance(center_frequency, valid_number_types)
+        or isinstance(center_frequency, invalid_boolean_types)
+        or not np.isfinite(center_frequency)
+    ):
+        raise ValueError("Center frequency must be a finite number")
+    if (
+        not isinstance(tolerance_hz, valid_number_types)
+        or isinstance(tolerance_hz, invalid_boolean_types)
+        or not np.isfinite(tolerance_hz)
+    ):
+        raise ValueError("Frequency tolerance must be a finite number")
+    if tolerance_hz < 0:
+        raise ValueError("Frequency tolerance must be non-negative")
+
+    window_mask = (
+        frequency >= center_frequency - tolerance_hz
+    ) & (
+        frequency <= center_frequency + tolerance_hz
+    )
+    if not np.any(window_mask):
+        raise ValueError("Frequency window must contain at least one point")
+
+    return window_mask
+
+
+def compute_window_power(
+    frequency: np.ndarray,
+    psd: np.ndarray,
+    window_mask: np.ndarray,
+) -> float:
+    arrays = {
+        "Frequency": frequency,
+        "PSD": psd,
+        "Frequency window mask": window_mask,
+    }
+    for name, array in arrays.items():
+        if not isinstance(array, np.ndarray) or array.ndim != 1:
+            raise ValueError(f"{name} must be a one-dimensional array")
+
+    if len(frequency) != len(psd) or len(frequency) != len(window_mask):
+        raise ValueError("Frequency, PSD, and window mask lengths must match")
+    if window_mask.dtype != np.bool_:
+        raise ValueError("Frequency window mask must have boolean dtype")
+    if not np.all(np.isfinite(psd)):
+        raise ValueError("PSD must contain only finite values")
+    if np.any(psd < 0):
+        raise ValueError("PSD must not contain negative values")
+    if np.count_nonzero(window_mask) < 2:
+        raise ValueError("Frequency window must contain at least two points")
+
+    window_power = np.trapezoid(
+        psd[window_mask],
+        frequency[window_mask],
+    )
+    if not np.isfinite(window_power):
+        raise ValueError("Frequency window power must be finite")
+    if window_power < 0:
+        raise ValueError("Frequency window power must be non-negative")
+
+    return float(window_power)
+
+
+def find_session_peak_in_window(
+    frequency: np.ndarray,
+    psd: np.ndarray,
+    window_mask: np.ndarray,
+) -> tuple[float, float]:
+    arrays = {
+        "Frequency": frequency,
+        "PSD": psd,
+        "Frequency window mask": window_mask,
+    }
+    for name, array in arrays.items():
+        if not isinstance(array, np.ndarray) or array.ndim != 1:
+            raise ValueError(f"{name} must be a one-dimensional array")
+
+    if len(frequency) != len(psd) or len(frequency) != len(window_mask):
+        raise ValueError("Frequency, PSD, and window mask lengths must match")
+    if window_mask.dtype != np.bool_:
+        raise ValueError("Frequency window mask must have boolean dtype")
+    if not np.any(window_mask):
+        raise ValueError("Frequency window must contain at least one point")
+    if not np.all(np.isfinite(frequency)):
+        raise ValueError("Frequency must contain only finite values")
+    if not np.all(np.isfinite(psd)):
+        raise ValueError("PSD must contain only finite values")
+    if np.any(psd < 0):
+        raise ValueError("PSD must not contain negative values")
+
+    window_indices = np.flatnonzero(window_mask)
+    local_index = np.argmax(psd[window_mask])
+    global_index = window_indices[local_index]
+
+    return float(frequency[global_index]), float(psd[global_index])
 
 
 @dataclass
@@ -261,9 +389,19 @@ class StatisticsResult:
 
 
 @dataclass
+class PeakDiagnostics:
+    window_power_stability: np.ndarray
+    mean_session_frequencies: np.ndarray
+    frequency_std_hz: np.ndarray
+    minimum_session_frequencies: np.ndarray
+    maximum_session_frequencies: np.ndarray
+
+
+@dataclass
 class AxisPeaks:
     frequencies: np.ndarray
     amplitudes: np.ndarray
+    diagnostics: PeakDiagnostics
     properties: dict[str, Any]
 
 
@@ -283,6 +421,11 @@ class VisualizationAxis:
     stability: np.ndarray
     peak_frequencies: np.ndarray
     peak_amplitudes: np.ndarray
+    peak_window_power_stability: np.ndarray
+    peak_mean_session_frequencies: np.ndarray
+    peak_frequency_std_hz: np.ndarray
+    peak_minimum_session_frequencies: np.ndarray
+    peak_maximum_session_frequencies: np.ndarray
 
 
 @dataclass
@@ -328,15 +471,21 @@ def annotate_peak_frequencies(
     ax,
     peak_frequencies,
     peak_values,
+    peak_frequency_std_hz,
 ) -> None:
     if len(peak_frequencies) != len(peak_values):
         raise ValueError("Peak frequency and value arrays must have equal lengths")
+    if len(peak_frequencies) != len(peak_frequency_std_hz):
+        raise ValueError(
+            "Peak frequency and frequency spread arrays must have equal lengths"
+        )
 
     for index in range(len(peak_frequencies)):
         frequency = peak_frequencies[index]
         value = peak_values[index]
         ax.annotate(
-            f"{frequency:.1f} Hz",
+            f"{frequency:.1f} Hz\n"
+            f"σf {peak_frequency_std_hz[index]:.2f} Hz",
             xy=(frequency, value),
             xytext=(0, 6),
             textcoords="offset points",
@@ -386,6 +535,31 @@ def build_visualization_data(
                 f"Peak frequency and amplitude lengths do not match for {axis_name}"
             )
 
+        peak_count = len(axis_peaks.frequencies)
+        diagnostic_arrays = {
+            "window power stability": (
+                axis_peaks.diagnostics.window_power_stability
+            ),
+            "mean session frequencies": (
+                axis_peaks.diagnostics.mean_session_frequencies
+            ),
+            "frequency standard deviation": (
+                axis_peaks.diagnostics.frequency_std_hz
+            ),
+            "minimum session frequencies": (
+                axis_peaks.diagnostics.minimum_session_frequencies
+            ),
+            "maximum session frequencies": (
+                axis_peaks.diagnostics.maximum_session_frequencies
+            ),
+        }
+        for diagnostic_name, diagnostic_array in diagnostic_arrays.items():
+            if len(diagnostic_array) != peak_count:
+                raise ValueError(
+                    f"Peak {diagnostic_name} length does not match "
+                    f"peak frequency length for {axis_name}"
+                )
+
         return VisualizationAxis(
             frequency=frequency,
             median_psd=axis_statistics.median,
@@ -394,6 +568,21 @@ def build_visualization_data(
             stability=axis_statistics.stability,
             peak_frequencies=axis_peaks.frequencies,
             peak_amplitudes=axis_peaks.amplitudes,
+            peak_window_power_stability=(
+                axis_peaks.diagnostics.window_power_stability
+            ),
+            peak_mean_session_frequencies=(
+                axis_peaks.diagnostics.mean_session_frequencies
+            ),
+            peak_frequency_std_hz=(
+                axis_peaks.diagnostics.frequency_std_hz
+            ),
+            peak_minimum_session_frequencies=(
+                axis_peaks.diagnostics.minimum_session_frequencies
+            ),
+            peak_maximum_session_frequencies=(
+                axis_peaks.diagnostics.maximum_session_frequencies
+            ),
         )
 
     return VisualizationData(
@@ -407,6 +596,7 @@ def _find_axis_peaks_by_bands(
     freq: np.ndarray,
     median: np.ndarray,
     stability: np.ndarray,
+    session_psd_stack: np.ndarray,
     analysis_bands: list[AnalysisBand],
 ) -> AxisPeaks:
     if len(median) != len(freq):
@@ -436,6 +626,13 @@ def _find_axis_peaks_by_bands(
         return AxisPeaks(
             frequencies=np.array([]),
             amplitudes=np.array([]),
+            diagnostics=PeakDiagnostics(
+                window_power_stability=np.array([]),
+                mean_session_frequencies=np.array([]),
+                frequency_std_hz=np.array([]),
+                minimum_session_frequencies=np.array([]),
+                maximum_session_frequencies=np.array([]),
+            ),
             properties={}
         )
 
@@ -453,6 +650,7 @@ def _find_axis_peaks_by_bands(
 
     resolution = freq[1] - freq[0]
     peaks_by_index = {}
+    diagnostics_by_index = {}
     property_dtypes = {}
 
     for band in analysis_bands:
@@ -465,7 +663,6 @@ def _find_axis_peaks_by_bands(
             continue
 
         band_median_db = median_db[band_mask]
-        band_stability = stability[band_mask]
         distance = max(int(band.min_distance_hz / resolution), 1)
         local_peak_indices, properties = find_peaks(
             band_median_db,
@@ -476,17 +673,56 @@ def _find_axis_peaks_by_bands(
             (name, values.dtype) for name, values in properties.items()
         )
 
-        stable_peak_mask = (
-            band_stability[local_peak_indices] >= band.min_stability
-        )
-        local_peak_indices = local_peak_indices[stable_peak_mask]
-        properties = {
-            name: values[stable_peak_mask]
-            for name, values in properties.items()
-        }
-        global_peak_indices = global_indices[local_peak_indices]
+        for position, local_peak_index in enumerate(local_peak_indices):
+            global_peak_index = global_indices[local_peak_index]
+            candidate_frequency = freq[global_peak_index]
+            window_mask = build_frequency_window_mask(
+                freq,
+                candidate_frequency,
+                band.frequency_tolerance_hz,
+            )
+            window_powers = []
+            session_peak_frequencies = []
+            for session_psd in session_psd_stack:
+                window_powers.append(
+                    compute_window_power(freq, session_psd, window_mask)
+                )
+                session_peak_frequency, _ = find_session_peak_in_window(
+                    freq,
+                    session_psd,
+                    window_mask,
+                )
+                session_peak_frequencies.append(session_peak_frequency)
 
-        for position, global_peak_index in enumerate(global_peak_indices):
+            window_powers = np.asarray(window_powers)
+            session_peak_frequencies = np.asarray(session_peak_frequencies)
+            power_mean = np.mean(window_powers)
+            power_std = np.std(window_powers)
+            window_power_stability = np.divide(
+                power_mean,
+                power_std,
+                out=np.array(0.0),
+                where=power_std != 0,
+            )
+            candidate_diagnostics = {
+                "window_power_stability": float(window_power_stability),
+                "mean_session_frequency": float(
+                    np.mean(session_peak_frequencies)
+                ),
+                "frequency_std_hz": float(
+                    np.std(session_peak_frequencies)
+                ),
+                "minimum_session_frequency": float(
+                    np.min(session_peak_frequencies)
+                ),
+                "maximum_session_frequency": float(
+                    np.max(session_peak_frequencies)
+                ),
+            }
+
+            if window_power_stability < band.min_stability:
+                continue
+
             peak_properties = {
                 name: values[position]
                 for name, values in properties.items()
@@ -507,6 +743,7 @@ def _find_axis_peaks_by_bands(
                 or candidate_prominence_db > existing_prominence_db
             ):
                 peaks_by_index[global_peak_index] = peak_properties
+                diagnostics_by_index[global_peak_index] = candidate_diagnostics
 
     peak_indices = np.array(sorted(peaks_by_index), dtype=int)
     merged_properties = {
@@ -517,9 +754,32 @@ def _find_axis_peaks_by_bands(
         for name, dtype in property_dtypes.items()
     }
 
+    peak_frequencies = freq[peak_indices]
     return AxisPeaks(
-        frequencies=freq[peak_indices],
+        frequencies=peak_frequencies,
         amplitudes=median[peak_indices],
+        diagnostics=PeakDiagnostics(
+            window_power_stability=np.asarray([
+                diagnostics_by_index[index]["window_power_stability"]
+                for index in peak_indices
+            ]),
+            mean_session_frequencies=np.asarray([
+                diagnostics_by_index[index]["mean_session_frequency"]
+                for index in peak_indices
+            ]),
+            frequency_std_hz=np.asarray([
+                diagnostics_by_index[index]["frequency_std_hz"]
+                for index in peak_indices
+            ]),
+            minimum_session_frequencies=np.asarray([
+                diagnostics_by_index[index]["minimum_session_frequency"]
+                for index in peak_indices
+            ]),
+            maximum_session_frequencies=np.asarray([
+                diagnostics_by_index[index]["maximum_session_frequency"]
+                for index in peak_indices
+            ]),
+        ),
         properties=merged_properties,
     )
 
@@ -534,13 +794,31 @@ def find_psd_peaks(
     if not analysis_bands:
         raise ValueError("At least one analysis band is required")
 
-    session = sessions[0]
-    freq = session.x.psd.freq
+    freq = sessions[0].x.psd.freq
 
-    if not np.array_equal(freq, session.y.psd.freq):
-        raise ValueError("PSD frequency axes do not match")
-    if not np.array_equal(freq, session.z.psd.freq):
-        raise ValueError("PSD frequency axes do not match")
+    for session in sessions:
+        if not np.array_equal(session.x.psd.freq, session.y.psd.freq):
+            raise ValueError("PSD frequency axes do not match")
+        if not np.array_equal(session.x.psd.freq, session.z.psd.freq):
+            raise ValueError("PSD frequency axes do not match")
+        if not np.array_equal(freq, session.x.psd.freq):
+            raise ValueError("Session PSD frequency axes do not match")
+
+        for axis_name in ("x", "y", "z"):
+            psd = getattr(session, axis_name).psd.psd
+            if len(psd) != len(freq):
+                raise ValueError(
+                    f"Frequency axis length does not match "
+                    f"{axis_name.upper()} PSD length"
+                )
+            if not np.all(np.isfinite(psd)):
+                raise ValueError(
+                    f"{axis_name.upper()} PSD must contain only finite values"
+                )
+            if np.any(psd < 0):
+                raise ValueError(
+                    f"{axis_name.upper()} PSD must not contain negative values"
+                )
 
     if len(freq) != len(statistics.x.median):
         raise ValueError("Frequency axis length does not match X median PSD length")
@@ -549,15 +827,40 @@ def find_psd_peaks(
     if len(freq) != len(statistics.z.median):
         raise ValueError("Frequency axis length does not match Z median PSD length")
 
+    x_psd_stack = np.stack(
+        [session.x.psd.psd for session in sessions],
+        axis=0,
+    )
+    y_psd_stack = np.stack(
+        [session.y.psd.psd for session in sessions],
+        axis=0,
+    )
+    z_psd_stack = np.stack(
+        [session.z.psd.psd for session in sessions],
+        axis=0,
+    )
+
     return PeakResult(
         x=_find_axis_peaks_by_bands(
-            freq, statistics.x.median, statistics.x.stability, analysis_bands
+            freq,
+            statistics.x.median,
+            statistics.x.stability,
+            x_psd_stack,
+            analysis_bands,
         ),
         y=_find_axis_peaks_by_bands(
-            freq, statistics.y.median, statistics.y.stability, analysis_bands
+            freq,
+            statistics.y.median,
+            statistics.y.stability,
+            y_psd_stack,
+            analysis_bands,
         ),
         z=_find_axis_peaks_by_bands(
-            freq, statistics.z.median, statistics.z.stability, analysis_bands
+            freq,
+            statistics.z.median,
+            statistics.z.stability,
+            z_psd_stack,
+            analysis_bands,
         ),
     )
 
@@ -947,6 +1250,7 @@ for axis_index, (axis_name, axis_data) in enumerate(visualization_axes.items()):
         psd_axis,
         axis_data.peak_frequencies,
         axis_data.peak_amplitudes,
+        axis_data.peak_frequency_std_hz,
     )
     psd_axis.set_title(f"{axis_name} axis — Median PSD")
     psd_axis.set_ylabel("PSD [g²/Hz]")
@@ -955,16 +1259,11 @@ for axis_index, (axis_name, axis_data) in enumerate(visualization_axes.items()):
     if axis_index == 0:
         psd_axis.legend()
 
-    peak_stability = np.interp(
-        axis_data.peak_frequencies,
-        axis_data.frequency,
-        axis_data.stability,
-    )
     stability_axis.plot(
         axis_data.frequency,
         axis_data.stability,
         color=COLORS[axis_name],
-        label="Stability",
+        label="Bin stability",
     )
     for band_index, band in enumerate(analysis_bands):
         stability_axis.hlines(
@@ -974,14 +1273,14 @@ for axis_index, (axis_name, axis_data) in enumerate(visualization_axes.items()):
             linestyle="--",
             linewidth=1.0,
             alpha=0.6,
-            label="Minimum stability" if band_index == 0 else None,
+            label="Minimum peak stability" if band_index == 0 else None,
         )
     stability_axis.scatter(
         axis_data.peak_frequencies,
-        peak_stability,
+        axis_data.peak_window_power_stability,
         color=COLORS[axis_name],
         marker="x",
-        label="Stable peaks",
+        label="Stable peaks — window power",
     )
     stability_axis.set_title(f"{axis_name} axis — Stability")
     stability_axis.set_ylabel("Mean / Std")
