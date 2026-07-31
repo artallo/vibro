@@ -217,6 +217,53 @@ def get_analysis_frequency_limits(
     )
 
 
+def build_frequency_window_mask(
+    frequency: np.ndarray,
+    center_frequency: float,
+    tolerance_hz: float,
+) -> np.ndarray:
+    if not isinstance(frequency, np.ndarray) or frequency.ndim != 1:
+        raise ValueError("Frequency must be a one-dimensional array")
+    if frequency.size == 0:
+        raise ValueError("Frequency array must not be empty")
+
+    try:
+        frequency_is_finite = np.all(np.isfinite(frequency))
+    except TypeError:
+        frequency_is_finite = False
+    if not frequency_is_finite:
+        raise ValueError("Frequency must contain only finite values")
+    if np.any(np.diff(frequency) <= 0):
+        raise ValueError("Frequency must be strictly increasing")
+
+    valid_number_types = (int, float, np.integer, np.floating)
+    invalid_boolean_types = (bool, np.bool_)
+    if (
+        not isinstance(center_frequency, valid_number_types)
+        or isinstance(center_frequency, invalid_boolean_types)
+        or not np.isfinite(center_frequency)
+    ):
+        raise ValueError("Center frequency must be a finite number")
+    if (
+        not isinstance(tolerance_hz, valid_number_types)
+        or isinstance(tolerance_hz, invalid_boolean_types)
+        or not np.isfinite(tolerance_hz)
+    ):
+        raise ValueError("Frequency tolerance must be a finite number")
+    if tolerance_hz < 0:
+        raise ValueError("Frequency tolerance must be non-negative")
+
+    window_mask = (
+        frequency >= center_frequency - tolerance_hz
+    ) & (
+        frequency <= center_frequency + tolerance_hz
+    )
+    if not np.any(window_mask):
+        raise ValueError("Frequency window must contain at least one point")
+
+    return window_mask
+
+
 @dataclass
 class FFTResult:
     freq: np.ndarray
