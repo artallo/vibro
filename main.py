@@ -280,19 +280,35 @@ def compute_window_power(
 
     if len(frequency) != len(psd) or len(frequency) != len(window_mask):
         raise ValueError("Frequency, PSD, and window mask lengths must match")
+    if len(frequency) < 2:
+        raise ValueError("Frequency axis must contain at least two points")
     if window_mask.dtype != np.bool_:
         raise ValueError("Frequency window mask must have boolean dtype")
     if not np.all(np.isfinite(psd)):
         raise ValueError("PSD must contain only finite values")
     if np.any(psd < 0):
         raise ValueError("PSD must not contain negative values")
-    if np.count_nonzero(window_mask) < 2:
-        raise ValueError("Frequency window must contain at least two points")
+    window_point_count = np.count_nonzero(window_mask)
+    if window_point_count == 0:
+        raise ValueError("Frequency window must contain at least one point")
 
-    window_power = np.trapezoid(
-        psd[window_mask],
-        frequency[window_mask],
-    )
+    if window_point_count == 1:
+        index = np.flatnonzero(window_mask)[0]
+        if index == 0:
+            bin_width = frequency[1] - frequency[0]
+        elif index == len(frequency) - 1:
+            bin_width = frequency[-1] - frequency[-2]
+        else:
+            bin_width = (
+                frequency[index + 1]
+                - frequency[index - 1]
+            ) / 2
+        window_power = psd[index] * bin_width
+    else:
+        window_power = np.trapezoid(
+            psd[window_mask],
+            frequency[window_mask],
+        )
     if not np.isfinite(window_power):
         raise ValueError("Frequency window power must be finite")
     if window_power < 0:
