@@ -421,6 +421,11 @@ class VisualizationAxis:
     stability: np.ndarray
     peak_frequencies: np.ndarray
     peak_amplitudes: np.ndarray
+    peak_window_power_stability: np.ndarray
+    peak_mean_session_frequencies: np.ndarray
+    peak_frequency_std_hz: np.ndarray
+    peak_minimum_session_frequencies: np.ndarray
+    peak_maximum_session_frequencies: np.ndarray
 
 
 @dataclass
@@ -524,6 +529,31 @@ def build_visualization_data(
                 f"Peak frequency and amplitude lengths do not match for {axis_name}"
             )
 
+        peak_count = len(axis_peaks.frequencies)
+        diagnostic_arrays = {
+            "window power stability": (
+                axis_peaks.diagnostics.window_power_stability
+            ),
+            "mean session frequencies": (
+                axis_peaks.diagnostics.mean_session_frequencies
+            ),
+            "frequency standard deviation": (
+                axis_peaks.diagnostics.frequency_std_hz
+            ),
+            "minimum session frequencies": (
+                axis_peaks.diagnostics.minimum_session_frequencies
+            ),
+            "maximum session frequencies": (
+                axis_peaks.diagnostics.maximum_session_frequencies
+            ),
+        }
+        for diagnostic_name, diagnostic_array in diagnostic_arrays.items():
+            if len(diagnostic_array) != peak_count:
+                raise ValueError(
+                    f"Peak {diagnostic_name} length does not match "
+                    f"peak frequency length for {axis_name}"
+                )
+
         return VisualizationAxis(
             frequency=frequency,
             median_psd=axis_statistics.median,
@@ -532,6 +562,21 @@ def build_visualization_data(
             stability=axis_statistics.stability,
             peak_frequencies=axis_peaks.frequencies,
             peak_amplitudes=axis_peaks.amplitudes,
+            peak_window_power_stability=(
+                axis_peaks.diagnostics.window_power_stability
+            ),
+            peak_mean_session_frequencies=(
+                axis_peaks.diagnostics.mean_session_frequencies
+            ),
+            peak_frequency_std_hz=(
+                axis_peaks.diagnostics.frequency_std_hz
+            ),
+            peak_minimum_session_frequencies=(
+                axis_peaks.diagnostics.minimum_session_frequencies
+            ),
+            peak_maximum_session_frequencies=(
+                axis_peaks.diagnostics.maximum_session_frequencies
+            ),
         )
 
     return VisualizationData(
