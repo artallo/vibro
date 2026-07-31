@@ -136,6 +136,10 @@ def validate_config(config: ApplicationConfig) -> None:
             band.min_stability,
             f"{band_name} min_stability",
         )
+        require_finite_number(
+            band.frequency_tolerance_hz,
+            f"{band_name} frequency_tolerance_hz",
+        )
 
         if band.min_frequency < 0:
             raise ValueError(
@@ -155,6 +159,10 @@ def validate_config(config: ApplicationConfig) -> None:
         if band.min_stability < 0:
             raise ValueError(
                 f"{band_name} min_stability must be non-negative"
+            )
+        if band.frequency_tolerance_hz < 0:
+            raise ValueError(
+                f"{band_name} frequency_tolerance_hz must be non-negative"
             )
 
 
