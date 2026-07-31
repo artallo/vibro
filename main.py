@@ -389,9 +389,19 @@ class StatisticsResult:
 
 
 @dataclass
+class PeakDiagnostics:
+    window_power_stability: np.ndarray
+    mean_session_frequencies: np.ndarray
+    frequency_std_hz: np.ndarray
+    minimum_session_frequencies: np.ndarray
+    maximum_session_frequencies: np.ndarray
+
+
+@dataclass
 class AxisPeaks:
     frequencies: np.ndarray
     amplitudes: np.ndarray
+    diagnostics: PeakDiagnostics
     properties: dict[str, Any]
 
 
@@ -564,6 +574,13 @@ def _find_axis_peaks_by_bands(
         return AxisPeaks(
             frequencies=np.array([]),
             amplitudes=np.array([]),
+            diagnostics=PeakDiagnostics(
+                window_power_stability=np.array([]),
+                mean_session_frequencies=np.array([]),
+                frequency_std_hz=np.array([]),
+                minimum_session_frequencies=np.array([]),
+                maximum_session_frequencies=np.array([]),
+            ),
             properties={}
         )
 
@@ -645,9 +662,17 @@ def _find_axis_peaks_by_bands(
         for name, dtype in property_dtypes.items()
     }
 
+    peak_frequencies = freq[peak_indices]
     return AxisPeaks(
-        frequencies=freq[peak_indices],
+        frequencies=peak_frequencies,
         amplitudes=median[peak_indices],
+        diagnostics=PeakDiagnostics(
+            window_power_stability=stability[peak_indices].copy(),
+            mean_session_frequencies=peak_frequencies.copy(),
+            frequency_std_hz=np.zeros(len(peak_indices)),
+            minimum_session_frequencies=peak_frequencies.copy(),
+            maximum_session_frequencies=peak_frequencies.copy(),
+        ),
         properties=merged_properties,
     )
 
