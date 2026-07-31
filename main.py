@@ -545,6 +545,7 @@ def _find_axis_peaks_by_bands(
     freq: np.ndarray,
     median: np.ndarray,
     stability: np.ndarray,
+    session_psd_stack: np.ndarray,
     analysis_bands: list[AnalysisBand],
 ) -> AxisPeaks:
     if len(median) != len(freq):
@@ -687,13 +688,31 @@ def find_psd_peaks(
     if not analysis_bands:
         raise ValueError("At least one analysis band is required")
 
-    session = sessions[0]
-    freq = session.x.psd.freq
+    freq = sessions[0].x.psd.freq
 
-    if not np.array_equal(freq, session.y.psd.freq):
-        raise ValueError("PSD frequency axes do not match")
-    if not np.array_equal(freq, session.z.psd.freq):
-        raise ValueError("PSD frequency axes do not match")
+    for session in sessions:
+        if not np.array_equal(session.x.psd.freq, session.y.psd.freq):
+            raise ValueError("PSD frequency axes do not match")
+        if not np.array_equal(session.x.psd.freq, session.z.psd.freq):
+            raise ValueError("PSD frequency axes do not match")
+        if not np.array_equal(freq, session.x.psd.freq):
+            raise ValueError("Session PSD frequency axes do not match")
+
+        for axis_name in ("x", "y", "z"):
+            psd = getattr(session, axis_name).psd.psd
+            if len(psd) != len(freq):
+                raise ValueError(
+                    f"Frequency axis length does not match "
+                    f"{axis_name.upper()} PSD length"
+                )
+            if not np.all(np.isfinite(psd)):
+                raise ValueError(
+                    f"{axis_name.upper()} PSD must contain only finite values"
+                )
+            if np.any(psd < 0):
+                raise ValueError(
+                    f"{axis_name.upper()} PSD must not contain negative values"
+                )
 
     if len(freq) != len(statistics.x.median):
         raise ValueError("Frequency axis length does not match X median PSD length")
@@ -702,15 +721,40 @@ def find_psd_peaks(
     if len(freq) != len(statistics.z.median):
         raise ValueError("Frequency axis length does not match Z median PSD length")
 
+    x_psd_stack = np.stack(
+        [session.x.psd.psd for session in sessions],
+        axis=0,
+    )
+    y_psd_stack = np.stack(
+        [session.y.psd.psd for session in sessions],
+        axis=0,
+    )
+    z_psd_stack = np.stack(
+        [session.z.psd.psd for session in sessions],
+        axis=0,
+    )
+
     return PeakResult(
         x=_find_axis_peaks_by_bands(
-            freq, statistics.x.median, statistics.x.stability, analysis_bands
+            freq,
+            statistics.x.median,
+            statistics.x.stability,
+            x_psd_stack,
+            analysis_bands,
         ),
         y=_find_axis_peaks_by_bands(
-            freq, statistics.y.median, statistics.y.stability, analysis_bands
+            freq,
+            statistics.y.median,
+            statistics.y.stability,
+            y_psd_stack,
+            analysis_bands,
         ),
         z=_find_axis_peaks_by_bands(
-            freq, statistics.z.median, statistics.z.stability, analysis_bands
+            freq,
+            statistics.z.median,
+            statistics.z.stability,
+            z_psd_stack,
+            analysis_bands,
         ),
     )
 
