@@ -599,6 +599,7 @@ def _find_axis_peaks_by_bands(
 
     resolution = freq[1] - freq[0]
     peaks_by_index = {}
+    diagnostics_by_index = {}
     property_dtypes = {}
 
     for band in analysis_bands:
@@ -622,17 +623,56 @@ def _find_axis_peaks_by_bands(
             (name, values.dtype) for name, values in properties.items()
         )
 
-        stable_peak_mask = (
-            band_stability[local_peak_indices] >= band.min_stability
-        )
-        local_peak_indices = local_peak_indices[stable_peak_mask]
-        properties = {
-            name: values[stable_peak_mask]
-            for name, values in properties.items()
-        }
-        global_peak_indices = global_indices[local_peak_indices]
+        for position, local_peak_index in enumerate(local_peak_indices):
+            global_peak_index = global_indices[local_peak_index]
+            candidate_frequency = freq[global_peak_index]
+            window_mask = build_frequency_window_mask(
+                freq,
+                candidate_frequency,
+                band.frequency_tolerance_hz,
+            )
+            window_powers = []
+            session_peak_frequencies = []
+            for session_psd in session_psd_stack:
+                window_powers.append(
+                    compute_window_power(freq, session_psd, window_mask)
+                )
+                session_peak_frequency, _ = find_session_peak_in_window(
+                    freq,
+                    session_psd,
+                    window_mask,
+                )
+                session_peak_frequencies.append(session_peak_frequency)
 
-        for position, global_peak_index in enumerate(global_peak_indices):
+            window_powers = np.asarray(window_powers)
+            session_peak_frequencies = np.asarray(session_peak_frequencies)
+            power_mean = np.mean(window_powers)
+            power_std = np.std(window_powers)
+            window_power_stability = np.divide(
+                power_mean,
+                power_std,
+                out=np.array(0.0),
+                where=power_std != 0,
+            )
+            candidate_diagnostics = {
+                "window_power_stability": float(window_power_stability),
+                "mean_session_frequency": float(
+                    np.mean(session_peak_frequencies)
+                ),
+                "frequency_std_hz": float(
+                    np.std(session_peak_frequencies)
+                ),
+                "minimum_session_frequency": float(
+                    np.min(session_peak_frequencies)
+                ),
+                "maximum_session_frequency": float(
+                    np.max(session_peak_frequencies)
+                ),
+            }
+
+            if band_stability[local_peak_index] < band.min_stability:
+                continue
+
             peak_properties = {
                 name: values[position]
                 for name, values in properties.items()
@@ -653,6 +693,7 @@ def _find_axis_peaks_by_bands(
                 or candidate_prominence_db > existing_prominence_db
             ):
                 peaks_by_index[global_peak_index] = peak_properties
+                diagnostics_by_index[global_peak_index] = candidate_diagnostics
 
     peak_indices = np.array(sorted(peaks_by_index), dtype=int)
     merged_properties = {
@@ -668,11 +709,26 @@ def _find_axis_peaks_by_bands(
         frequencies=peak_frequencies,
         amplitudes=median[peak_indices],
         diagnostics=PeakDiagnostics(
-            window_power_stability=stability[peak_indices].copy(),
-            mean_session_frequencies=peak_frequencies.copy(),
-            frequency_std_hz=np.zeros(len(peak_indices)),
-            minimum_session_frequencies=peak_frequencies.copy(),
-            maximum_session_frequencies=peak_frequencies.copy(),
+            window_power_stability=np.asarray([
+                diagnostics_by_index[index]["window_power_stability"]
+                for index in peak_indices
+            ]),
+            mean_session_frequencies=np.asarray([
+                diagnostics_by_index[index]["mean_session_frequency"]
+                for index in peak_indices
+            ]),
+            frequency_std_hz=np.asarray([
+                diagnostics_by_index[index]["frequency_std_hz"]
+                for index in peak_indices
+            ]),
+            minimum_session_frequencies=np.asarray([
+                diagnostics_by_index[index]["minimum_session_frequency"]
+                for index in peak_indices
+            ]),
+            maximum_session_frequencies=np.asarray([
+                diagnostics_by_index[index]["maximum_session_frequency"]
+                for index in peak_indices
+            ]),
         ),
         properties=merged_properties,
     )
