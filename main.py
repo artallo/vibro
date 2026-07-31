@@ -37,6 +37,7 @@ class AnalysisBand:
     prominence_db: float
     min_distance_hz: float
     min_stability: float
+    frequency_tolerance_hz: float
 
 
 @dataclass(frozen=True)
@@ -174,6 +175,7 @@ def load_config(path: Path) -> ApplicationConfig:
             prominence_db=entry["prominence_db"],
             min_distance_hz=entry["min_distance_hz"],
             min_stability=entry["min_stability"],
+            frequency_tolerance_hz=entry["frequency_tolerance_hz"],
         )
         for entry in band_entries
     ]
