@@ -390,6 +390,74 @@ class SessionResult:
 
 
 @dataclass
+class AlignedPSDData:
+    frequency: np.ndarray
+    x_stack: np.ndarray
+    y_stack: np.ndarray
+    z_stack: np.ndarray
+
+
+def validate_aligned_psd_data(
+    aligned: AlignedPSDData,
+) -> None:
+    frequency = aligned.frequency
+    if not isinstance(frequency, np.ndarray) or frequency.ndim != 1:
+        raise ValueError("Aligned PSD frequency must be a one-dimensional array")
+    if len(frequency) < 2:
+        raise ValueError("Aligned PSD frequency must contain at least two points")
+    try:
+        frequency_is_finite = np.all(np.isfinite(frequency))
+        frequency_is_increasing = np.all(np.diff(frequency) > 0)
+    except TypeError:
+        frequency_is_finite = False
+        frequency_is_increasing = False
+    if not frequency_is_finite:
+        raise ValueError("Aligned PSD frequency must contain only finite values")
+    if not frequency_is_increasing:
+        raise ValueError("Aligned PSD frequency must be strictly increasing")
+
+    def validate_stack(
+        stack: np.ndarray,
+        axis_name: str,
+    ) -> None:
+        if not isinstance(stack, np.ndarray) or stack.ndim != 2:
+            raise ValueError(
+                f"Aligned {axis_name} PSD stack must be a two-dimensional array"
+            )
+        if stack.shape[0] < 1:
+            raise ValueError(
+                f"Aligned {axis_name} PSD stack must contain at least one session"
+            )
+        if stack.shape[1] != len(frequency):
+            raise ValueError(
+                f"Aligned {axis_name} PSD stack width must match frequency length"
+            )
+        try:
+            stack_is_finite = np.all(np.isfinite(stack))
+            stack_is_non_negative = not np.any(stack < 0)
+        except TypeError:
+            stack_is_finite = False
+            stack_is_non_negative = False
+        if not stack_is_finite:
+            raise ValueError(
+                f"Aligned {axis_name} PSD stack must contain only finite values"
+            )
+        if not stack_is_non_negative:
+            raise ValueError(
+                f"Aligned {axis_name} PSD stack must not contain negative values"
+            )
+
+    validate_stack(aligned.x_stack, "X")
+    validate_stack(aligned.y_stack, "Y")
+    validate_stack(aligned.z_stack, "Z")
+
+    if aligned.x_stack.shape != aligned.y_stack.shape:
+        raise ValueError("Aligned X and Y PSD stack shapes must match")
+    if aligned.x_stack.shape != aligned.z_stack.shape:
+        raise ValueError("Aligned X and Z PSD stack shapes must match")
+
+
+@dataclass
 class AxisStatistics:
     median: np.ndarray
     mean: np.ndarray
