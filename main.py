@@ -1080,6 +1080,51 @@ def find_psd_peaks(
     )
 
 
+def find_psd_peaks_from_aligned_psd(
+    statistics: StatisticsResult,
+    aligned: AlignedPSDData,
+    analysis_bands: list[AnalysisBand],
+) -> PeakResult:
+    validate_aligned_psd_data(aligned)
+    if not analysis_bands:
+        raise ValueError("At least one analysis band is required")
+
+    expected_length = len(aligned.frequency)
+    for axis_name in ("x", "y", "z"):
+        axis_statistics = getattr(statistics, axis_name)
+        for statistic_name in ("median", "mean", "std", "stability"):
+            statistic = getattr(axis_statistics, statistic_name)
+            if len(statistic) != expected_length:
+                raise ValueError(
+                    f"Frequency axis length does not match "
+                    f"{axis_name.upper()} {statistic_name} PSD length"
+                )
+
+    return PeakResult(
+        x=_find_axis_peaks_by_bands(
+            aligned.frequency,
+            statistics.x.median,
+            statistics.x.stability,
+            aligned.x_stack,
+            analysis_bands,
+        ),
+        y=_find_axis_peaks_by_bands(
+            aligned.frequency,
+            statistics.y.median,
+            statistics.y.stability,
+            aligned.y_stack,
+            analysis_bands,
+        ),
+        z=_find_axis_peaks_by_bands(
+            aligned.frequency,
+            statistics.z.median,
+            statistics.z.stability,
+            aligned.z_stack,
+            analysis_bands,
+        ),
+    )
+
+
 def compute_statistics_from_aligned_psd(
     aligned: AlignedPSDData,
 ) -> StatisticsResult:
