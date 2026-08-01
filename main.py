@@ -713,18 +713,21 @@ def annotate_peak_frequencies(
 def build_visualization_data(
     statistics: StatisticsResult,
     peaks: PeakResult,
-    sessions: list[SessionResult],
+    frequency: np.ndarray,
 ) -> VisualizationData:
-    if not sessions:
-        raise ValueError("At least one completed session is required")
-
-    session = sessions[0]
-    frequency = session.x.psd.freq
-
-    if not np.array_equal(frequency, session.y.psd.freq):
-        raise ValueError("PSD frequency axes do not match")
-    if not np.array_equal(frequency, session.z.psd.freq):
-        raise ValueError("PSD frequency axes do not match")
+    if not isinstance(frequency, np.ndarray):
+        raise ValueError("Frequency axis must be a NumPy array")
+    if frequency.ndim != 1:
+        raise ValueError("Frequency axis must be one-dimensional")
+    if len(frequency) < 2:
+        raise ValueError("Frequency axis must contain at least two points")
+    try:
+        if not np.all(np.isfinite(frequency)):
+            raise ValueError("Frequency axis must contain only finite values")
+        if not np.all(np.diff(frequency) > 0):
+            raise ValueError("Frequency axis must be strictly increasing")
+    except TypeError as error:
+        raise ValueError("Frequency axis must contain numeric values") from error
 
     def build_axis(
         axis_name: str,
@@ -1001,87 +1004,6 @@ def _find_axis_peaks_by_bands(
 
 def find_psd_peaks(
     statistics: StatisticsResult,
-    sessions: list[SessionResult],
-    analysis_bands: list[AnalysisBand],
-) -> PeakResult:
-    if not sessions:
-        raise ValueError("At least one completed session is required")
-    if not analysis_bands:
-        raise ValueError("At least one analysis band is required")
-
-    freq = sessions[0].x.psd.freq
-
-    for session in sessions:
-        if not np.array_equal(session.x.psd.freq, session.y.psd.freq):
-            raise ValueError("PSD frequency axes do not match")
-        if not np.array_equal(session.x.psd.freq, session.z.psd.freq):
-            raise ValueError("PSD frequency axes do not match")
-        if not np.array_equal(freq, session.x.psd.freq):
-            raise ValueError("Session PSD frequency axes do not match")
-
-        for axis_name in ("x", "y", "z"):
-            psd = getattr(session, axis_name).psd.psd
-            if len(psd) != len(freq):
-                raise ValueError(
-                    f"Frequency axis length does not match "
-                    f"{axis_name.upper()} PSD length"
-                )
-            if not np.all(np.isfinite(psd)):
-                raise ValueError(
-                    f"{axis_name.upper()} PSD must contain only finite values"
-                )
-            if np.any(psd < 0):
-                raise ValueError(
-                    f"{axis_name.upper()} PSD must not contain negative values"
-                )
-
-    if len(freq) != len(statistics.x.median):
-        raise ValueError("Frequency axis length does not match X median PSD length")
-    if len(freq) != len(statistics.y.median):
-        raise ValueError("Frequency axis length does not match Y median PSD length")
-    if len(freq) != len(statistics.z.median):
-        raise ValueError("Frequency axis length does not match Z median PSD length")
-
-    x_psd_stack = np.stack(
-        [session.x.psd.psd for session in sessions],
-        axis=0,
-    )
-    y_psd_stack = np.stack(
-        [session.y.psd.psd for session in sessions],
-        axis=0,
-    )
-    z_psd_stack = np.stack(
-        [session.z.psd.psd for session in sessions],
-        axis=0,
-    )
-
-    return PeakResult(
-        x=_find_axis_peaks_by_bands(
-            freq,
-            statistics.x.median,
-            statistics.x.stability,
-            x_psd_stack,
-            analysis_bands,
-        ),
-        y=_find_axis_peaks_by_bands(
-            freq,
-            statistics.y.median,
-            statistics.y.stability,
-            y_psd_stack,
-            analysis_bands,
-        ),
-        z=_find_axis_peaks_by_bands(
-            freq,
-            statistics.z.median,
-            statistics.z.stability,
-            z_psd_stack,
-            analysis_bands,
-        ),
-    )
-
-
-def find_psd_peaks_from_aligned_psd(
-    statistics: StatisticsResult,
     aligned: AlignedPSDData,
     analysis_bands: list[AnalysisBand],
 ) -> PeakResult:
@@ -1125,7 +1047,7 @@ def find_psd_peaks_from_aligned_psd(
     )
 
 
-def compute_statistics_from_aligned_psd(
+def compute_statistics(
     aligned: AlignedPSDData,
 ) -> StatisticsResult:
     validate_aligned_psd_data(aligned)
@@ -1153,41 +1075,6 @@ def compute_statistics_from_aligned_psd(
         y=compute_axis_statistics(aligned.y_stack),
         z=compute_axis_statistics(aligned.z_stack),
     )
-
-
-def compute_statistics(
-    sessions: list[SessionResult],
-) -> StatisticsResult:
-    def compute_axis_statistics(axis: str) -> AxisStatistics:
-        psd_stack = np.stack(
-            [getattr(session, axis).psd.psd for session in sessions],
-            axis=0
-        )
-
-        median = np.median(psd_stack, axis=0)
-        mean = np.mean(psd_stack, axis=0)
-        std = np.std(psd_stack, axis=0)
-        stability = np.divide(
-            mean,
-            std,
-            out=np.zeros_like(mean),
-            where=std != 0
-        )
-
-        return AxisStatistics(
-            median=median,
-            mean=mean,
-            std=std,
-            stability=stability
-        )
-
-    return StatisticsResult(
-        x=compute_axis_statistics("x"),
-        y=compute_axis_statistics("y"),
-        z=compute_axis_statistics("z")
-    )
-
-
 # ==========================================================
 
 try:
@@ -1474,16 +1361,17 @@ peaks: PeakResult | None = None
 visualization_data: VisualizationData | None = None
 
 if sessions:
-    statistics = compute_statistics(sessions)
+    aligned_psd = build_aligned_psd_data(sessions)
+    statistics = compute_statistics(aligned_psd)
     peaks = find_psd_peaks(
         statistics,
-        sessions,
+        aligned_psd,
         analysis_bands,
     )
     visualization_data = build_visualization_data(
         statistics,
         peaks,
-        sessions,
+        aligned_psd.frequency,
     )
 
 if not sessions:
