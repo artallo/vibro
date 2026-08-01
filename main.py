@@ -1080,6 +1080,36 @@ def find_psd_peaks(
     )
 
 
+def compute_statistics_from_aligned_psd(
+    aligned: AlignedPSDData,
+) -> StatisticsResult:
+    validate_aligned_psd_data(aligned)
+
+    def compute_axis_statistics(stack: np.ndarray) -> AxisStatistics:
+        median = np.median(stack, axis=0)
+        mean = np.mean(stack, axis=0)
+        std = np.std(stack, axis=0)
+        stability = np.divide(
+            mean,
+            std,
+            out=np.zeros_like(mean),
+            where=std != 0,
+        )
+
+        return AxisStatistics(
+            median=median,
+            mean=mean,
+            std=std,
+            stability=stability,
+        )
+
+    return StatisticsResult(
+        x=compute_axis_statistics(aligned.x_stack),
+        y=compute_axis_statistics(aligned.y_stack),
+        z=compute_axis_statistics(aligned.z_stack),
+    )
+
+
 def compute_statistics(
     sessions: list[SessionResult],
 ) -> StatisticsResult:
