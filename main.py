@@ -457,6 +457,137 @@ def validate_aligned_psd_data(
         raise ValueError("Aligned X and Z PSD stack shapes must match")
 
 
+def build_aligned_psd_data(
+    sessions: list[SessionResult],
+) -> AlignedPSDData:
+    if not sessions:
+        raise ValueError("At least one completed session is required")
+
+    source_data: dict[str, list[tuple[np.ndarray, np.ndarray]]] = {
+        "x": [],
+        "y": [],
+        "z": [],
+    }
+    all_frequencies = []
+
+    for session_index, session in enumerate(sessions, start=1):
+        for axis_name in source_data:
+            try:
+                psd_result = getattr(session, axis_name).psd
+                frequency = psd_result.freq
+                psd = psd_result.psd
+            except AttributeError as error:
+                raise ValueError(
+                    f"Session {session_index} must contain "
+                    f"{axis_name.upper()} PSD data"
+                ) from error
+
+            if not isinstance(frequency, np.ndarray) or frequency.ndim != 1:
+                raise ValueError(
+                    f"Session {session_index} {axis_name.upper()} PSD frequency "
+                    "must be a one-dimensional array"
+                )
+            if len(frequency) < 2:
+                raise ValueError(
+                    f"Session {session_index} {axis_name.upper()} PSD frequency "
+                    "must contain at least two points"
+                )
+            try:
+                frequency_is_finite = np.all(np.isfinite(frequency))
+                frequency_is_increasing = np.all(np.diff(frequency) > 0)
+            except TypeError:
+                frequency_is_finite = False
+                frequency_is_increasing = False
+            if not frequency_is_finite:
+                raise ValueError(
+                    f"Session {session_index} {axis_name.upper()} PSD frequency "
+                    "must contain only finite values"
+                )
+            if not frequency_is_increasing:
+                raise ValueError(
+                    f"Session {session_index} {axis_name.upper()} PSD frequency "
+                    "must be strictly increasing"
+                )
+
+            if not isinstance(psd, np.ndarray) or psd.ndim != 1:
+                raise ValueError(
+                    f"Session {session_index} {axis_name.upper()} PSD "
+                    "must be a one-dimensional array"
+                )
+            if len(psd) != len(frequency):
+                raise ValueError(
+                    f"Session {session_index} {axis_name.upper()} PSD length "
+                    "must match frequency length"
+                )
+            try:
+                psd_is_finite = np.all(np.isfinite(psd))
+                psd_is_non_negative = not np.any(psd < 0)
+            except TypeError:
+                psd_is_finite = False
+                psd_is_non_negative = False
+            if not psd_is_finite:
+                raise ValueError(
+                    f"Session {session_index} {axis_name.upper()} PSD "
+                    "must contain only finite values"
+                )
+            if not psd_is_non_negative:
+                raise ValueError(
+                    f"Session {session_index} {axis_name.upper()} PSD "
+                    "must not contain negative values"
+                )
+
+            source_data[axis_name].append((frequency, psd))
+            all_frequencies.append(frequency)
+
+    common_min = max(frequency[0] for frequency in all_frequencies)
+    common_max = min(frequency[-1] for frequency in all_frequencies)
+    if common_max <= common_min:
+        raise ValueError("Session PSD frequency ranges must overlap")
+
+    first_frequency = sessions[0].x.psd.freq
+    reference_mask = (
+        (first_frequency >= common_min)
+        & (first_frequency <= common_max)
+    )
+    reference_frequency = first_frequency[reference_mask]
+    if len(reference_frequency) < 2:
+        raise ValueError(
+            "Common session PSD frequency grid must contain at least two points"
+        )
+
+    aligned_stacks = {}
+    for axis_name, axis_source_data in source_data.items():
+        aligned_psd_values = []
+        for source_frequency, source_psd in axis_source_data:
+            if (
+                reference_frequency[0] < source_frequency[0]
+                or reference_frequency[-1] > source_frequency[-1]
+            ):
+                raise ValueError(
+                    "Common PSD frequency grid must be inside every source range"
+                )
+            aligned_psd_values.append(
+                np.interp(
+                    reference_frequency,
+                    source_frequency,
+                    source_psd,
+                )
+            )
+        aligned_stacks[axis_name] = np.stack(
+            aligned_psd_values,
+            axis=0,
+        )
+
+    aligned = AlignedPSDData(
+        frequency=reference_frequency,
+        x_stack=aligned_stacks["x"],
+        y_stack=aligned_stacks["y"],
+        z_stack=aligned_stacks["z"],
+    )
+    validate_aligned_psd_data(aligned)
+    return aligned
+
+
 @dataclass
 class AxisStatistics:
     median: np.ndarray
