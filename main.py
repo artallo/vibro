@@ -38,6 +38,8 @@ class AnalysisBand:
     min_distance_hz: float
     min_stability: float
     frequency_tolerance_hz: float
+    noise_window_hz: float
+    min_snr_db: float
 
 
 @dataclass(frozen=True)
@@ -140,6 +142,14 @@ def validate_config(config: ApplicationConfig) -> None:
             band.frequency_tolerance_hz,
             f"{band_name} frequency_tolerance_hz",
         )
+        require_finite_number(
+            band.noise_window_hz,
+            f"{band_name} noise_window_hz",
+        )
+        require_finite_number(
+            band.min_snr_db,
+            f"{band_name} min_snr_db",
+        )
 
         if band.min_frequency < 0:
             raise ValueError(
@@ -164,6 +174,19 @@ def validate_config(config: ApplicationConfig) -> None:
             raise ValueError(
                 f"{band_name} frequency_tolerance_hz must be non-negative"
             )
+        if band.noise_window_hz <= 0:
+            raise ValueError(
+                f"{band_name} noise_window_hz must be positive"
+            )
+        if band.min_snr_db < 0:
+            raise ValueError(
+                f"{band_name} min_snr_db must be non-negative"
+            )
+        if band.noise_window_hz <= band.frequency_tolerance_hz:
+            raise ValueError(
+                f"{band_name} noise_window_hz must be greater than "
+                "frequency_tolerance_hz"
+            )
 
 
 def load_config(path: Path) -> ApplicationConfig:
@@ -184,6 +207,8 @@ def load_config(path: Path) -> ApplicationConfig:
             min_distance_hz=entry["min_distance_hz"],
             min_stability=entry["min_stability"],
             frequency_tolerance_hz=entry["frequency_tolerance_hz"],
+            noise_window_hz=entry["noise_window_hz"],
+            min_snr_db=entry["min_snr_db"],
         )
         for entry in band_entries
     ]
@@ -262,6 +287,118 @@ def build_frequency_window_mask(
         raise ValueError("Frequency window must contain at least one point")
 
     return window_mask
+
+
+def build_local_noise_mask(
+    frequency: np.ndarray,
+    peak_frequency: float,
+    peak_tolerance_hz: float,
+    noise_window_hz: float,
+    band_min_frequency: float,
+    band_max_frequency: float,
+) -> np.ndarray:
+    if not isinstance(frequency, np.ndarray) or frequency.ndim != 1:
+        raise ValueError("Frequency must be a one-dimensional array")
+    if len(frequency) < 2:
+        raise ValueError("Frequency axis must contain at least two points")
+
+    try:
+        if not np.all(np.isfinite(frequency)):
+            raise ValueError("Frequency must contain only finite values")
+        if not np.all(np.diff(frequency) > 0):
+            raise ValueError("Frequency must be strictly increasing")
+    except TypeError as error:
+        raise ValueError("Frequency must contain numeric values") from error
+
+    scalar_parameters = {
+        "Peak frequency": peak_frequency,
+        "Peak tolerance": peak_tolerance_hz,
+        "Noise window": noise_window_hz,
+        "Band minimum frequency": band_min_frequency,
+        "Band maximum frequency": band_max_frequency,
+    }
+    valid_number_types = (int, float, np.integer, np.floating)
+    invalid_boolean_types = (bool, np.bool_)
+    for name, value in scalar_parameters.items():
+        if (
+            not isinstance(value, valid_number_types)
+            or isinstance(value, invalid_boolean_types)
+            or not np.isfinite(value)
+        ):
+            raise ValueError(f"{name} must be a finite number")
+
+    if peak_tolerance_hz < 0:
+        raise ValueError("Peak tolerance must be non-negative")
+    if noise_window_hz < 0:
+        raise ValueError("Noise window must be non-negative")
+    if noise_window_hz <= peak_tolerance_hz:
+        raise ValueError("Noise window must be greater than peak tolerance")
+    if band_max_frequency <= band_min_frequency:
+        raise ValueError(
+            "Band maximum frequency must be greater than minimum frequency"
+        )
+    if not band_min_frequency <= peak_frequency <= band_max_frequency:
+        raise ValueError("Peak frequency must be inside the analysis band")
+
+    outer_min_frequency = max(
+        peak_frequency - noise_window_hz,
+        band_min_frequency,
+    )
+    outer_max_frequency = min(
+        peak_frequency + noise_window_hz,
+        band_max_frequency,
+    )
+    outer_mask = (
+        (frequency >= outer_min_frequency)
+        & (frequency <= outer_max_frequency)
+    )
+    peak_window_mask = (
+        (frequency >= peak_frequency - peak_tolerance_hz)
+        & (frequency <= peak_frequency + peak_tolerance_hz)
+    )
+    return outer_mask & ~peak_window_mask
+
+
+def compute_local_snr_db(
+    median_psd: np.ndarray,
+    peak_index: int,
+    noise_mask: np.ndarray,
+) -> tuple[float, float]:
+    if not isinstance(median_psd, np.ndarray) or median_psd.ndim != 1:
+        raise ValueError("Median PSD must be a one-dimensional array")
+    try:
+        if not np.all(np.isfinite(median_psd)):
+            raise ValueError("Median PSD must contain only finite values")
+        if np.any(median_psd < 0):
+            raise ValueError("Median PSD must not contain negative values")
+    except TypeError as error:
+        raise ValueError("Median PSD must contain numeric values") from error
+
+    if not isinstance(noise_mask, np.ndarray) or noise_mask.ndim != 1:
+        raise ValueError("Noise mask must be a one-dimensional array")
+    if noise_mask.dtype != np.bool_:
+        raise ValueError("Noise mask must have boolean dtype")
+    if len(noise_mask) != len(median_psd):
+        raise ValueError("Median PSD and noise mask lengths must match")
+
+    if (
+        not isinstance(peak_index, (int, np.integer))
+        or isinstance(peak_index, (bool, np.bool_))
+    ):
+        raise ValueError("Peak index must be an integer")
+    if not 0 <= peak_index < len(median_psd):
+        raise ValueError("Peak index is outside Median PSD")
+    if noise_mask[peak_index]:
+        raise ValueError("Peak index must not be included in the noise mask")
+    if np.count_nonzero(noise_mask) < 3:
+        raise ValueError("Noise region must contain at least three points")
+
+    local_noise_floor = float(np.median(median_psd[noise_mask]))
+    peak_psd = median_psd[peak_index]
+    safe_peak = max(peak_psd, np.finfo(float).tiny)
+    safe_noise = max(local_noise_floor, np.finfo(float).tiny)
+    local_snr_db = float(10.0 * np.log10(safe_peak / safe_noise))
+    return local_noise_floor, local_snr_db
 
 
 def compute_window_power(
@@ -610,6 +747,8 @@ class PeakDiagnostics:
     frequency_std_hz: np.ndarray
     minimum_session_frequencies: np.ndarray
     maximum_session_frequencies: np.ndarray
+    local_noise_floor: np.ndarray
+    local_snr_db: np.ndarray
 
 
 @dataclass
@@ -641,6 +780,8 @@ class VisualizationAxis:
     peak_frequency_std_hz: np.ndarray
     peak_minimum_session_frequencies: np.ndarray
     peak_maximum_session_frequencies: np.ndarray
+    peak_local_noise_floor: np.ndarray
+    peak_local_snr_db: np.ndarray
 
 
 @dataclass
@@ -687,6 +828,7 @@ def annotate_peak_frequencies(
     peak_frequencies,
     peak_values,
     peak_frequency_std_hz,
+    local_snr_db,
 ) -> None:
     if len(peak_frequencies) != len(peak_values):
         raise ValueError("Peak frequency and value arrays must have equal lengths")
@@ -694,13 +836,18 @@ def annotate_peak_frequencies(
         raise ValueError(
             "Peak frequency and frequency spread arrays must have equal lengths"
         )
+    if len(peak_frequencies) != len(local_snr_db):
+        raise ValueError(
+            "Peak frequency and local SNR arrays must have equal lengths"
+        )
 
     for index in range(len(peak_frequencies)):
         frequency = peak_frequencies[index]
         value = peak_values[index]
         ax.annotate(
             f"{frequency:.1f} Hz\n"
-            f"σf {peak_frequency_std_hz[index]:.2f} Hz",
+            f"σf {peak_frequency_std_hz[index]:.2f} Hz\n"
+            f"SNR {local_snr_db[index]:.1f} dB",
             xy=(frequency, value),
             xytext=(0, 6),
             textcoords="offset points",
@@ -770,6 +917,10 @@ def build_visualization_data(
             "maximum session frequencies": (
                 axis_peaks.diagnostics.maximum_session_frequencies
             ),
+            "local noise floor": (
+                axis_peaks.diagnostics.local_noise_floor
+            ),
+            "local SNR": axis_peaks.diagnostics.local_snr_db,
         }
         for diagnostic_name, diagnostic_array in diagnostic_arrays.items():
             if len(diagnostic_array) != peak_count:
@@ -801,6 +952,10 @@ def build_visualization_data(
             peak_maximum_session_frequencies=(
                 axis_peaks.diagnostics.maximum_session_frequencies
             ),
+            peak_local_noise_floor=(
+                axis_peaks.diagnostics.local_noise_floor
+            ),
+            peak_local_snr_db=axis_peaks.diagnostics.local_snr_db,
         )
 
     return VisualizationData(
@@ -850,6 +1005,8 @@ def _find_axis_peaks_by_bands(
                 frequency_std_hz=np.array([]),
                 minimum_session_frequencies=np.array([]),
                 maximum_session_frequencies=np.array([]),
+                local_noise_floor=np.array([]),
+                local_snr_db=np.array([]),
             ),
             properties={}
         )
@@ -894,6 +1051,27 @@ def _find_axis_peaks_by_bands(
         for position, local_peak_index in enumerate(local_peak_indices):
             global_peak_index = global_indices[local_peak_index]
             candidate_frequency = freq[global_peak_index]
+            noise_mask = build_local_noise_mask(
+                freq,
+                candidate_frequency,
+                band.frequency_tolerance_hz,
+                band.noise_window_hz,
+                band.min_frequency,
+                band.max_frequency,
+            )
+            try:
+                local_noise_floor, local_snr_db = compute_local_snr_db(
+                    median,
+                    global_peak_index,
+                    noise_mask,
+                )
+            except ValueError:
+                if np.count_nonzero(noise_mask) < 3:
+                    continue
+                raise
+            if local_snr_db < band.min_snr_db:
+                continue
+
             window_mask = build_frequency_window_mask(
                 freq,
                 candidate_frequency,
@@ -936,6 +1114,8 @@ def _find_axis_peaks_by_bands(
                 "maximum_session_frequency": float(
                     np.max(session_peak_frequencies)
                 ),
+                "local_noise_floor": local_noise_floor,
+                "local_snr_db": local_snr_db,
             }
 
             if window_power_stability < band.min_stability:
@@ -995,6 +1175,14 @@ def _find_axis_peaks_by_bands(
             ]),
             maximum_session_frequencies=np.asarray([
                 diagnostics_by_index[index]["maximum_session_frequency"]
+                for index in peak_indices
+            ]),
+            local_noise_floor=np.asarray([
+                diagnostics_by_index[index]["local_noise_floor"]
+                for index in peak_indices
+            ]),
+            local_snr_db=np.asarray([
+                diagnostics_by_index[index]["local_snr_db"]
                 for index in peak_indices
             ]),
         ),
@@ -1429,6 +1617,7 @@ for axis_index, (axis_name, axis_data) in enumerate(visualization_axes.items()):
         axis_data.peak_frequencies,
         axis_data.peak_amplitudes,
         axis_data.peak_frequency_std_hz,
+        axis_data.peak_local_snr_db,
     )
     psd_axis.set_title(f"{axis_name} axis — Median PSD")
     psd_axis.set_ylabel("PSD [g²/Hz]")
