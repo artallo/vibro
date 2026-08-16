@@ -867,6 +867,8 @@ class VisualizationAxis:
     mean_psd: np.ndarray
     std_psd: np.ndarray
     stability: np.ndarray
+    local_psd_background: np.ndarray
+    local_psd_contrast_db: np.ndarray
     peak_frequencies: np.ndarray
     peak_amplitudes: np.ndarray
     peak_window_power_stability: np.ndarray
@@ -955,6 +957,7 @@ def build_visualization_data(
     statistics: StatisticsResult,
     peaks: PeakResult,
     frequency: np.ndarray,
+    analysis_bands: list[AnalysisBand],
 ) -> VisualizationData:
     if not isinstance(frequency, np.ndarray):
         raise ValueError("Frequency axis must be a NumPy array")
@@ -1023,12 +1026,34 @@ def build_visualization_data(
                     f"peak frequency length for {axis_name}"
                 )
 
+        local_psd_background = compute_local_psd_background(
+            frequency,
+            axis_statistics.median,
+            analysis_bands,
+        )
+        local_psd_contrast_db = compute_local_psd_contrast_db(
+            axis_statistics.median,
+            local_psd_background,
+        )
+        if len(local_psd_background) != expected_length:
+            raise ValueError(
+                f"Local PSD background length does not match frequency length "
+                f"for {axis_name}"
+            )
+        if len(local_psd_contrast_db) != expected_length:
+            raise ValueError(
+                f"Local PSD contrast length does not match frequency length "
+                f"for {axis_name}"
+            )
+
         return VisualizationAxis(
             frequency=frequency,
             median_psd=axis_statistics.median,
             mean_psd=axis_statistics.mean,
             std_psd=axis_statistics.std,
             stability=axis_statistics.stability,
+            local_psd_background=local_psd_background,
+            local_psd_contrast_db=local_psd_contrast_db,
             peak_frequencies=axis_peaks.frequencies,
             peak_amplitudes=axis_peaks.amplitudes,
             peak_window_power_stability=(
@@ -1654,6 +1679,7 @@ if sessions:
         statistics,
         peaks,
         aligned_psd.frequency,
+        analysis_bands,
     )
 
 if not sessions:
