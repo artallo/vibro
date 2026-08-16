@@ -359,6 +359,48 @@ def build_local_noise_mask(
     return outer_mask & ~peak_window_mask
 
 
+def compute_local_snr_db(
+    median_psd: np.ndarray,
+    peak_index: int,
+    noise_mask: np.ndarray,
+) -> tuple[float, float]:
+    if not isinstance(median_psd, np.ndarray) or median_psd.ndim != 1:
+        raise ValueError("Median PSD must be a one-dimensional array")
+    try:
+        if not np.all(np.isfinite(median_psd)):
+            raise ValueError("Median PSD must contain only finite values")
+        if np.any(median_psd < 0):
+            raise ValueError("Median PSD must not contain negative values")
+    except TypeError as error:
+        raise ValueError("Median PSD must contain numeric values") from error
+
+    if not isinstance(noise_mask, np.ndarray) or noise_mask.ndim != 1:
+        raise ValueError("Noise mask must be a one-dimensional array")
+    if noise_mask.dtype != np.bool_:
+        raise ValueError("Noise mask must have boolean dtype")
+    if len(noise_mask) != len(median_psd):
+        raise ValueError("Median PSD and noise mask lengths must match")
+
+    if (
+        not isinstance(peak_index, (int, np.integer))
+        or isinstance(peak_index, (bool, np.bool_))
+    ):
+        raise ValueError("Peak index must be an integer")
+    if not 0 <= peak_index < len(median_psd):
+        raise ValueError("Peak index is outside Median PSD")
+    if noise_mask[peak_index]:
+        raise ValueError("Peak index must not be included in the noise mask")
+    if np.count_nonzero(noise_mask) < 3:
+        raise ValueError("Noise region must contain at least three points")
+
+    local_noise_floor = float(np.median(median_psd[noise_mask]))
+    peak_psd = median_psd[peak_index]
+    safe_peak = max(peak_psd, np.finfo(float).tiny)
+    safe_noise = max(local_noise_floor, np.finfo(float).tiny)
+    local_snr_db = float(10.0 * np.log10(safe_peak / safe_noise))
+    return local_noise_floor, local_snr_db
+
+
 def compute_window_power(
     frequency: np.ndarray,
     psd: np.ndarray,
