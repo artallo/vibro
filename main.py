@@ -463,6 +463,38 @@ def compute_local_psd_background(
     return local_background
 
 
+def compute_local_psd_contrast_db(
+    median_psd: np.ndarray,
+    local_background: np.ndarray,
+) -> np.ndarray:
+    if not isinstance(median_psd, np.ndarray) or median_psd.ndim != 1:
+        raise ValueError("Median PSD must be a one-dimensional array")
+    if not isinstance(local_background, np.ndarray) or local_background.ndim != 1:
+        raise ValueError("Local PSD background must be a one-dimensional array")
+    if len(median_psd) != len(local_background):
+        raise ValueError("Median PSD and local background lengths must match")
+
+    try:
+        if not np.all(np.isfinite(median_psd)):
+            raise ValueError("Median PSD must contain only finite values")
+        finite_background = local_background[~np.isnan(local_background)]
+        if not np.all(np.isfinite(finite_background)):
+            raise ValueError(
+                "Local PSD background must contain only finite values or NaN"
+            )
+        if np.any(median_psd < 0):
+            raise ValueError("Median PSD must not contain negative values")
+        if np.any(finite_background < 0):
+            raise ValueError("Local PSD background must not contain negative values")
+    except TypeError as error:
+        raise ValueError("PSD arrays must contain numeric values") from error
+
+    tiny = np.finfo(float).tiny
+    safe_psd = np.maximum(median_psd, tiny)
+    safe_background = np.maximum(local_background, tiny)
+    return 10.0 * np.log10(safe_psd / safe_background)
+
+
 def compute_window_power(
     frequency: np.ndarray,
     psd: np.ndarray,
