@@ -401,6 +401,100 @@ def compute_local_snr_db(
     return local_noise_floor, local_snr_db
 
 
+def compute_local_psd_background(
+    frequency: np.ndarray,
+    median_psd: np.ndarray,
+    analysis_bands: list[AnalysisBand],
+) -> np.ndarray:
+    if not isinstance(frequency, np.ndarray) or frequency.ndim != 1:
+        raise ValueError("Frequency must be a one-dimensional array")
+    if len(frequency) < 2:
+        raise ValueError("Frequency axis must contain at least two points")
+    try:
+        if not np.all(np.isfinite(frequency)):
+            raise ValueError("Frequency must contain only finite values")
+        if not np.all(np.diff(frequency) > 0):
+            raise ValueError("Frequency must be strictly increasing")
+    except TypeError as error:
+        raise ValueError("Frequency must contain numeric values") from error
+
+    if not isinstance(median_psd, np.ndarray) or median_psd.ndim != 1:
+        raise ValueError("Median PSD must be a one-dimensional array")
+    if len(median_psd) != len(frequency):
+        raise ValueError("Frequency and Median PSD lengths must match")
+    try:
+        if not np.all(np.isfinite(median_psd)):
+            raise ValueError("Median PSD must contain only finite values")
+        if np.any(median_psd < 0):
+            raise ValueError("Median PSD must not contain negative values")
+    except TypeError as error:
+        raise ValueError("Median PSD must contain numeric values") from error
+
+    if not isinstance(analysis_bands, list) or not analysis_bands:
+        raise ValueError("At least one analysis band is required")
+
+    local_background = np.full(len(frequency), np.nan, dtype=float)
+    for index, center_frequency in enumerate(frequency):
+        band = next(
+            (
+                candidate
+                for candidate in analysis_bands
+                if candidate.min_frequency
+                <= center_frequency
+                <= candidate.max_frequency
+            ),
+            None,
+        )
+        if band is None:
+            continue
+
+        noise_mask = build_local_noise_mask(
+            frequency,
+            center_frequency,
+            band.frequency_tolerance_hz,
+            band.noise_window_hz,
+            band.min_frequency,
+            band.max_frequency,
+        )
+        if np.count_nonzero(noise_mask) < 3:
+            continue
+        local_background[index] = np.median(median_psd[noise_mask])
+
+    return local_background
+
+
+def compute_local_psd_contrast_db(
+    median_psd: np.ndarray,
+    local_background: np.ndarray,
+) -> np.ndarray:
+    if not isinstance(median_psd, np.ndarray) or median_psd.ndim != 1:
+        raise ValueError("Median PSD must be a one-dimensional array")
+    if not isinstance(local_background, np.ndarray) or local_background.ndim != 1:
+        raise ValueError("Local PSD background must be a one-dimensional array")
+    if len(median_psd) != len(local_background):
+        raise ValueError("Median PSD and local background lengths must match")
+
+    try:
+        if not np.all(np.isfinite(median_psd)):
+            raise ValueError("Median PSD must contain only finite values")
+        finite_background = local_background[~np.isnan(local_background)]
+        if not np.all(np.isfinite(finite_background)):
+            raise ValueError(
+                "Local PSD background must contain only finite values or NaN"
+            )
+        if np.any(median_psd < 0):
+            raise ValueError("Median PSD must not contain negative values")
+        if np.any(finite_background < 0):
+            raise ValueError("Local PSD background must not contain negative values")
+    except TypeError as error:
+        raise ValueError("PSD arrays must contain numeric values") from error
+
+    tiny = np.finfo(float).tiny
+    safe_psd = np.maximum(median_psd, tiny)
+    safe_background = np.maximum(local_background, tiny)
+    return 10.0 * np.log10(safe_psd / safe_background)
+
+
 def compute_window_power(
     frequency: np.ndarray,
     psd: np.ndarray,
@@ -773,6 +867,8 @@ class VisualizationAxis:
     mean_psd: np.ndarray
     std_psd: np.ndarray
     stability: np.ndarray
+    local_psd_background: np.ndarray
+    local_psd_contrast_db: np.ndarray
     peak_frequencies: np.ndarray
     peak_amplitudes: np.ndarray
     peak_window_power_stability: np.ndarray
@@ -861,6 +957,7 @@ def build_visualization_data(
     statistics: StatisticsResult,
     peaks: PeakResult,
     frequency: np.ndarray,
+    analysis_bands: list[AnalysisBand],
 ) -> VisualizationData:
     if not isinstance(frequency, np.ndarray):
         raise ValueError("Frequency axis must be a NumPy array")
@@ -929,12 +1026,34 @@ def build_visualization_data(
                     f"peak frequency length for {axis_name}"
                 )
 
+        local_psd_background = compute_local_psd_background(
+            frequency,
+            axis_statistics.median,
+            analysis_bands,
+        )
+        local_psd_contrast_db = compute_local_psd_contrast_db(
+            axis_statistics.median,
+            local_psd_background,
+        )
+        if len(local_psd_background) != expected_length:
+            raise ValueError(
+                f"Local PSD background length does not match frequency length "
+                f"for {axis_name}"
+            )
+        if len(local_psd_contrast_db) != expected_length:
+            raise ValueError(
+                f"Local PSD contrast length does not match frequency length "
+                f"for {axis_name}"
+            )
+
         return VisualizationAxis(
             frequency=frequency,
             median_psd=axis_statistics.median,
             mean_psd=axis_statistics.mean,
             std_psd=axis_statistics.std,
             stability=axis_statistics.stability,
+            local_psd_background=local_psd_background,
+            local_psd_contrast_db=local_psd_contrast_db,
             peak_frequencies=axis_peaks.frequencies,
             peak_amplitudes=axis_peaks.amplitudes,
             peak_window_power_stability=(
@@ -1560,6 +1679,7 @@ if sessions:
         statistics,
         peaks,
         aligned_psd.frequency,
+        analysis_bands,
     )
 
 if not sessions:
@@ -1661,6 +1781,59 @@ for axis_index, (axis_name, axis_data) in enumerate(visualization_axes.items()):
 
 stat_axes[-1].set_xlabel("Frequency, Hz")
 stat_fig.suptitle("Statistical vibration analysis")
+
+
+contrast_fig, contrast_axes = plt.subplots(
+    3,
+    1,
+    figsize=(14, 10),
+    sharex=True,
+    constrained_layout=True,
+)
+
+for contrast_axis, (axis_name, axis_data) in zip(
+    contrast_axes,
+    visualization_axes.items(),
+):
+    contrast_axis.plot(
+        axis_data.frequency,
+        axis_data.local_psd_contrast_db,
+        color=COLORS[axis_name],
+        label=f"{axis_name} Local PSD contrast",
+    )
+
+    peak_indices = []
+    for peak_frequency in axis_data.peak_frequencies:
+        matching_indices = np.flatnonzero(
+            axis_data.frequency == peak_frequency
+        )
+        if len(matching_indices) != 1:
+            raise ValueError(
+                f"Stable peak frequency {peak_frequency} Hz does not match "
+                f"exactly one {axis_name} frequency bin"
+            )
+        peak_indices.append(matching_indices[0])
+    peak_indices = np.asarray(peak_indices, dtype=int)
+
+    contrast_axis.scatter(
+        axis_data.peak_frequencies,
+        axis_data.local_psd_contrast_db[peak_indices],
+        color=COLORS[axis_name],
+        marker="x",
+        label="Stable peaks",
+    )
+    contrast_axis.set_title(f"{axis_name} axis — Local PSD contrast")
+    contrast_axis.set_ylabel("Local contrast [dB]")
+    contrast_axis.set_xlim(
+        analysis_min_frequency,
+        analysis_max_frequency,
+    )
+    contrast_axis.grid(True, alpha=0.25, linewidth=0.6)
+    if axis_name == "X":
+        contrast_axis.legend()
+
+contrast_axes[-1].set_xlabel("Frequency, Hz")
+contrast_fig.suptitle("Local PSD contrast")
 
 
 plt.show()
