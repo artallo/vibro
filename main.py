@@ -142,6 +142,14 @@ def validate_config(config: ApplicationConfig) -> None:
             band.frequency_tolerance_hz,
             f"{band_name} frequency_tolerance_hz",
         )
+        require_finite_number(
+            band.noise_window_hz,
+            f"{band_name} noise_window_hz",
+        )
+        require_finite_number(
+            band.min_snr_db,
+            f"{band_name} min_snr_db",
+        )
 
         if band.min_frequency < 0:
             raise ValueError(
@@ -165,6 +173,19 @@ def validate_config(config: ApplicationConfig) -> None:
         if band.frequency_tolerance_hz < 0:
             raise ValueError(
                 f"{band_name} frequency_tolerance_hz must be non-negative"
+            )
+        if band.noise_window_hz <= 0:
+            raise ValueError(
+                f"{band_name} noise_window_hz must be positive"
+            )
+        if band.min_snr_db < 0:
+            raise ValueError(
+                f"{band_name} min_snr_db must be non-negative"
+            )
+        if band.noise_window_hz <= band.frequency_tolerance_hz:
+            raise ValueError(
+                f"{band_name} noise_window_hz must be greater than "
+                "frequency_tolerance_hz"
             )
 
 
