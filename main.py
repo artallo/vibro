@@ -747,6 +747,8 @@ class PeakDiagnostics:
     frequency_std_hz: np.ndarray
     minimum_session_frequencies: np.ndarray
     maximum_session_frequencies: np.ndarray
+    local_noise_floor: np.ndarray
+    local_snr_db: np.ndarray
 
 
 @dataclass
@@ -987,6 +989,8 @@ def _find_axis_peaks_by_bands(
                 frequency_std_hz=np.array([]),
                 minimum_session_frequencies=np.array([]),
                 maximum_session_frequencies=np.array([]),
+                local_noise_floor=np.array([]),
+                local_snr_db=np.array([]),
             ),
             properties={}
         )
@@ -1031,6 +1035,25 @@ def _find_axis_peaks_by_bands(
         for position, local_peak_index in enumerate(local_peak_indices):
             global_peak_index = global_indices[local_peak_index]
             candidate_frequency = freq[global_peak_index]
+            noise_mask = build_local_noise_mask(
+                freq,
+                candidate_frequency,
+                band.frequency_tolerance_hz,
+                band.noise_window_hz,
+                band.min_frequency,
+                band.max_frequency,
+            )
+            try:
+                local_noise_floor, local_snr_db = compute_local_snr_db(
+                    median,
+                    global_peak_index,
+                    noise_mask,
+                )
+            except ValueError:
+                if np.count_nonzero(noise_mask) < 3:
+                    continue
+                raise
+
             window_mask = build_frequency_window_mask(
                 freq,
                 candidate_frequency,
@@ -1073,6 +1096,8 @@ def _find_axis_peaks_by_bands(
                 "maximum_session_frequency": float(
                     np.max(session_peak_frequencies)
                 ),
+                "local_noise_floor": local_noise_floor,
+                "local_snr_db": local_snr_db,
             }
 
             if window_power_stability < band.min_stability:
@@ -1132,6 +1157,14 @@ def _find_axis_peaks_by_bands(
             ]),
             maximum_session_frequencies=np.asarray([
                 diagnostics_by_index[index]["maximum_session_frequency"]
+                for index in peak_indices
+            ]),
+            local_noise_floor=np.asarray([
+                diagnostics_by_index[index]["local_noise_floor"]
+                for index in peak_indices
+            ]),
+            local_snr_db=np.asarray([
+                diagnostics_by_index[index]["local_snr_db"]
                 for index in peak_indices
             ]),
         ),
