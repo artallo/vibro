@@ -1599,7 +1599,7 @@ for axis_index, (axis_name, axis_data) in enumerate(visualization_axes.items()):
     stability_axis = stat_axes[axis_index * 2 + 1]
 
     draw_analysis_bands(psd_axis, analysis_bands)
-    psd_axis.semilogy(
+    psd_axis.plot(
         axis_data.frequency,
         axis_data.median_psd,
         color=COLORS[axis_name],
