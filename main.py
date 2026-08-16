@@ -289,6 +289,76 @@ def build_frequency_window_mask(
     return window_mask
 
 
+def build_local_noise_mask(
+    frequency: np.ndarray,
+    peak_frequency: float,
+    peak_tolerance_hz: float,
+    noise_window_hz: float,
+    band_min_frequency: float,
+    band_max_frequency: float,
+) -> np.ndarray:
+    if not isinstance(frequency, np.ndarray) or frequency.ndim != 1:
+        raise ValueError("Frequency must be a one-dimensional array")
+    if len(frequency) < 2:
+        raise ValueError("Frequency axis must contain at least two points")
+
+    try:
+        if not np.all(np.isfinite(frequency)):
+            raise ValueError("Frequency must contain only finite values")
+        if not np.all(np.diff(frequency) > 0):
+            raise ValueError("Frequency must be strictly increasing")
+    except TypeError as error:
+        raise ValueError("Frequency must contain numeric values") from error
+
+    scalar_parameters = {
+        "Peak frequency": peak_frequency,
+        "Peak tolerance": peak_tolerance_hz,
+        "Noise window": noise_window_hz,
+        "Band minimum frequency": band_min_frequency,
+        "Band maximum frequency": band_max_frequency,
+    }
+    valid_number_types = (int, float, np.integer, np.floating)
+    invalid_boolean_types = (bool, np.bool_)
+    for name, value in scalar_parameters.items():
+        if (
+            not isinstance(value, valid_number_types)
+            or isinstance(value, invalid_boolean_types)
+            or not np.isfinite(value)
+        ):
+            raise ValueError(f"{name} must be a finite number")
+
+    if peak_tolerance_hz < 0:
+        raise ValueError("Peak tolerance must be non-negative")
+    if noise_window_hz < 0:
+        raise ValueError("Noise window must be non-negative")
+    if noise_window_hz <= peak_tolerance_hz:
+        raise ValueError("Noise window must be greater than peak tolerance")
+    if band_max_frequency <= band_min_frequency:
+        raise ValueError(
+            "Band maximum frequency must be greater than minimum frequency"
+        )
+    if not band_min_frequency <= peak_frequency <= band_max_frequency:
+        raise ValueError("Peak frequency must be inside the analysis band")
+
+    outer_min_frequency = max(
+        peak_frequency - noise_window_hz,
+        band_min_frequency,
+    )
+    outer_max_frequency = min(
+        peak_frequency + noise_window_hz,
+        band_max_frequency,
+    )
+    outer_mask = (
+        (frequency >= outer_min_frequency)
+        & (frequency <= outer_max_frequency)
+    )
+    peak_window_mask = (
+        (frequency >= peak_frequency - peak_tolerance_hz)
+        & (frequency <= peak_frequency + peak_tolerance_hz)
+    )
+    return outer_mask & ~peak_window_mask
+
+
 def compute_window_power(
     frequency: np.ndarray,
     psd: np.ndarray,
