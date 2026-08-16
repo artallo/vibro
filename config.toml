@@ -15,20 +15,20 @@ noverlap = 512
 name = "Low frequency"
 min_frequency = 0.5
 max_frequency = 10.0
-prominence_db = 6.0
+prominence_db = 1.8
 min_distance_hz = 1.0
-min_stability = 5.0
-frequency_tolerance_hz = 0.5
+min_stability = 4.5
+frequency_tolerance_hz = 0.25
 noise_window_hz = 1.0
 min_snr_db = 3.0
 
 [[analysis.bands]]
 name = "High frequency"
 min_frequency = 10.0
-max_frequency = 50.0
-prominence_db = 6.0
+max_frequency = 15.0
+prominence_db = 1.8
 min_distance_hz = 1.0
-min_stability = 5.0
-frequency_tolerance_hz = 0.5
+min_stability = 4.5
+frequency_tolerance_hz = 0.25
 noise_window_hz = 2.0
 min_snr_db = 4.0
