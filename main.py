@@ -1783,4 +1783,57 @@ stat_axes[-1].set_xlabel("Frequency, Hz")
 stat_fig.suptitle("Statistical vibration analysis")
 
 
+contrast_fig, contrast_axes = plt.subplots(
+    3,
+    1,
+    figsize=(14, 10),
+    sharex=True,
+    constrained_layout=True,
+)
+
+for contrast_axis, (axis_name, axis_data) in zip(
+    contrast_axes,
+    visualization_axes.items(),
+):
+    contrast_axis.plot(
+        axis_data.frequency,
+        axis_data.local_psd_contrast_db,
+        color=COLORS[axis_name],
+        label=f"{axis_name} Local PSD contrast",
+    )
+
+    peak_indices = []
+    for peak_frequency in axis_data.peak_frequencies:
+        matching_indices = np.flatnonzero(
+            axis_data.frequency == peak_frequency
+        )
+        if len(matching_indices) != 1:
+            raise ValueError(
+                f"Stable peak frequency {peak_frequency} Hz does not match "
+                f"exactly one {axis_name} frequency bin"
+            )
+        peak_indices.append(matching_indices[0])
+    peak_indices = np.asarray(peak_indices, dtype=int)
+
+    contrast_axis.scatter(
+        axis_data.peak_frequencies,
+        axis_data.local_psd_contrast_db[peak_indices],
+        color=COLORS[axis_name],
+        marker="x",
+        label="Stable peaks",
+    )
+    contrast_axis.set_title(f"{axis_name} axis — Local PSD contrast")
+    contrast_axis.set_ylabel("Local contrast [dB]")
+    contrast_axis.set_xlim(
+        analysis_min_frequency,
+        analysis_max_frequency,
+    )
+    contrast_axis.grid(True, alpha=0.25, linewidth=0.6)
+    if axis_name == "X":
+        contrast_axis.legend()
+
+contrast_axes[-1].set_xlabel("Frequency, Hz")
+contrast_fig.suptitle("Local PSD contrast")
+
+
 plt.show()
