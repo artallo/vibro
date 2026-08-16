@@ -401,6 +401,68 @@ def compute_local_snr_db(
     return local_noise_floor, local_snr_db
 
 
+def compute_local_psd_background(
+    frequency: np.ndarray,
+    median_psd: np.ndarray,
+    analysis_bands: list[AnalysisBand],
+) -> np.ndarray:
+    if not isinstance(frequency, np.ndarray) or frequency.ndim != 1:
+        raise ValueError("Frequency must be a one-dimensional array")
+    if len(frequency) < 2:
+        raise ValueError("Frequency axis must contain at least two points")
+    try:
+        if not np.all(np.isfinite(frequency)):
+            raise ValueError("Frequency must contain only finite values")
+        if not np.all(np.diff(frequency) > 0):
+            raise ValueError("Frequency must be strictly increasing")
+    except TypeError as error:
+        raise ValueError("Frequency must contain numeric values") from error
+
+    if not isinstance(median_psd, np.ndarray) or median_psd.ndim != 1:
+        raise ValueError("Median PSD must be a one-dimensional array")
+    if len(median_psd) != len(frequency):
+        raise ValueError("Frequency and Median PSD lengths must match")
+    try:
+        if not np.all(np.isfinite(median_psd)):
+            raise ValueError("Median PSD must contain only finite values")
+        if np.any(median_psd < 0):
+            raise ValueError("Median PSD must not contain negative values")
+    except TypeError as error:
+        raise ValueError("Median PSD must contain numeric values") from error
+
+    if not isinstance(analysis_bands, list) or not analysis_bands:
+        raise ValueError("At least one analysis band is required")
+
+    local_background = np.full(len(frequency), np.nan, dtype=float)
+    for index, center_frequency in enumerate(frequency):
+        band = next(
+            (
+                candidate
+                for candidate in analysis_bands
+                if candidate.min_frequency
+                <= center_frequency
+                <= candidate.max_frequency
+            ),
+            None,
+        )
+        if band is None:
+            continue
+
+        noise_mask = build_local_noise_mask(
+            frequency,
+            center_frequency,
+            band.frequency_tolerance_hz,
+            band.noise_window_hz,
+            band.min_frequency,
+            band.max_frequency,
+        )
+        if np.count_nonzero(noise_mask) < 3:
+            continue
+        local_background[index] = np.median(median_psd[noise_mask])
+
+    return local_background
+
+
 def compute_window_power(
     frequency: np.ndarray,
     psd: np.ndarray,
