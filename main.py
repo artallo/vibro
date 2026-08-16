@@ -1053,6 +1053,8 @@ def _find_axis_peaks_by_bands(
                 if np.count_nonzero(noise_mask) < 3:
                     continue
                 raise
+            if local_snr_db < band.min_snr_db:
+                continue
 
             window_mask = build_frequency_window_mask(
                 freq,
