@@ -38,6 +38,8 @@ class AnalysisBand:
     min_distance_hz: float
     min_stability: float
     frequency_tolerance_hz: float
+    noise_window_hz: float
+    min_snr_db: float
 
 
 @dataclass(frozen=True)
@@ -184,6 +186,8 @@ def load_config(path: Path) -> ApplicationConfig:
             min_distance_hz=entry["min_distance_hz"],
             min_stability=entry["min_stability"],
             frequency_tolerance_hz=entry["frequency_tolerance_hz"],
+            noise_window_hz=entry["noise_window_hz"],
+            min_snr_db=entry["min_snr_db"],
         )
         for entry in band_entries
     ]
