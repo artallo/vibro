@@ -780,6 +780,8 @@ class VisualizationAxis:
     peak_frequency_std_hz: np.ndarray
     peak_minimum_session_frequencies: np.ndarray
     peak_maximum_session_frequencies: np.ndarray
+    peak_local_noise_floor: np.ndarray
+    peak_local_snr_db: np.ndarray
 
 
 @dataclass
@@ -826,6 +828,7 @@ def annotate_peak_frequencies(
     peak_frequencies,
     peak_values,
     peak_frequency_std_hz,
+    local_snr_db,
 ) -> None:
     if len(peak_frequencies) != len(peak_values):
         raise ValueError("Peak frequency and value arrays must have equal lengths")
@@ -833,13 +836,18 @@ def annotate_peak_frequencies(
         raise ValueError(
             "Peak frequency and frequency spread arrays must have equal lengths"
         )
+    if len(peak_frequencies) != len(local_snr_db):
+        raise ValueError(
+            "Peak frequency and local SNR arrays must have equal lengths"
+        )
 
     for index in range(len(peak_frequencies)):
         frequency = peak_frequencies[index]
         value = peak_values[index]
         ax.annotate(
             f"{frequency:.1f} Hz\n"
-            f"σf {peak_frequency_std_hz[index]:.2f} Hz",
+            f"σf {peak_frequency_std_hz[index]:.2f} Hz\n"
+            f"SNR {local_snr_db[index]:.1f} dB",
             xy=(frequency, value),
             xytext=(0, 6),
             textcoords="offset points",
@@ -909,6 +917,10 @@ def build_visualization_data(
             "maximum session frequencies": (
                 axis_peaks.diagnostics.maximum_session_frequencies
             ),
+            "local noise floor": (
+                axis_peaks.diagnostics.local_noise_floor
+            ),
+            "local SNR": axis_peaks.diagnostics.local_snr_db,
         }
         for diagnostic_name, diagnostic_array in diagnostic_arrays.items():
             if len(diagnostic_array) != peak_count:
@@ -940,6 +952,10 @@ def build_visualization_data(
             peak_maximum_session_frequencies=(
                 axis_peaks.diagnostics.maximum_session_frequencies
             ),
+            peak_local_noise_floor=(
+                axis_peaks.diagnostics.local_noise_floor
+            ),
+            peak_local_snr_db=axis_peaks.diagnostics.local_snr_db,
         )
 
     return VisualizationData(
@@ -1601,6 +1617,7 @@ for axis_index, (axis_name, axis_data) in enumerate(visualization_axes.items()):
         axis_data.peak_frequencies,
         axis_data.peak_amplitudes,
         axis_data.peak_frequency_std_hz,
+        axis_data.peak_local_snr_db,
     )
     psd_axis.set_title(f"{axis_name} axis — Median PSD")
     psd_axis.set_ylabel("PSD [g²/Hz]")
