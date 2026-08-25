@@ -1,6 +1,7 @@
+import argparse
 import struct
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,8 @@ CONFIG_PATH = Path(__file__).with_name("config.toml")
 # AXIS = "X"          # X / Y / Z
 
 MAGIC = b"VIB2"
+
+SUPPORTED_ODR_HZ = {250.0, 125.0, 62.5}
 
 COLORS = {
     "X": "tab:blue",
@@ -56,6 +59,11 @@ class SessionConfig:
 
 
 @dataclass(frozen=True)
+class SensorConfig:
+    odr_hz: float
+
+
+@dataclass(frozen=True)
 class WelchConfig:
     nperseg: int
     noverlap: int
@@ -65,6 +73,7 @@ class WelchConfig:
 class ApplicationConfig:
     serial: SerialConfig
     session: SessionConfig
+    sensor: SensorConfig
     welch: WelchConfig
     analysis_bands: list[AnalysisBand]
 
@@ -104,6 +113,12 @@ def validate_config(config: ApplicationConfig) -> None:
         config.session.min_recommended_sessions,
         "Session min_recommended_sessions",
     )
+
+    require_finite_number(config.sensor.odr_hz, "Sensor odr_hz")
+    if config.sensor.odr_hz not in SUPPORTED_ODR_HZ:
+        raise ValueError(
+            "Sensor odr_hz must be one of 250, 125, or 62.5 Hz"
+        )
 
     require_positive_integer(config.welch.nperseg, "Welch nperseg")
     require_non_negative_integer(config.welch.noverlap, "Welch noverlap")
@@ -189,12 +204,17 @@ def validate_config(config: ApplicationConfig) -> None:
             )
 
 
-def load_config(path: Path) -> ApplicationConfig:
+def load_config(
+    path: Path,
+    *,
+    validate: bool = True,
+) -> ApplicationConfig:
     with path.open("rb") as file:
         raw_config = tomllib.load(file)
 
     serial_data = raw_config["serial"]
     session_data = raw_config["session"]
+    sensor_data = raw_config["sensor"]
     welch_data = raw_config["welch"]
     band_entries = raw_config["analysis"]["bands"]
 
@@ -223,14 +243,72 @@ def load_config(path: Path) -> ApplicationConfig:
             packets_per_session=session_data["packets_per_session"],
             min_recommended_sessions=session_data["min_recommended_sessions"],
         ),
+        sensor=SensorConfig(
+            odr_hz=float(sensor_data["odr_hz"]),
+        ),
         welch=WelchConfig(
             nperseg=welch_data["nperseg"],
             noverlap=welch_data["noverlap"],
         ),
         analysis_bands=analysis_bands,
     )
-    validate_config(config)
+    if validate:
+        validate_config(config)
     return config
+
+
+def parse_cli_arguments(
+    arguments: list[str] | None = None,
+) -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--odr", type=float)
+    parser.add_argument("--packets-per-session", type=int)
+    parser.add_argument("--min-recommended-sessions", type=int)
+    return parser.parse_args(arguments)
+
+
+def normalize_cli_odr_hz(odr_hz: float) -> float:
+    if odr_hz == 62.0:
+        return 62.5
+    return odr_hz
+
+
+def apply_cli_overrides(
+    config: ApplicationConfig,
+    arguments: argparse.Namespace,
+) -> ApplicationConfig:
+    odr_hz = config.sensor.odr_hz
+    if arguments.odr is not None:
+        odr_hz = normalize_cli_odr_hz(arguments.odr)
+
+    effective_config = replace(
+        config,
+        sensor=replace(config.sensor, odr_hz=odr_hz),
+        session=replace(
+            config.session,
+            packets_per_session=(
+                config.session.packets_per_session
+                if arguments.packets_per_session is None
+                else arguments.packets_per_session
+            ),
+            min_recommended_sessions=(
+                config.session.min_recommended_sessions
+                if arguments.min_recommended_sessions is None
+                else arguments.min_recommended_sessions
+            ),
+        ),
+    )
+    validate_config(effective_config)
+    return effective_config
+
+
+def build_effective_config(
+    path: Path,
+    arguments: list[str] | None = None,
+) -> ApplicationConfig:
+    config = load_config(path, validate=False)
+    cli_arguments = parse_cli_arguments(arguments)
+    return apply_cli_overrides(config, cli_arguments)
 
 
 def get_analysis_frequency_limits(
@@ -1385,13 +1463,17 @@ def compute_statistics(
 # ==========================================================
 
 try:
-    config = load_config(CONFIG_PATH)
+    config = build_effective_config(CONFIG_PATH)
 except FileNotFoundError:
     raise SystemExit(f"Configuration file not found: {CONFIG_PATH}")
 except tomllib.TOMLDecodeError as error:
     raise SystemExit(f"Invalid TOML configuration: {error}")
 except (KeyError, TypeError, ValueError) as error:
     raise SystemExit(f"Invalid configuration: {error}")
+
+print(f"ODR: {config.sensor.odr_hz:g} Hz")
+print(f"Packets/session: {config.session.packets_per_session}")
+print(f"Target sessions: {config.session.min_recommended_sessions}")
 
 analysis_bands = config.analysis_bands
 analysis_min_frequency, analysis_max_frequency = (
