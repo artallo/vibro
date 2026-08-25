@@ -1783,6 +1783,11 @@ while True:
         end=""
     )
 
+    if len(sessions) >= config.session.min_recommended_sessions:
+        print()
+        print(f"Target session count reached: {len(sessions)}")
+        break
+
     if (
         stop_requested
         and session_packets == config.session.packets_per_session
