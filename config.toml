@@ -7,6 +7,9 @@ timeout_seconds = 2.0
 packets_per_session = 8
 min_recommended_sessions = 5
 
+[sensor]
+odr_hz = 250
+
 [welch]
 nperseg = 1024
 noverlap = 512
