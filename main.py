@@ -1,6 +1,5 @@
 import argparse
 import struct
-import time
 import tomllib
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -30,13 +29,6 @@ ODR_PARAMETER_BY_HZ = {
     125.0: 0x01,
     62.5: 0x02,
 }
-
-MEASUREMENT_PACKET_SAMPLES = 1024
-MEASUREMENT_PACKET_MAGIC_BYTES = 4
-MEASUREMENT_PACKET_HEADER_BYTES = 12
-MEASUREMENT_SAMPLE_BYTES = 12
-UART_BITS_PER_BYTE = 10
-UART_DRAIN_MARGIN_SECONDS = 0.15
 
 COLORS = {
     "X": "tab:blue",
@@ -334,24 +326,12 @@ def build_set_odr_command(odr_hz: float) -> bytes:
     return bytes([SET_ODR_COMMAND, parameter])
 
 
-def calculate_uart_drain_seconds(baud: int) -> float:
-    packet_bytes = (
-        MEASUREMENT_PACKET_MAGIC_BYTES
-        + MEASUREMENT_PACKET_HEADER_BYTES
-        + MEASUREMENT_PACKET_SAMPLES * MEASUREMENT_SAMPLE_BYTES
-    )
-    packet_tx_seconds = packet_bytes * UART_BITS_PER_BYTE / baud
-    return packet_tx_seconds + UART_DRAIN_MARGIN_SECONDS
-
-
 def send_adxl355_odr_command(
     serial_port,
     config: ApplicationConfig,
 ) -> None:
     serial_port.write(build_set_odr_command(config.sensor.odr_hz))
     serial_port.flush()
-    time.sleep(calculate_uart_drain_seconds(config.serial.baud))
-    serial_port.reset_input_buffer()
 
 
 def get_analysis_frequency_limits(
