@@ -8,6 +8,7 @@ from typing import Any
 import serial
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.ndimage import grey_opening, percentile_filter
 from scipy.signal import welch
 from scipy.signal import find_peaks
 
@@ -29,6 +30,9 @@ ODR_PARAMETER_BY_HZ = {
     125.0: 0x01,
     62.5: 0x02,
 }
+
+PSD_ENHANCEMENT_PERCENTILE = 30.0
+PSD_ENHANCEMENT_WINDOW_HZ = 1.0
 
 COLORS = {
     "X": "tab:blue",
@@ -596,6 +600,111 @@ def compute_local_psd_contrast_db(
     return 10.0 * np.log10(safe_psd / safe_background)
 
 
+def calculate_enhancement_window_bins(
+    frequency: np.ndarray,
+    window_hz: float,
+) -> int:
+    if not isinstance(frequency, np.ndarray) or frequency.ndim != 1:
+        raise ValueError("Frequency must be a one-dimensional array")
+    if len(frequency) < 2:
+        raise ValueError("Frequency axis must contain at least two points")
+    try:
+        if not np.all(np.isfinite(frequency)):
+            raise ValueError("Frequency must contain only finite values")
+        if not np.all(np.diff(frequency) > 0):
+            raise ValueError("Frequency must be strictly increasing")
+    except TypeError as error:
+        raise ValueError("Frequency must contain numeric values") from error
+
+    try:
+        if not np.isfinite(window_hz) or window_hz <= 0:
+            raise ValueError("Enhancement window must be positive and finite")
+    except TypeError as error:
+        raise ValueError("Enhancement window must be numeric") from error
+
+    resolution_hz = frequency[1] - frequency[0]
+    window_bins = max(3, round(window_hz / resolution_hz))
+    if window_bins % 2 == 0:
+        window_bins += 1
+
+    maximum_window_bins = len(frequency)
+    if maximum_window_bins % 2 == 0:
+        maximum_window_bins -= 1
+    if maximum_window_bins < 3:
+        raise ValueError(
+            "Frequency axis must contain at least three points for enhancement"
+        )
+    window_bins = min(window_bins, maximum_window_bins)
+
+    return window_bins
+
+
+def compute_percentile_enhanced_psd_db(
+    frequency: np.ndarray,
+    median_psd: np.ndarray,
+    percentile: float,
+    window_hz: float,
+) -> np.ndarray:
+    window_bins = calculate_enhancement_window_bins(frequency, window_hz)
+    if not isinstance(median_psd, np.ndarray) or median_psd.ndim != 1:
+        raise ValueError("Median PSD must be a one-dimensional array")
+    if len(median_psd) != len(frequency):
+        raise ValueError("Frequency and Median PSD lengths must match")
+    try:
+        if not np.all(np.isfinite(median_psd)):
+            raise ValueError("Median PSD must contain only finite values")
+        if np.any(median_psd < 0):
+            raise ValueError("Median PSD must not contain negative values")
+    except TypeError as error:
+        raise ValueError("Median PSD must contain numeric values") from error
+    try:
+        if not np.isfinite(percentile) or not 0.0 <= percentile <= 100.0:
+            raise ValueError("Percentile must be between 0 and 100")
+    except TypeError as error:
+        raise ValueError("Percentile must be numeric") from error
+
+    tiny = np.finfo(float).tiny
+    safe_psd = np.maximum(median_psd, tiny)
+    psd_db = 10.0 * np.log10(safe_psd)
+    background_db = percentile_filter(
+        psd_db,
+        percentile=percentile,
+        size=window_bins,
+    )
+    enhanced_db = np.maximum(psd_db - background_db, 0.0)
+    if not np.all(np.isfinite(enhanced_db)):
+        raise ValueError("Percentile-enhanced PSD must contain only finite values")
+    return enhanced_db
+
+
+def compute_top_hat_enhanced_psd_db(
+    frequency: np.ndarray,
+    median_psd: np.ndarray,
+    window_hz: float,
+) -> np.ndarray:
+    window_bins = calculate_enhancement_window_bins(frequency, window_hz)
+    if not isinstance(median_psd, np.ndarray) or median_psd.ndim != 1:
+        raise ValueError("Median PSD must be a one-dimensional array")
+    if len(median_psd) != len(frequency):
+        raise ValueError("Frequency and Median PSD lengths must match")
+    try:
+        if not np.all(np.isfinite(median_psd)):
+            raise ValueError("Median PSD must contain only finite values")
+        if np.any(median_psd < 0):
+            raise ValueError("Median PSD must not contain negative values")
+    except TypeError as error:
+        raise ValueError("Median PSD must contain numeric values") from error
+
+    tiny = np.finfo(float).tiny
+    safe_psd = np.maximum(median_psd, tiny)
+    psd_db = 10.0 * np.log10(safe_psd)
+    opened_db = grey_opening(psd_db, size=window_bins)
+    top_hat_db = np.maximum(psd_db - opened_db, 0.0)
+    if not np.all(np.isfinite(top_hat_db)):
+        raise ValueError("Top-hat-enhanced PSD must contain only finite values")
+    return top_hat_db
+
+
 def compute_window_power(
     frequency: np.ndarray,
     psd: np.ndarray,
@@ -970,6 +1079,8 @@ class VisualizationAxis:
     stability: np.ndarray
     local_psd_background: np.ndarray
     local_psd_contrast_db: np.ndarray
+    percentile_enhanced_psd_db: np.ndarray
+    top_hat_enhanced_psd_db: np.ndarray
     peak_frequencies: np.ndarray
     peak_amplitudes: np.ndarray
     peak_window_power_stability: np.ndarray
@@ -1136,6 +1247,17 @@ def build_visualization_data(
             axis_statistics.median,
             local_psd_background,
         )
+        percentile_enhanced_psd_db = compute_percentile_enhanced_psd_db(
+            frequency,
+            axis_statistics.median,
+            PSD_ENHANCEMENT_PERCENTILE,
+            PSD_ENHANCEMENT_WINDOW_HZ,
+        )
+        top_hat_enhanced_psd_db = compute_top_hat_enhanced_psd_db(
+            frequency,
+            axis_statistics.median,
+            PSD_ENHANCEMENT_WINDOW_HZ,
+        )
         if len(local_psd_background) != expected_length:
             raise ValueError(
                 f"Local PSD background length does not match frequency length "
@@ -1146,6 +1268,16 @@ def build_visualization_data(
                 f"Local PSD contrast length does not match frequency length "
                 f"for {axis_name}"
             )
+        if len(percentile_enhanced_psd_db) != expected_length:
+            raise ValueError(
+                f"Percentile-enhanced PSD length does not match frequency "
+                f"length for {axis_name}"
+            )
+        if len(top_hat_enhanced_psd_db) != expected_length:
+            raise ValueError(
+                f"Top-hat-enhanced PSD length does not match frequency "
+                f"length for {axis_name}"
+            )
 
         return VisualizationAxis(
             frequency=frequency,
@@ -1155,6 +1287,8 @@ def build_visualization_data(
             stability=axis_statistics.stability,
             local_psd_background=local_psd_background,
             local_psd_contrast_db=local_psd_contrast_db,
+            percentile_enhanced_psd_db=percentile_enhanced_psd_db,
+            top_hat_enhanced_psd_db=top_hat_enhanced_psd_db,
             peak_frequencies=axis_peaks.frequencies,
             peak_amplitudes=axis_peaks.amplitudes,
             peak_window_power_stability=(
@@ -1896,7 +2030,7 @@ stat_axes[-1].set_xlabel("Frequency, Hz")
 stat_fig.suptitle("Statistical vibration analysis")
 
 
-contrast_fig, contrast_axes = plt.subplots(
+percentile_fig, percentile_axes = plt.subplots(
     3,
     1,
     figsize=(14, 10),
@@ -1904,15 +2038,15 @@ contrast_fig, contrast_axes = plt.subplots(
     constrained_layout=True,
 )
 
-for contrast_axis, (axis_name, axis_data) in zip(
-    contrast_axes,
+for percentile_axis, (axis_name, axis_data) in zip(
+    percentile_axes,
     visualization_axes.items(),
 ):
-    contrast_axis.plot(
+    percentile_axis.plot(
         axis_data.frequency,
-        axis_data.local_psd_contrast_db,
+        axis_data.percentile_enhanced_psd_db,
         color=COLORS[axis_name],
-        label=f"{axis_name} Local PSD contrast",
+        label=f"{axis_name} Percentile-enhanced PSD",
     )
 
     peak_indices = []
@@ -1928,25 +2062,80 @@ for contrast_axis, (axis_name, axis_data) in zip(
         peak_indices.append(matching_indices[0])
     peak_indices = np.asarray(peak_indices, dtype=int)
 
-    contrast_axis.scatter(
+    percentile_axis.scatter(
         axis_data.peak_frequencies,
-        axis_data.local_psd_contrast_db[peak_indices],
+        axis_data.percentile_enhanced_psd_db[peak_indices],
         color=COLORS[axis_name],
         marker="x",
         label="Stable peaks",
     )
-    contrast_axis.set_title(f"{axis_name} axis — Local PSD contrast")
-    contrast_axis.set_ylabel("Local contrast [dB]")
-    contrast_axis.set_xlim(
+    percentile_axis.set_title(
+        f"{axis_name} axis — Percentile-enhanced PSD"
+    )
+    percentile_axis.set_ylabel("Above percentile baseline [dB]")
+    percentile_axis.set_xlim(
         analysis_min_frequency,
         analysis_max_frequency,
     )
-    contrast_axis.grid(True, alpha=0.25, linewidth=0.6)
+    percentile_axis.grid(True, alpha=0.25, linewidth=0.6)
     if axis_name == "X":
-        contrast_axis.legend()
+        percentile_axis.legend()
 
-contrast_axes[-1].set_xlabel("Frequency, Hz")
-contrast_fig.suptitle("Local PSD contrast")
+percentile_axes[-1].set_xlabel("Frequency, Hz")
+percentile_fig.suptitle("Percentile-enhanced PSD")
+
+
+top_hat_fig, top_hat_axes = plt.subplots(
+    3,
+    1,
+    figsize=(14, 10),
+    sharex=True,
+    constrained_layout=True,
+)
+
+for top_hat_axis, (axis_name, axis_data) in zip(
+    top_hat_axes,
+    visualization_axes.items(),
+):
+    top_hat_axis.plot(
+        axis_data.frequency,
+        axis_data.top_hat_enhanced_psd_db,
+        color=COLORS[axis_name],
+        label=f"{axis_name} White top-hat PSD",
+    )
+
+    peak_indices = []
+    for peak_frequency in axis_data.peak_frequencies:
+        matching_indices = np.flatnonzero(
+            axis_data.frequency == peak_frequency
+        )
+        if len(matching_indices) != 1:
+            raise ValueError(
+                f"Stable peak frequency {peak_frequency} Hz does not match "
+                f"exactly one {axis_name} frequency bin"
+            )
+        peak_indices.append(matching_indices[0])
+    peak_indices = np.asarray(peak_indices, dtype=int)
+
+    top_hat_axis.scatter(
+        axis_data.peak_frequencies,
+        axis_data.top_hat_enhanced_psd_db[peak_indices],
+        color=COLORS[axis_name],
+        marker="x",
+        label="Stable peaks",
+    )
+    top_hat_axis.set_title(f"{axis_name} axis — White top-hat PSD")
+    top_hat_axis.set_ylabel("Top-hat level [dB]")
+    top_hat_axis.set_xlim(
+        analysis_min_frequency,
+        analysis_max_frequency,
+    )
+    top_hat_axis.grid(True, alpha=0.25, linewidth=0.6)
+    if axis_name == "X":
+        top_hat_axis.legend()
+
+top_hat_axes[-1].set_xlabel("Frequency, Hz")
+top_hat_fig.suptitle("Morphological white top-hat PSD")
 
 
 plt.show()
