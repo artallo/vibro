@@ -8,7 +8,7 @@ from typing import Any
 import serial
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.ndimage import grey_opening, percentile_filter
+from scipy.ndimage import grey_opening, median_filter, percentile_filter
 from scipy.signal import welch
 from scipy.signal import find_peaks
 
@@ -33,6 +33,7 @@ ODR_PARAMETER_BY_HZ = {
 
 PSD_ENHANCEMENT_PERCENTILE = 30.0
 PSD_ENHANCEMENT_WINDOW_HZ = 1.0
+PSD_ENHANCEMENT_SMOOTHING_BINS = 3
 
 COLORS = {
     "X": "tab:blue",
@@ -639,17 +640,14 @@ def calculate_enhancement_window_bins(
     return window_bins
 
 
-def compute_percentile_enhanced_psd_db(
-    frequency: np.ndarray,
+def smooth_psd_db_for_enhancement(
     median_psd: np.ndarray,
-    percentile: float,
-    window_hz: float,
+    size: int,
 ) -> np.ndarray:
-    window_bins = calculate_enhancement_window_bins(frequency, window_hz)
     if not isinstance(median_psd, np.ndarray) or median_psd.ndim != 1:
         raise ValueError("Median PSD must be a one-dimensional array")
-    if len(median_psd) != len(frequency):
-        raise ValueError("Frequency and Median PSD lengths must match")
+    if len(median_psd) == 0:
+        raise ValueError("Median PSD must not be empty")
     try:
         if not np.all(np.isfinite(median_psd)):
             raise ValueError("Median PSD must contain only finite values")
@@ -657,21 +655,46 @@ def compute_percentile_enhanced_psd_db(
             raise ValueError("Median PSD must not contain negative values")
     except TypeError as error:
         raise ValueError("Median PSD must contain numeric values") from error
+    if isinstance(size, (bool, np.bool_)) or not isinstance(size, (int, np.integer)):
+        raise ValueError("Smoothing size must be an integer")
+    if size < 1:
+        raise ValueError("Smoothing size must be positive")
+    if size % 2 == 0:
+        raise ValueError("Smoothing size must be odd")
+    if size > len(median_psd):
+        raise ValueError("Smoothing size must not exceed Median PSD length")
+
+    tiny = np.finfo(float).tiny
+    safe_psd = np.maximum(median_psd, tiny)
+    psd_db = 10.0 * np.log10(safe_psd)
+    return median_filter(psd_db, size=size)
+
+
+def compute_percentile_enhanced_psd_db(
+    frequency: np.ndarray,
+    median_psd: np.ndarray,
+    percentile: float,
+    window_hz: float,
+) -> np.ndarray:
+    window_bins = calculate_enhancement_window_bins(frequency, window_hz)
+    if len(median_psd) != len(frequency):
+        raise ValueError("Frequency and Median PSD lengths must match")
     try:
         if not np.isfinite(percentile) or not 0.0 <= percentile <= 100.0:
             raise ValueError("Percentile must be between 0 and 100")
     except TypeError as error:
         raise ValueError("Percentile must be numeric") from error
 
-    tiny = np.finfo(float).tiny
-    safe_psd = np.maximum(median_psd, tiny)
-    psd_db = 10.0 * np.log10(safe_psd)
+    smoothed_db = smooth_psd_db_for_enhancement(
+        median_psd,
+        PSD_ENHANCEMENT_SMOOTHING_BINS,
+    )
     background_db = percentile_filter(
-        psd_db,
+        smoothed_db,
         percentile=percentile,
         size=window_bins,
     )
-    enhanced_db = np.maximum(psd_db - background_db, 0.0)
+    enhanced_db = np.maximum(smoothed_db - background_db, 0.0)
     if not np.all(np.isfinite(enhanced_db)):
         raise ValueError("Percentile-enhanced PSD must contain only finite values")
     return enhanced_db
@@ -683,23 +706,15 @@ def compute_top_hat_enhanced_psd_db(
     window_hz: float,
 ) -> np.ndarray:
     window_bins = calculate_enhancement_window_bins(frequency, window_hz)
-    if not isinstance(median_psd, np.ndarray) or median_psd.ndim != 1:
-        raise ValueError("Median PSD must be a one-dimensional array")
     if len(median_psd) != len(frequency):
         raise ValueError("Frequency and Median PSD lengths must match")
-    try:
-        if not np.all(np.isfinite(median_psd)):
-            raise ValueError("Median PSD must contain only finite values")
-        if np.any(median_psd < 0):
-            raise ValueError("Median PSD must not contain negative values")
-    except TypeError as error:
-        raise ValueError("Median PSD must contain numeric values") from error
 
-    tiny = np.finfo(float).tiny
-    safe_psd = np.maximum(median_psd, tiny)
-    psd_db = 10.0 * np.log10(safe_psd)
-    opened_db = grey_opening(psd_db, size=window_bins)
-    top_hat_db = np.maximum(psd_db - opened_db, 0.0)
+    smoothed_db = smooth_psd_db_for_enhancement(
+        median_psd,
+        PSD_ENHANCEMENT_SMOOTHING_BINS,
+    )
+    opened_db = grey_opening(smoothed_db, size=window_bins)
+    top_hat_db = np.maximum(smoothed_db - opened_db, 0.0)
     if not np.all(np.isfinite(top_hat_db)):
         raise ValueError("Top-hat-enhanced PSD must contain only finite values")
     return top_hat_db
