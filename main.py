@@ -54,7 +54,6 @@ class AnalysisBand:
     min_stability: float
     frequency_tolerance_hz: float
     noise_window_hz: float
-    min_snr_db: float
 
 
 @dataclass(frozen=True)
@@ -173,11 +172,6 @@ def validate_config(config: ApplicationConfig) -> None:
             band.noise_window_hz,
             f"{band_name} noise_window_hz",
         )
-        require_finite_number(
-            band.min_snr_db,
-            f"{band_name} min_snr_db",
-        )
-
         if band.min_frequency < 0:
             raise ValueError(
                 f"{band_name} minimum frequency must be non-negative"
@@ -204,10 +198,6 @@ def validate_config(config: ApplicationConfig) -> None:
         if band.noise_window_hz <= 0:
             raise ValueError(
                 f"{band_name} noise_window_hz must be positive"
-            )
-        if band.min_snr_db < 0:
-            raise ValueError(
-                f"{band_name} min_snr_db must be non-negative"
             )
         if band.noise_window_hz <= band.frequency_tolerance_hz:
             raise ValueError(
@@ -240,7 +230,6 @@ def load_config(
             min_stability=entry["min_stability"],
             frequency_tolerance_hz=entry["frequency_tolerance_hz"],
             noise_window_hz=entry["noise_window_hz"],
-            min_snr_db=entry["min_snr_db"],
         )
         for entry in band_entries
     ]
@@ -1438,9 +1427,6 @@ def _find_axis_peaks_by_bands(
                 if np.count_nonzero(noise_mask) < 3:
                     continue
                 raise
-            if local_snr_db < band.min_snr_db:
-                continue
-
             window_mask = build_frequency_window_mask(
                 freq,
                 candidate_frequency,
