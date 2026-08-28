@@ -76,11 +76,23 @@ class WelchConfig:
 
 
 @dataclass(frozen=True)
+class RepeatabilityWeightingConfig:
+    reference_stability: float
+    min_weight: float
+
+
+@dataclass(frozen=True)
+class VisualizationConfig:
+    repeatability_weighting: RepeatabilityWeightingConfig
+
+
+@dataclass(frozen=True)
 class ApplicationConfig:
     serial: SerialConfig
     session: SessionConfig
     sensor: SensorConfig
     welch: WelchConfig
+    visualization: VisualizationConfig
     analysis_bands: list[AnalysisBand]
 
 
@@ -130,6 +142,25 @@ def validate_config(config: ApplicationConfig) -> None:
     require_non_negative_integer(config.welch.noverlap, "Welch noverlap")
     if config.welch.noverlap >= config.welch.nperseg:
         raise ValueError("Welch noverlap must be less than nperseg")
+
+    repeatability_weighting = config.visualization.repeatability_weighting
+    require_finite_number(
+        repeatability_weighting.reference_stability,
+        "Visualization repeatability reference_stability",
+    )
+    require_finite_number(
+        repeatability_weighting.min_weight,
+        "Visualization repeatability min_weight",
+    )
+    if repeatability_weighting.reference_stability <= 0:
+        raise ValueError(
+            "Visualization repeatability reference_stability must be positive"
+        )
+    if not 0 < repeatability_weighting.min_weight <= 1:
+        raise ValueError(
+            "Visualization repeatability min_weight must be greater than zero "
+            "and at most one"
+        )
 
     if not isinstance(config.analysis_bands, list) or not config.analysis_bands:
         raise ValueError("At least one analysis band is required")
@@ -213,6 +244,9 @@ def load_config(
     session_data = raw_config["session"]
     sensor_data = raw_config["sensor"]
     welch_data = raw_config["welch"]
+    repeatability_weighting_data = raw_config["visualization"][
+        "repeatability_weighting"
+    ]
     band_entries = raw_config["analysis"]["bands"]
 
     analysis_bands = [
@@ -245,6 +279,14 @@ def load_config(
         welch=WelchConfig(
             nperseg=welch_data["nperseg"],
             noverlap=welch_data["noverlap"],
+        ),
+        visualization=VisualizationConfig(
+            repeatability_weighting=RepeatabilityWeightingConfig(
+                reference_stability=repeatability_weighting_data[
+                    "reference_stability"
+                ],
+                min_weight=repeatability_weighting_data["min_weight"],
+            ),
         ),
         analysis_bands=analysis_bands,
     )
@@ -583,6 +625,82 @@ def compute_local_psd_contrast_db(
     safe_psd = np.maximum(median_psd, tiny)
     safe_background = np.maximum(local_background, tiny)
     return 10.0 * np.log10(safe_psd / safe_background)
+
+
+def compute_repeatability_weight(
+    stability: np.ndarray,
+    reference_stability: float,
+    min_weight: float,
+) -> np.ndarray:
+    if not isinstance(stability, np.ndarray) or stability.ndim != 1:
+        raise ValueError("Stability must be a one-dimensional NumPy array")
+    if len(stability) == 0:
+        raise ValueError("Stability must not be empty")
+    try:
+        if not np.all(np.isfinite(stability)):
+            raise ValueError("Stability must contain only finite values")
+        if np.any(stability < 0):
+            raise ValueError("Stability must not contain negative values")
+    except TypeError as error:
+        raise ValueError("Stability must contain numeric values") from error
+
+    numeric_types = (int, float, np.integer, np.floating)
+    if (
+        not isinstance(reference_stability, numeric_types)
+        or isinstance(reference_stability, (bool, np.bool_))
+        or not np.isfinite(reference_stability)
+        or reference_stability <= 0
+    ):
+        raise ValueError("Reference stability must be positive and finite")
+    if (
+        not isinstance(min_weight, numeric_types)
+        or isinstance(min_weight, (bool, np.bool_))
+        or not np.isfinite(min_weight)
+        or not 0 < min_weight <= 1
+    ):
+        raise ValueError("Minimum weight must be finite, positive, and at most one")
+
+    weight = np.clip(
+        stability / reference_stability,
+        min_weight,
+        1.0,
+    )
+    if not np.all(np.isfinite(weight)):
+        raise ValueError("Repeatability weight must contain only finite values")
+    if np.any(weight < min_weight) or np.any(weight > 1.0):
+        raise ValueError("Repeatability weight is outside configured bounds")
+    return weight
+
+
+def compute_repeatability_weighted_psd(
+    median_psd: np.ndarray,
+    stability: np.ndarray,
+    reference_stability: float,
+    min_weight: float,
+) -> np.ndarray:
+    if not isinstance(median_psd, np.ndarray) or median_psd.ndim != 1:
+        raise ValueError("Median PSD must be a one-dimensional NumPy array")
+    if not isinstance(stability, np.ndarray) or stability.ndim != 1:
+        raise ValueError("Stability must be a one-dimensional NumPy array")
+    if len(median_psd) != len(stability):
+        raise ValueError("Median PSD and stability lengths must match")
+    try:
+        if not np.all(np.isfinite(median_psd)):
+            raise ValueError("Median PSD must contain only finite values")
+        if np.any(median_psd < 0):
+            raise ValueError("Median PSD must not contain negative values")
+    except TypeError as error:
+        raise ValueError("Median PSD must contain numeric values") from error
+
+    weight = compute_repeatability_weight(
+        stability,
+        reference_stability,
+        min_weight,
+    )
+    weighted_psd = median_psd * weight
+    if not np.all(np.isfinite(weighted_psd)) or np.any(weighted_psd < 0):
+        raise ValueError("Repeatability-weighted PSD must be finite and non-negative")
+    return weighted_psd
 
 
 def compute_window_power(
@@ -983,6 +1101,8 @@ class VisualizationAxis:
     stability: np.ndarray
     local_psd_background: np.ndarray
     local_psd_contrast_db: np.ndarray
+    repeatability_weight: np.ndarray
+    repeatability_weighted_psd: np.ndarray
     peak_frequencies: np.ndarray
     peak_amplitudes: np.ndarray
     peak_window_power_stability: np.ndarray
@@ -1116,6 +1236,7 @@ def build_visualization_data(
     peaks: PeakResult,
     frequency: np.ndarray,
     analysis_bands: list[AnalysisBand],
+    repeatability_weighting: RepeatabilityWeightingConfig,
 ) -> VisualizationData:
     if not isinstance(frequency, np.ndarray):
         raise ValueError("Frequency axis must be a NumPy array")
@@ -1193,6 +1314,17 @@ def build_visualization_data(
             axis_statistics.median,
             local_psd_background,
         )
+        repeatability_weight = compute_repeatability_weight(
+            axis_statistics.stability,
+            repeatability_weighting.reference_stability,
+            repeatability_weighting.min_weight,
+        )
+        repeatability_weighted_psd = compute_repeatability_weighted_psd(
+            axis_statistics.median,
+            axis_statistics.stability,
+            repeatability_weighting.reference_stability,
+            repeatability_weighting.min_weight,
+        )
         if len(local_psd_background) != expected_length:
             raise ValueError(
                 f"Local PSD background length does not match frequency length "
@@ -1203,6 +1335,16 @@ def build_visualization_data(
                 f"Local PSD contrast length does not match frequency length "
                 f"for {axis_name}"
             )
+        if len(repeatability_weight) != expected_length:
+            raise ValueError(
+                f"Repeatability weight length does not match frequency length "
+                f"for {axis_name}"
+            )
+        if len(repeatability_weighted_psd) != expected_length:
+            raise ValueError(
+                f"Repeatability-weighted PSD length does not match frequency "
+                f"length for {axis_name}"
+            )
         return VisualizationAxis(
             frequency=frequency,
             median_psd=axis_statistics.median,
@@ -1211,6 +1353,8 @@ def build_visualization_data(
             stability=axis_statistics.stability,
             local_psd_background=local_psd_background,
             local_psd_contrast_db=local_psd_contrast_db,
+            repeatability_weight=repeatability_weight,
+            repeatability_weighted_psd=repeatability_weighted_psd,
             peak_frequencies=axis_peaks.frequencies,
             peak_amplitudes=axis_peaks.amplitudes,
             peak_window_power_stability=(
@@ -1915,6 +2059,7 @@ if sessions:
         peaks,
         aligned_psd.frequency,
         analysis_bands,
+        config.visualization.repeatability_weighting,
     )
 
 if not sessions:
@@ -2016,5 +2161,60 @@ for axis_index, (axis_name, axis_data) in enumerate(visualization_axes.items()):
 
 stat_axes[-1].set_xlabel("Frequency, Hz")
 stat_fig.suptitle("Statistical vibration analysis")
+
+
+repeatability_fig, repeatability_axes = plt.subplots(
+    3,
+    1,
+    figsize=(14, 10),
+    sharex=True,
+    constrained_layout=True,
+)
+
+for repeatability_axis, (axis_name, axis_data) in zip(
+    repeatability_axes,
+    visualization_axes.items(),
+):
+    repeatability_axis.semilogy(
+        axis_data.frequency,
+        axis_data.repeatability_weighted_psd,
+        color=COLORS[axis_name],
+        label=f"{axis_name} Repeatability-weighted Median PSD",
+    )
+
+    peak_indices = []
+    for peak_frequency in axis_data.peak_frequencies:
+        matching_indices = np.flatnonzero(
+            axis_data.frequency == peak_frequency
+        )
+        if len(matching_indices) != 1:
+            raise ValueError(
+                f"Stable peak frequency {peak_frequency} Hz does not match "
+                f"exactly one {axis_name} frequency bin"
+            )
+        peak_indices.append(matching_indices[0])
+    peak_indices = np.asarray(peak_indices, dtype=int)
+
+    repeatability_axis.scatter(
+        axis_data.peak_frequencies,
+        axis_data.repeatability_weighted_psd[peak_indices],
+        color=COLORS[axis_name],
+        marker="x",
+        label="Stable peaks",
+    )
+    repeatability_axis.set_title(
+        f"{axis_name} axis — Repeatability-weighted Median PSD"
+    )
+    repeatability_axis.set_ylabel("Weighted PSD [g²/Hz]")
+    repeatability_axis.set_xlim(
+        analysis_min_frequency,
+        analysis_max_frequency,
+    )
+    repeatability_axis.grid(True, alpha=0.25, linewidth=0.6)
+    if axis_name == "X":
+        repeatability_axis.legend()
+
+repeatability_axes[-1].set_xlabel("Frequency, Hz")
+repeatability_fig.suptitle("Repeatability-weighted Median PSD")
 
 plt.show()
