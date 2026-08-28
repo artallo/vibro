@@ -2356,7 +2356,7 @@ for repeatability_axis, (axis_name, axis_data) in zip(
     repeatability_axes,
     visualization_axes.items(),
 ):
-    repeatability_axis.semilogy(
+    repeatability_axis.plot(
         axis_data.frequency,
         axis_data.repeatability_weighted_psd,
         color=COLORS[axis_name],
@@ -2387,6 +2387,7 @@ for repeatability_axis, (axis_name, axis_data) in zip(
         f"{axis_name} axis — Repeatability-weighted Median PSD"
     )
     repeatability_axis.set_ylabel("Weighted PSD [g²/Hz]")
+    repeatability_axis.set_ylim(bottom=0)
     repeatability_axis.set_xlim(
         analysis_min_frequency,
         analysis_max_frequency,
