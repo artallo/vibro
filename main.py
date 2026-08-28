@@ -950,6 +950,30 @@ class PeakResult:
     z: AxisPeaks
 
 
+@dataclass(frozen=True)
+class PeakCandidateDiagnostic:
+    band_name: str
+    min_stability: float
+    frequency: float
+    prominence_db: float
+    window_power_stability: float
+    local_noise_floor: float
+    local_snr_db: float
+    mean_session_frequency: float
+    frequency_std_hz: float
+    minimum_session_frequency: float
+    maximum_session_frequency: float
+    accepted: bool
+    rejection_reason: str | None
+
+
+@dataclass(frozen=True)
+class PeakCandidateDiagnostics:
+    x: list[PeakCandidateDiagnostic]
+    y: list[PeakCandidateDiagnostic]
+    z: list[PeakCandidateDiagnostic]
+
+
 @dataclass
 class VisualizationAxis:
     frequency: np.ndarray
@@ -975,6 +999,50 @@ class VisualizationData:
     x: VisualizationAxis
     y: VisualizationAxis
     z: VisualizationAxis
+
+
+def print_peak_candidate_diagnostics(
+    diagnostics: PeakCandidateDiagnostics,
+) -> None:
+    for axis_name, candidates in (
+        ("X", diagnostics.x),
+        ("Y", diagnostics.y),
+        ("Z", diagnostics.z),
+    ):
+        print()
+        print(f"Peak candidates — {axis_name}")
+        if not candidates:
+            print("No candidates passed prominence/distance thresholds.")
+            continue
+
+        band_width = max(len("Band"), *(len(item.band_name) for item in candidates))
+        print(
+            f"{'Band':<{band_width}}  {'Freq Hz':>7}  {'Prom dB':>7}  "
+            f"{'Win.Stab':>8}  {'Min.Stab':>8}  {'SNR dB':>7}  "
+            f"{'σf Hz':>6}  {'Range Hz':>13}  Result"
+        )
+        for item in candidates:
+            if item.accepted:
+                result = "ACCEPT"
+            elif item.rejection_reason == "window_power_stability":
+                result = "REJECT stability"
+            elif item.rejection_reason == "insufficient_local_noise_bins":
+                result = "REJECT noise bins"
+            else:
+                result = f"REJECT {item.rejection_reason}"
+
+            frequency_range = (
+                f"{item.minimum_session_frequency:.2f}–"
+                f"{item.maximum_session_frequency:.2f}"
+            )
+            print(
+                f"{item.band_name:<{band_width}}  {item.frequency:7.2f}  "
+                f"{item.prominence_db:7.2f}  "
+                f"{item.window_power_stability:8.2f}  "
+                f"{item.min_stability:8.2f}  {item.local_snr_db:7.2f}  "
+                f"{item.frequency_std_hz:6.2f}  {frequency_range:>13}  "
+                f"{result}"
+            )
 
 
 def draw_analysis_bands(
@@ -1179,6 +1247,7 @@ def _find_axis_peaks_by_bands(
     stability: np.ndarray,
     session_psd_stack: np.ndarray,
     analysis_bands: list[AnalysisBand],
+    candidate_diagnostics: list[PeakCandidateDiagnostic],
 ) -> AxisPeaks:
     if len(median) != len(freq):
         raise ValueError("Frequency axis length does not match median PSD length")
@@ -1234,7 +1303,23 @@ def _find_axis_peaks_by_bands(
     resolution = freq[1] - freq[0]
     peaks_by_index = {}
     diagnostics_by_index = {}
+    candidate_diagnostics_by_index = {}
     property_dtypes = {}
+
+    def store_candidate_diagnostic(
+        peak_index: int,
+        diagnostic: PeakCandidateDiagnostic,
+    ) -> None:
+        existing = candidate_diagnostics_by_index.get(peak_index)
+        if (
+            existing is None
+            or (diagnostic.accepted and not existing.accepted)
+            or (
+                diagnostic.accepted == existing.accepted
+                and diagnostic.prominence_db > existing.prominence_db
+            )
+        ):
+            candidate_diagnostics_by_index[peak_index] = diagnostic
 
     for band in analysis_bands:
         band_mask = (
@@ -1259,6 +1344,7 @@ def _find_axis_peaks_by_bands(
         for position, local_peak_index in enumerate(local_peak_indices):
             global_peak_index = global_indices[local_peak_index]
             candidate_frequency = freq[global_peak_index]
+            candidate_prominence_db = float(properties["prominences"][position])
             noise_mask = build_local_noise_mask(
                 freq,
                 candidate_frequency,
@@ -1275,6 +1361,25 @@ def _find_axis_peaks_by_bands(
                 )
             except ValueError:
                 if np.count_nonzero(noise_mask) < 3:
+                    unavailable = float("nan")
+                    store_candidate_diagnostic(
+                        global_peak_index,
+                        PeakCandidateDiagnostic(
+                            band_name=band.name,
+                            min_stability=band.min_stability,
+                            frequency=float(candidate_frequency),
+                            prominence_db=candidate_prominence_db,
+                            window_power_stability=unavailable,
+                            local_noise_floor=unavailable,
+                            local_snr_db=unavailable,
+                            mean_session_frequency=unavailable,
+                            frequency_std_hz=unavailable,
+                            minimum_session_frequency=unavailable,
+                            maximum_session_frequency=unavailable,
+                            accepted=False,
+                            rejection_reason="insufficient_local_noise_bins",
+                        ),
+                    )
                     continue
                 raise
             window_mask = build_frequency_window_mask(
@@ -1305,25 +1410,44 @@ def _find_axis_peaks_by_bands(
                 out=np.array(0.0),
                 where=power_std != 0,
             )
-            candidate_diagnostics = {
+            mean_session_frequency = float(np.mean(session_peak_frequencies))
+            frequency_std_hz = float(np.std(session_peak_frequencies))
+            minimum_session_frequency = float(np.min(session_peak_frequencies))
+            maximum_session_frequency = float(np.max(session_peak_frequencies))
+            accepted_peak_diagnostics = {
                 "window_power_stability": float(window_power_stability),
-                "mean_session_frequency": float(
-                    np.mean(session_peak_frequencies)
-                ),
-                "frequency_std_hz": float(
-                    np.std(session_peak_frequencies)
-                ),
-                "minimum_session_frequency": float(
-                    np.min(session_peak_frequencies)
-                ),
-                "maximum_session_frequency": float(
-                    np.max(session_peak_frequencies)
-                ),
+                "mean_session_frequency": mean_session_frequency,
+                "frequency_std_hz": frequency_std_hz,
+                "minimum_session_frequency": minimum_session_frequency,
+                "maximum_session_frequency": maximum_session_frequency,
                 "local_noise_floor": local_noise_floor,
                 "local_snr_db": local_snr_db,
             }
 
-            if window_power_stability < band.min_stability:
+            rejected_for_stability = window_power_stability < band.min_stability
+            accepted = not rejected_for_stability
+            store_candidate_diagnostic(
+                global_peak_index,
+                PeakCandidateDiagnostic(
+                    band_name=band.name,
+                    min_stability=band.min_stability,
+                    frequency=float(candidate_frequency),
+                    prominence_db=candidate_prominence_db,
+                    window_power_stability=float(window_power_stability),
+                    local_noise_floor=local_noise_floor,
+                    local_snr_db=local_snr_db,
+                    mean_session_frequency=mean_session_frequency,
+                    frequency_std_hz=frequency_std_hz,
+                    minimum_session_frequency=minimum_session_frequency,
+                    maximum_session_frequency=maximum_session_frequency,
+                    accepted=bool(accepted),
+                    rejection_reason=(
+                        None if accepted else "window_power_stability"
+                    ),
+                ),
+            )
+
+            if rejected_for_stability:
                 continue
 
             peak_properties = {
@@ -1334,7 +1458,6 @@ def _find_axis_peaks_by_bands(
                 if name in peak_properties:
                     peak_properties[name] = global_indices[peak_properties[name]]
 
-            candidate_prominence_db = peak_properties["prominences"]
             existing_properties = peaks_by_index.get(global_peak_index)
             existing_prominence_db = (
                 existing_properties["prominences"]
@@ -1343,10 +1466,10 @@ def _find_axis_peaks_by_bands(
             )
             if (
                 existing_prominence_db is None
-                or candidate_prominence_db > existing_prominence_db
+                or peak_properties["prominences"] > existing_prominence_db
             ):
                 peaks_by_index[global_peak_index] = peak_properties
-                diagnostics_by_index[global_peak_index] = candidate_diagnostics
+                diagnostics_by_index[global_peak_index] = accepted_peak_diagnostics
 
     peak_indices = np.array(sorted(peaks_by_index), dtype=int)
     merged_properties = {
@@ -1358,6 +1481,10 @@ def _find_axis_peaks_by_bands(
     }
 
     peak_frequencies = freq[peak_indices]
+    candidate_diagnostics.extend(
+        candidate_diagnostics_by_index[index]
+        for index in sorted(candidate_diagnostics_by_index)
+    )
     return AxisPeaks(
         frequencies=peak_frequencies,
         amplitudes=median[peak_indices],
@@ -1399,6 +1526,7 @@ def find_psd_peaks(
     statistics: StatisticsResult,
     aligned: AlignedPSDData,
     analysis_bands: list[AnalysisBand],
+    candidate_diagnostics: PeakCandidateDiagnostics | None = None,
 ) -> PeakResult:
     validate_aligned_psd_data(aligned)
     if not analysis_bands:
@@ -1415,6 +1543,9 @@ def find_psd_peaks(
                     f"{axis_name.upper()} {statistic_name} PSD length"
                 )
 
+    if candidate_diagnostics is None:
+        candidate_diagnostics = PeakCandidateDiagnostics(x=[], y=[], z=[])
+
     return PeakResult(
         x=_find_axis_peaks_by_bands(
             aligned.frequency,
@@ -1422,6 +1553,7 @@ def find_psd_peaks(
             statistics.x.stability,
             aligned.x_stack,
             analysis_bands,
+            candidate_diagnostics.x,
         ),
         y=_find_axis_peaks_by_bands(
             aligned.frequency,
@@ -1429,6 +1561,7 @@ def find_psd_peaks(
             statistics.y.stability,
             aligned.y_stack,
             analysis_bands,
+            candidate_diagnostics.y,
         ),
         z=_find_axis_peaks_by_bands(
             aligned.frequency,
@@ -1436,6 +1569,7 @@ def find_psd_peaks(
             statistics.z.stability,
             aligned.z_stack,
             analysis_bands,
+            candidate_diagnostics.z,
         ),
     )
 
@@ -1768,11 +1902,14 @@ visualization_data: VisualizationData | None = None
 if sessions:
     aligned_psd = build_aligned_psd_data(sessions)
     statistics = compute_statistics(aligned_psd)
+    candidate_diagnostics = PeakCandidateDiagnostics(x=[], y=[], z=[])
     peaks = find_psd_peaks(
         statistics,
         aligned_psd,
         analysis_bands,
+        candidate_diagnostics,
     )
+    print_peak_candidate_diagnostics(candidate_diagnostics)
     visualization_data = build_visualization_data(
         statistics,
         peaks,
