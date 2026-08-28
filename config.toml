@@ -23,7 +23,6 @@ min_distance_hz = 1.0
 min_stability = 4.5
 frequency_tolerance_hz = 0.25
 noise_window_hz = 1.0
-min_snr_db = 3.0
 
 [[analysis.bands]]
 name = "High frequency"
@@ -34,4 +33,3 @@ min_distance_hz = 1.0
 min_stability = 4.5
 frequency_tolerance_hz = 0.25
 noise_window_hz = 2.0
-min_snr_db = 4.0
