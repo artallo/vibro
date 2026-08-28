@@ -756,6 +756,82 @@ def compute_window_power(
     return float(window_power)
 
 
+def compute_local_window_power_stability(
+    frequency: np.ndarray,
+    session_psd_stack: np.ndarray,
+    analysis_bands: list[AnalysisBand],
+) -> np.ndarray:
+    if not isinstance(frequency, np.ndarray) or frequency.ndim != 1:
+        raise ValueError("Frequency must be a one-dimensional NumPy array")
+    if len(frequency) == 0:
+        raise ValueError("Frequency must not be empty")
+    try:
+        if not np.all(np.isfinite(frequency)):
+            raise ValueError("Frequency must contain only finite values")
+        if not np.all(np.diff(frequency) > 0):
+            raise ValueError("Frequency must be strictly increasing")
+    except TypeError as error:
+        raise ValueError("Frequency must contain numeric values") from error
+
+    if not isinstance(session_psd_stack, np.ndarray) or session_psd_stack.ndim != 2:
+        raise ValueError("Session PSD stack must be a two-dimensional NumPy array")
+    if session_psd_stack.shape[0] == 0:
+        raise ValueError("Session PSD stack must contain at least one session")
+    if session_psd_stack.shape[1] != len(frequency):
+        raise ValueError("Session PSD stack width must match frequency length")
+    try:
+        if not np.all(np.isfinite(session_psd_stack)):
+            raise ValueError("Session PSD stack must contain only finite values")
+        if np.any(session_psd_stack < 0):
+            raise ValueError("Session PSD stack must not contain negative values")
+    except TypeError as error:
+        raise ValueError("Session PSD stack must contain numeric values") from error
+
+    if not isinstance(analysis_bands, list) or not analysis_bands:
+        raise ValueError("At least one analysis band is required")
+
+    local_stability = np.empty(len(frequency), dtype=float)
+    for frequency_index, center_frequency in enumerate(frequency):
+        band = next(
+            (
+                candidate_band
+                for candidate_band in analysis_bands
+                if candidate_band.min_frequency
+                <= center_frequency
+                <= candidate_band.max_frequency
+            ),
+            None,
+        )
+        if band is None:
+            raise ValueError(
+                f"Frequency {center_frequency} Hz is outside all analysis bands"
+            )
+
+        window_mask = build_frequency_window_mask(
+            frequency,
+            center_frequency,
+            band.frequency_tolerance_hz,
+        )
+        window_powers = np.asarray([
+            compute_window_power(frequency, session_psd, window_mask)
+            for session_psd in session_psd_stack
+        ])
+        power_mean = np.mean(window_powers)
+        power_std = np.std(window_powers)
+        local_stability[frequency_index] = np.divide(
+            power_mean,
+            power_std,
+            out=np.array(0.0),
+            where=power_std != 0,
+        )
+
+    if not np.all(np.isfinite(local_stability)):
+        raise ValueError("Local window power stability must contain only finite values")
+    if np.any(local_stability < 0):
+        raise ValueError("Local window power stability must be non-negative")
+    return local_stability
+
+
 def find_session_peak_in_window(
     frequency: np.ndarray,
     psd: np.ndarray,
@@ -1099,6 +1175,7 @@ class VisualizationAxis:
     mean_psd: np.ndarray
     std_psd: np.ndarray
     stability: np.ndarray
+    local_window_power_stability: np.ndarray
     local_psd_background: np.ndarray
     local_psd_contrast_db: np.ndarray
     repeatability_weight: np.ndarray
@@ -1234,10 +1311,12 @@ def annotate_peak_frequencies(
 def build_visualization_data(
     statistics: StatisticsResult,
     peaks: PeakResult,
-    frequency: np.ndarray,
+    aligned: AlignedPSDData,
     analysis_bands: list[AnalysisBand],
     repeatability_weighting: RepeatabilityWeightingConfig,
 ) -> VisualizationData:
+    validate_aligned_psd_data(aligned)
+    frequency = aligned.frequency
     if not isinstance(frequency, np.ndarray):
         raise ValueError("Frequency axis must be a NumPy array")
     if frequency.ndim != 1:
@@ -1256,6 +1335,7 @@ def build_visualization_data(
         axis_name: str,
         axis_statistics: AxisStatistics,
         axis_peaks: AxisPeaks,
+        session_psd_stack: np.ndarray,
     ) -> VisualizationAxis:
         expected_length = len(frequency)
         arrays = {
@@ -1325,6 +1405,11 @@ def build_visualization_data(
             repeatability_weighting.reference_stability,
             repeatability_weighting.min_weight,
         )
+        local_window_power_stability = compute_local_window_power_stability(
+            frequency,
+            session_psd_stack,
+            analysis_bands,
+        )
         if len(local_psd_background) != expected_length:
             raise ValueError(
                 f"Local PSD background length does not match frequency length "
@@ -1345,12 +1430,18 @@ def build_visualization_data(
                 f"Repeatability-weighted PSD length does not match frequency "
                 f"length for {axis_name}"
             )
+        if len(local_window_power_stability) != expected_length:
+            raise ValueError(
+                f"Local window power stability length does not match frequency "
+                f"length for {axis_name}"
+            )
         return VisualizationAxis(
             frequency=frequency,
             median_psd=axis_statistics.median,
             mean_psd=axis_statistics.mean,
             std_psd=axis_statistics.std,
             stability=axis_statistics.stability,
+            local_window_power_stability=local_window_power_stability,
             local_psd_background=local_psd_background,
             local_psd_contrast_db=local_psd_contrast_db,
             repeatability_weight=repeatability_weight,
@@ -1379,9 +1470,9 @@ def build_visualization_data(
         )
 
     return VisualizationData(
-        x=build_axis("X", statistics.x, peaks.x),
-        y=build_axis("Y", statistics.y, peaks.y),
-        z=build_axis("Z", statistics.z, peaks.z),
+        x=build_axis("X", statistics.x, peaks.x, aligned.x_stack),
+        y=build_axis("Y", statistics.y, peaks.y, aligned.y_stack),
+        z=build_axis("Z", statistics.z, peaks.z, aligned.z_stack),
     )
 
 
@@ -2057,7 +2148,7 @@ if sessions:
     visualization_data = build_visualization_data(
         statistics,
         peaks,
-        aligned_psd.frequency,
+        aligned_psd,
         analysis_bands,
         config.visualization.repeatability_weighting,
     )
@@ -2132,6 +2223,14 @@ for axis_index, (axis_name, axis_data) in enumerate(visualization_axes.items()):
         color=COLORS[axis_name],
         label="Bin stability",
     )
+    stability_axis.plot(
+        axis_data.frequency,
+        axis_data.local_window_power_stability,
+        color="tab:purple",
+        linewidth=1.0,
+        alpha=0.75,
+        label="Local window power stability",
+    )
     for band_index, band in enumerate(analysis_bands):
         stability_axis.hlines(
             band.min_stability,
@@ -2140,7 +2239,11 @@ for axis_index, (axis_name, axis_data) in enumerate(visualization_axes.items()):
             linestyle="--",
             linewidth=1.0,
             alpha=0.6,
-            label="Minimum peak stability" if band_index == 0 else None,
+            label=(
+                "Minimum window-power stability"
+                if band_index == 0
+                else None
+            ),
         )
     stability_axis.scatter(
         axis_data.peak_frequencies,
