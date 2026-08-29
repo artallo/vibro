@@ -23,10 +23,10 @@ min_frequency = 0.5
 max_frequency = 10.0
 prominence_db = 1.8
 min_distance_hz = 1.0
-min_stability = 4.5
-frequency_tolerance_hz = 0.25
+min_stability = 4.1
+frequency_tolerance_hz = 0.4
 frequency_stability_max_std_hz = 0.20
-noise_window_hz = 1.0
+noise_window_hz = 1.5
 
 [[analysis.bands]]
 name = "High frequency"
@@ -34,7 +34,7 @@ min_frequency = 10.0
 max_frequency = 15.0
 prominence_db = 1.8
 min_distance_hz = 1.0
-min_stability = 4.5
-frequency_tolerance_hz = 0.25
+min_stability = 4.1
+frequency_tolerance_hz = 0.35
 frequency_stability_max_std_hz = 0.20
-noise_window_hz = 2.0
+noise_window_hz = 1.5
