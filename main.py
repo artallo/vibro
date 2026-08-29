@@ -1232,6 +1232,28 @@ class FrequencyClusterResult:
     z: list[FrequencyCluster]
 
 
+@dataclass(frozen=True)
+class MedianPSDEvidence:
+    peak_frequency: float | None
+    peak_psd: float | None
+    prominence_db: float | None
+    local_contrast_db: float | None
+    passed_prominence: bool | None
+
+
+@dataclass(frozen=True)
+class FrequencyClusterDiagnostic:
+    cluster: FrequencyCluster
+    median_evidence: MedianPSDEvidence
+
+
+@dataclass(frozen=True)
+class FrequencyClusterDiagnostics:
+    x: list[FrequencyClusterDiagnostic]
+    y: list[FrequencyClusterDiagnostic]
+    z: list[FrequencyClusterDiagnostic]
+
+
 @dataclass
 class VisualizationAxis:
     frequency: np.ndarray
@@ -1578,8 +1600,215 @@ def build_session_frequency_clusters(
     )
 
 
-def print_session_frequency_clusters(
+def compute_median_psd_evidence(
+    frequency: np.ndarray,
+    median_psd: np.ndarray,
+    local_contrast_db: np.ndarray,
+    cluster: FrequencyCluster,
+    band: AnalysisBand,
+) -> MedianPSDEvidence:
+    if not isinstance(frequency, np.ndarray) or frequency.ndim != 1:
+        raise ValueError("Frequency must be a one-dimensional NumPy array")
+    if len(frequency) == 0:
+        raise ValueError("Frequency must not be empty")
+    try:
+        if not np.all(np.isfinite(frequency)):
+            raise ValueError("Frequency must contain only finite values")
+        if not np.all(np.diff(frequency) > 0):
+            raise ValueError("Frequency must be strictly increasing")
+    except TypeError as error:
+        raise ValueError("Frequency must contain numeric values") from error
+
+    if not isinstance(median_psd, np.ndarray) or median_psd.ndim != 1:
+        raise ValueError("Median PSD must be a one-dimensional NumPy array")
+    if len(median_psd) != len(frequency):
+        raise ValueError("Frequency and Median PSD lengths must match")
+    try:
+        if not np.all(np.isfinite(median_psd)):
+            raise ValueError("Median PSD must contain only finite values")
+        if np.any(median_psd < 0):
+            raise ValueError("Median PSD must not contain negative values")
+    except TypeError as error:
+        raise ValueError("Median PSD must contain numeric values") from error
+
+    if not isinstance(local_contrast_db, np.ndarray) or local_contrast_db.ndim != 1:
+        raise ValueError("Local PSD contrast must be a one-dimensional NumPy array")
+    if len(local_contrast_db) != len(frequency):
+        raise ValueError("Frequency and Local PSD contrast lengths must match")
+    try:
+        finite_contrast = local_contrast_db[~np.isnan(local_contrast_db)]
+        if not np.all(np.isfinite(finite_contrast)):
+            raise ValueError(
+                "Local PSD contrast must contain only finite values or NaN"
+            )
+    except TypeError as error:
+        raise ValueError("Local PSD contrast must contain numeric values") from error
+
+    if not isinstance(cluster, FrequencyCluster):
+        raise ValueError("Cluster must be a FrequencyCluster")
+    cluster_values = (
+        cluster.frequency,
+        cluster.minimum_frequency,
+        cluster.maximum_frequency,
+    )
+    if not all(np.isfinite(value) for value in cluster_values):
+        raise ValueError("Frequency cluster frequencies must be finite")
+    if not (
+        cluster.minimum_frequency
+        <= cluster.frequency
+        <= cluster.maximum_frequency
+    ):
+        raise ValueError("Frequency cluster center must be inside its range")
+    if cluster.band_name != band.name:
+        raise ValueError("Frequency cluster and analysis band names must match")
+
+    no_evidence = MedianPSDEvidence(
+        peak_frequency=None,
+        peak_psd=None,
+        prominence_db=None,
+        local_contrast_db=None,
+        passed_prominence=None,
+    )
+    search_min = max(
+        band.min_frequency,
+        cluster.minimum_frequency - band.frequency_tolerance_hz,
+    )
+    search_max = min(
+        band.max_frequency,
+        cluster.maximum_frequency + band.frequency_tolerance_hz,
+    )
+    search_mask = (frequency >= search_min) & (frequency <= search_max)
+    global_indices = np.flatnonzero(search_mask)
+    if len(global_indices) < 3:
+        return no_evidence
+
+    safe_median = np.maximum(median_psd, np.finfo(float).tiny)
+    median_db_region = 10.0 * np.log10(safe_median[search_mask])
+    local_peak_indices, properties = find_peaks(
+        median_db_region,
+        prominence=0,
+    )
+    if len(local_peak_indices) == 0:
+        return no_evidence
+
+    peak_candidates = []
+    for position, local_peak_index in enumerate(local_peak_indices):
+        global_peak_index = int(global_indices[local_peak_index])
+        prominence_db = float(properties["prominences"][position])
+        peak_frequency = float(frequency[global_peak_index])
+        peak_candidates.append((
+            -prominence_db,
+            abs(peak_frequency - cluster.frequency),
+            peak_frequency,
+            global_peak_index,
+            prominence_db,
+        ))
+
+    (
+        _,
+        _,
+        peak_frequency,
+        global_peak_index,
+        prominence_db,
+    ) = min(peak_candidates)
+    contrast_value = local_contrast_db[global_peak_index]
+    local_contrast = (
+        float(contrast_value)
+        if np.isfinite(contrast_value)
+        else None
+    )
+    return MedianPSDEvidence(
+        peak_frequency=peak_frequency,
+        peak_psd=float(median_psd[global_peak_index]),
+        prominence_db=prominence_db,
+        local_contrast_db=local_contrast,
+        passed_prominence=bool(prominence_db >= band.prominence_db),
+    )
+
+
+def build_frequency_cluster_diagnostics(
+    frequency: np.ndarray,
+    median_psd: np.ndarray,
+    clusters: list[FrequencyCluster],
+    analysis_bands: list[AnalysisBand],
+) -> list[FrequencyClusterDiagnostic]:
+    if not isinstance(clusters, list):
+        raise ValueError("Frequency clusters must be a list")
+    if not isinstance(analysis_bands, list) or not analysis_bands:
+        raise ValueError("At least one analysis band is required")
+
+    local_background = compute_local_psd_background(
+        frequency,
+        median_psd,
+        analysis_bands,
+    )
+    local_contrast_db = compute_local_psd_contrast_db(
+        median_psd,
+        local_background,
+    )
+    diagnostics = []
+    for cluster in clusters:
+        if not isinstance(cluster, FrequencyCluster):
+            raise ValueError(
+                "Frequency clusters must contain FrequencyCluster values"
+            )
+        band = next(
+            (
+                candidate_band
+                for candidate_band in analysis_bands
+                if candidate_band.name == cluster.band_name
+            ),
+            None,
+        )
+        if band is None:
+            raise ValueError(
+                f"Frequency cluster band {cluster.band_name!r} is not configured"
+            )
+        diagnostics.append(
+            FrequencyClusterDiagnostic(
+                cluster=cluster,
+                median_evidence=compute_median_psd_evidence(
+                    frequency,
+                    median_psd,
+                    local_contrast_db,
+                    cluster,
+                    band,
+                ),
+            )
+        )
+    return diagnostics
+
+
+def build_session_frequency_cluster_diagnostics(
+    statistics: StatisticsResult,
     clusters: FrequencyClusterResult,
+    analysis_bands: list[AnalysisBand],
+    frequency: np.ndarray,
+) -> FrequencyClusterDiagnostics:
+    return FrequencyClusterDiagnostics(
+        x=build_frequency_cluster_diagnostics(
+            frequency,
+            statistics.x.median,
+            clusters.x,
+            analysis_bands,
+        ),
+        y=build_frequency_cluster_diagnostics(
+            frequency,
+            statistics.y.median,
+            clusters.y,
+            analysis_bands,
+        ),
+        z=build_frequency_cluster_diagnostics(
+            frequency,
+            statistics.z.median,
+            clusters.z,
+            analysis_bands,
+        ),
+    )
+
+
+def print_session_frequency_clusters(
+    diagnostics: FrequencyClusterDiagnostics,
     analysis_bands: list[AnalysisBand],
     total_sessions: int,
 ) -> None:
@@ -1587,33 +1816,40 @@ def print_session_frequency_clusters(
         band.name: band_index
         for band_index, band in enumerate(analysis_bands)
     }
-    for axis_name, axis_clusters in (
-        ("X", clusters.x),
-        ("Y", clusters.y),
-        ("Z", clusters.z),
+    for axis_name, axis_diagnostics in (
+        ("X", diagnostics.x),
+        ("Y", diagnostics.y),
+        ("Z", diagnostics.z),
     ):
         print()
         print(f"Session frequency clusters — {axis_name}")
-        if not axis_clusters:
+        if not axis_diagnostics:
             print("No session frequency clusters.")
             continue
 
-        sorted_clusters = sorted(
-            axis_clusters,
-            key=lambda cluster: (
-                band_order[cluster.band_name],
-                cluster.frequency,
+        sorted_diagnostics = sorted(
+            axis_diagnostics,
+            key=lambda diagnostic: (
+                band_order[diagnostic.cluster.band_name],
+                diagnostic.cluster.frequency,
             ),
         )
         band_width = max(
             len("Band"),
-            *(len(cluster.band_name) for cluster in sorted_clusters),
+            *(
+                len(diagnostic.cluster.band_name)
+                for diagnostic in sorted_diagnostics
+            ),
         )
         print(
             f"{'Band':<{band_width}}  {'Freq Hz':>7}  {'Support':>7}  "
-            f"{'Support %':>9}  {'σf Hz':>6}  {'Range Hz':>13}  Sessions"
+            f"{'Support %':>9}  {'σf Hz':>6}  {'Range Hz':>13}  "
+            f"{'Med.Freq':>8}  {'Med.Prom':>8}  {'Med.Contr':>9}  "
+            f"{'Med.Pass':>8}  Sessions"
         )
-        for cluster in sorted_clusters:
+        for diagnostic in sorted_diagnostics:
+            cluster = diagnostic.cluster
+            evidence = diagnostic.median_evidence
             frequency_range = (
                 f"{cluster.minimum_frequency:.2f}–"
                 f"{cluster.maximum_frequency:.2f}"
@@ -1621,13 +1857,36 @@ def print_session_frequency_clusters(
             session_indices = ",".join(
                 str(index) for index in cluster.session_indices
             )
+            median_frequency = (
+                f"{evidence.peak_frequency:.2f}"
+                if evidence.peak_frequency is not None
+                else "N/A"
+            )
+            median_prominence = (
+                f"{evidence.prominence_db:.2f}"
+                if evidence.prominence_db is not None
+                else "N/A"
+            )
+            median_contrast = (
+                f"{evidence.local_contrast_db:.2f}"
+                if evidence.local_contrast_db is not None
+                else "N/A"
+            )
+            if evidence.passed_prominence is None:
+                median_pass = "N/A"
+            elif evidence.passed_prominence:
+                median_pass = "PASS"
+            else:
+                median_pass = "FAIL"
             print(
                 f"{cluster.band_name:<{band_width}}  "
                 f"{cluster.frequency:7.2f}  "
                 f"{cluster.support_count:>3}/{total_sessions:<3}  "
                 f"{cluster.support_fraction * 100:9.1f}  "
                 f"{cluster.frequency_std_hz:6.2f}  "
-                f"{frequency_range:>13}  {session_indices}"
+                f"{frequency_range:>13}  {median_frequency:>8}  "
+                f"{median_prominence:>8}  {median_contrast:>9}  "
+                f"{median_pass:>8}  {session_indices}"
             )
 
 
@@ -2585,8 +2844,16 @@ if sessions:
         aligned_psd,
         analysis_bands,
     )
+    frequency_cluster_diagnostics = (
+        build_session_frequency_cluster_diagnostics(
+            statistics,
+            frequency_clusters,
+            analysis_bands,
+            aligned_psd.frequency,
+        )
+    )
     print_session_frequency_clusters(
-        frequency_clusters,
+        frequency_cluster_diagnostics,
         analysis_bands,
         aligned_psd.x_stack.shape[0],
     )
