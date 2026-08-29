@@ -1205,6 +1205,33 @@ class PeakCandidateDiagnostics:
     z: list[PeakCandidateDiagnostic]
 
 
+@dataclass(frozen=True)
+class SessionPeak:
+    session_index: int
+    band_name: str
+    frequency: float
+    prominence_db: float
+
+
+@dataclass(frozen=True)
+class FrequencyCluster:
+    band_name: str
+    frequency: float
+    support_count: int
+    support_fraction: float
+    frequency_std_hz: float
+    minimum_frequency: float
+    maximum_frequency: float
+    session_indices: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class FrequencyClusterResult:
+    x: list[FrequencyCluster]
+    y: list[FrequencyCluster]
+    z: list[FrequencyCluster]
+
+
 @dataclass
 class VisualizationAxis:
     frequency: np.ndarray
@@ -1306,6 +1333,301 @@ def print_peak_candidate_diagnostics(
                 f"{item.frequency_std_hz:6.2f}  "
                 f"{item.frequency_stability_max_std_hz:6.2f}  "
                 f"{frequency_range:>13}  {frequency_stability:>9}  {result}"
+            )
+
+
+def find_session_peaks(
+    frequency: np.ndarray,
+    session_psd_stack: np.ndarray,
+    analysis_bands: list[AnalysisBand],
+) -> list[SessionPeak]:
+    if not isinstance(frequency, np.ndarray) or frequency.ndim != 1:
+        raise ValueError("Frequency must be a one-dimensional NumPy array")
+    if len(frequency) == 0:
+        raise ValueError("Frequency must not be empty")
+    try:
+        if not np.all(np.isfinite(frequency)):
+            raise ValueError("Frequency must contain only finite values")
+        if not np.all(np.diff(frequency) > 0):
+            raise ValueError("Frequency must be strictly increasing")
+    except TypeError as error:
+        raise ValueError("Frequency must contain numeric values") from error
+
+    if not isinstance(session_psd_stack, np.ndarray) or session_psd_stack.ndim != 2:
+        raise ValueError("Session PSD stack must be a two-dimensional NumPy array")
+    if session_psd_stack.shape[0] == 0:
+        raise ValueError("Session PSD stack must contain at least one session")
+    if session_psd_stack.shape[1] != len(frequency):
+        raise ValueError("Session PSD stack width must match frequency length")
+    try:
+        if not np.all(np.isfinite(session_psd_stack)):
+            raise ValueError("Session PSD stack must contain only finite values")
+        if np.any(session_psd_stack < 0):
+            raise ValueError("Session PSD stack must not contain negative values")
+    except TypeError as error:
+        raise ValueError("Session PSD stack must contain numeric values") from error
+
+    if not isinstance(analysis_bands, list) or not analysis_bands:
+        raise ValueError("At least one analysis band is required")
+
+    session_peaks = []
+    tiny = np.finfo(float).tiny
+    for session_index, session_psd in enumerate(session_psd_stack, start=1):
+        peaks_by_global_index: dict[int, tuple[int, SessionPeak]] = {}
+        for band_index, band in enumerate(analysis_bands):
+            band_mask = (
+                (frequency >= band.min_frequency)
+                & (frequency <= band.max_frequency)
+            )
+            global_indices = np.flatnonzero(band_mask)
+            if len(global_indices) < 2:
+                continue
+
+            resolution = frequency[1] - frequency[0]
+            distance = max(int(band.min_distance_hz / resolution), 1)
+            safe_psd = np.maximum(session_psd[band_mask], tiny)
+            session_psd_db = 10.0 * np.log10(safe_psd)
+            local_peak_indices, properties = find_peaks(
+                session_psd_db,
+                prominence=band.prominence_db,
+                distance=distance,
+            )
+            for position, local_peak_index in enumerate(local_peak_indices):
+                global_peak_index = int(global_indices[local_peak_index])
+                peak = SessionPeak(
+                    session_index=session_index,
+                    band_name=band.name,
+                    frequency=float(frequency[global_peak_index]),
+                    prominence_db=float(properties["prominences"][position]),
+                )
+                existing = peaks_by_global_index.get(global_peak_index)
+                if (
+                    existing is None
+                    or peak.prominence_db > existing[1].prominence_db
+                ):
+                    peaks_by_global_index[global_peak_index] = (
+                        band_index,
+                        peak,
+                    )
+
+        session_peaks.extend(
+            peak
+            for _, peak in sorted(
+                peaks_by_global_index.values(),
+                key=lambda item: (item[1].frequency, item[0]),
+            )
+        )
+
+    return session_peaks
+
+
+def build_frequency_clusters(
+    session_peaks: list[SessionPeak],
+    analysis_bands: list[AnalysisBand],
+    total_sessions: int,
+) -> list[FrequencyCluster]:
+    if not isinstance(session_peaks, list):
+        raise ValueError("Session peaks must be a list")
+    if not isinstance(analysis_bands, list) or not analysis_bands:
+        raise ValueError("At least one analysis band is required")
+    if (
+        not isinstance(total_sessions, int)
+        or isinstance(total_sessions, bool)
+        or total_sessions <= 0
+    ):
+        raise ValueError("Total sessions must be a positive integer")
+
+    band_names = {band.name for band in analysis_bands}
+    for peak in session_peaks:
+        if not isinstance(peak, SessionPeak):
+            raise ValueError("Session peaks must contain SessionPeak values")
+        if peak.band_name not in band_names:
+            raise ValueError("Session peak band is not in analysis bands")
+        if not 1 <= peak.session_index <= total_sessions:
+            raise ValueError("Session peak index is outside total sessions")
+        if not np.isfinite(peak.frequency):
+            raise ValueError("Session peak frequency must be finite")
+        if not np.isfinite(peak.prominence_db) or peak.prominence_db < 0:
+            raise ValueError(
+                "Session peak prominence must be finite and non-negative"
+            )
+
+    clusters = []
+    for band in analysis_bands:
+        band_peaks = sorted(
+            (peak for peak in session_peaks if peak.band_name == band.name),
+            key=lambda peak: (
+                peak.frequency,
+                peak.session_index,
+                -peak.prominence_db,
+            ),
+        )
+        representative_clusters: list[dict[int, SessionPeak]] = []
+        for peak in band_peaks:
+            matching_clusters = []
+            for cluster_index, representatives in enumerate(
+                representative_clusters
+            ):
+                center = float(np.median([
+                    representative.frequency
+                    for representative in representatives.values()
+                ]))
+                distance = abs(peak.frequency - center)
+                if distance <= band.frequency_tolerance_hz:
+                    matching_clusters.append((distance, center, cluster_index))
+
+            if not matching_clusters:
+                representative_clusters.append({peak.session_index: peak})
+                continue
+
+            _, center, cluster_index = min(matching_clusters)
+            representatives = representative_clusters[cluster_index]
+            existing = representatives.get(peak.session_index)
+            if existing is None:
+                representatives[peak.session_index] = peak
+                continue
+
+            existing_key = (
+                -existing.prominence_db,
+                abs(existing.frequency - center),
+                existing.frequency,
+            )
+            peak_key = (
+                -peak.prominence_db,
+                abs(peak.frequency - center),
+                peak.frequency,
+            )
+            if peak_key < existing_key:
+                representatives[peak.session_index] = peak
+
+        for representatives in representative_clusters:
+            session_indices = tuple(sorted(representatives))
+            representative_frequencies = np.asarray([
+                representatives[index].frequency
+                for index in session_indices
+            ])
+            support_count = len(session_indices)
+            support_fraction = support_count / total_sessions
+            cluster_frequency = float(np.median(representative_frequencies))
+            frequency_std_hz = float(np.std(representative_frequencies))
+            minimum_frequency = float(np.min(representative_frequencies))
+            maximum_frequency = float(np.max(representative_frequencies))
+
+            if not 1 <= support_count <= total_sessions:
+                raise ValueError("Frequency cluster support count is invalid")
+            if not 0 < support_fraction <= 1:
+                raise ValueError("Frequency cluster support fraction is invalid")
+            if len(session_indices) != len(set(session_indices)):
+                raise ValueError("Frequency cluster session indices must be unique")
+            if session_indices != tuple(sorted(session_indices)):
+                raise ValueError("Frequency cluster session indices must be sorted")
+            if not np.isfinite(frequency_std_hz) or frequency_std_hz < 0:
+                raise ValueError("Frequency cluster standard deviation is invalid")
+            if not minimum_frequency <= cluster_frequency <= maximum_frequency:
+                raise ValueError("Frequency cluster center is outside its range")
+
+            clusters.append(
+                FrequencyCluster(
+                    band_name=band.name,
+                    frequency=cluster_frequency,
+                    support_count=support_count,
+                    support_fraction=support_fraction,
+                    frequency_std_hz=frequency_std_hz,
+                    minimum_frequency=minimum_frequency,
+                    maximum_frequency=maximum_frequency,
+                    session_indices=session_indices,
+                )
+            )
+
+    band_order = {
+        band.name: band_index
+        for band_index, band in enumerate(analysis_bands)
+    }
+    return sorted(
+        clusters,
+        key=lambda cluster: (
+            band_order[cluster.band_name],
+            cluster.frequency,
+        ),
+    )
+
+
+def build_session_frequency_clusters(
+    aligned: AlignedPSDData,
+    analysis_bands: list[AnalysisBand],
+) -> FrequencyClusterResult:
+    validate_aligned_psd_data(aligned)
+    total_sessions = aligned.x_stack.shape[0]
+
+    def build_axis_clusters(session_psd_stack: np.ndarray) -> list[FrequencyCluster]:
+        session_peaks = find_session_peaks(
+            aligned.frequency,
+            session_psd_stack,
+            analysis_bands,
+        )
+        return build_frequency_clusters(
+            session_peaks,
+            analysis_bands,
+            total_sessions,
+        )
+
+    return FrequencyClusterResult(
+        x=build_axis_clusters(aligned.x_stack),
+        y=build_axis_clusters(aligned.y_stack),
+        z=build_axis_clusters(aligned.z_stack),
+    )
+
+
+def print_session_frequency_clusters(
+    clusters: FrequencyClusterResult,
+    analysis_bands: list[AnalysisBand],
+    total_sessions: int,
+) -> None:
+    band_order = {
+        band.name: band_index
+        for band_index, band in enumerate(analysis_bands)
+    }
+    for axis_name, axis_clusters in (
+        ("X", clusters.x),
+        ("Y", clusters.y),
+        ("Z", clusters.z),
+    ):
+        print()
+        print(f"Session frequency clusters — {axis_name}")
+        if not axis_clusters:
+            print("No session frequency clusters.")
+            continue
+
+        sorted_clusters = sorted(
+            axis_clusters,
+            key=lambda cluster: (
+                band_order[cluster.band_name],
+                cluster.frequency,
+            ),
+        )
+        band_width = max(
+            len("Band"),
+            *(len(cluster.band_name) for cluster in sorted_clusters),
+        )
+        print(
+            f"{'Band':<{band_width}}  {'Freq Hz':>7}  {'Support':>7}  "
+            f"{'Support %':>9}  {'σf Hz':>6}  {'Range Hz':>13}  Sessions"
+        )
+        for cluster in sorted_clusters:
+            frequency_range = (
+                f"{cluster.minimum_frequency:.2f}–"
+                f"{cluster.maximum_frequency:.2f}"
+            )
+            session_indices = ",".join(
+                str(index) for index in cluster.session_indices
+            )
+            print(
+                f"{cluster.band_name:<{band_width}}  "
+                f"{cluster.frequency:7.2f}  "
+                f"{cluster.support_count:>3}/{total_sessions:<3}  "
+                f"{cluster.support_fraction * 100:9.1f}  "
+                f"{cluster.frequency_std_hz:6.2f}  "
+                f"{frequency_range:>13}  {session_indices}"
             )
 
 
@@ -2259,6 +2581,15 @@ if sessions:
         candidate_diagnostics,
     )
     print_peak_candidate_diagnostics(candidate_diagnostics)
+    frequency_clusters = build_session_frequency_clusters(
+        aligned_psd,
+        analysis_bands,
+    )
+    print_session_frequency_clusters(
+        frequency_clusters,
+        analysis_bands,
+        aligned_psd.x_stack.shape[0],
+    )
     visualization_data = build_visualization_data(
         statistics,
         peaks,
