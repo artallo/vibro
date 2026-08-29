@@ -1677,15 +1677,18 @@ def compute_median_psd_evidence(
         band.max_frequency,
         cluster.maximum_frequency + band.frequency_tolerance_hz,
     )
-    search_mask = (frequency >= search_min) & (frequency <= search_max)
-    global_indices = np.flatnonzero(search_mask)
-    if len(global_indices) < 3:
+    band_mask = (
+        (frequency >= band.min_frequency)
+        & (frequency <= band.max_frequency)
+    )
+    band_global_indices = np.flatnonzero(band_mask)
+    if len(band_global_indices) < 3:
         return no_evidence
 
     safe_median = np.maximum(median_psd, np.finfo(float).tiny)
-    median_db_region = 10.0 * np.log10(safe_median[search_mask])
+    band_median_db = 10.0 * np.log10(safe_median[band_mask])
     local_peak_indices, properties = find_peaks(
-        median_db_region,
+        band_median_db,
         prominence=0,
     )
     if len(local_peak_indices) == 0:
@@ -1693,9 +1696,11 @@ def compute_median_psd_evidence(
 
     peak_candidates = []
     for position, local_peak_index in enumerate(local_peak_indices):
-        global_peak_index = int(global_indices[local_peak_index])
-        prominence_db = float(properties["prominences"][position])
+        global_peak_index = int(band_global_indices[local_peak_index])
         peak_frequency = float(frequency[global_peak_index])
+        if not search_min <= peak_frequency <= search_max:
+            continue
+        prominence_db = float(properties["prominences"][position])
         peak_candidates.append((
             -prominence_db,
             abs(peak_frequency - cluster.frequency),
@@ -1703,6 +1708,9 @@ def compute_median_psd_evidence(
             global_peak_index,
             prominence_db,
         ))
+
+    if not peak_candidates:
+        return no_evidence
 
     (
         _,
