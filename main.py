@@ -48,6 +48,7 @@ class AnalysisBand:
     min_distance_hz: float
     min_stability: float
     frequency_tolerance_hz: float
+    frequency_stability_max_std_hz: float
     noise_window_hz: float
 
 
@@ -186,6 +187,10 @@ def validate_config(config: ApplicationConfig) -> None:
             f"{band_name} frequency_tolerance_hz",
         )
         require_finite_number(
+            band.frequency_stability_max_std_hz,
+            f"{band_name} frequency_stability_max_std_hz",
+        )
+        require_finite_number(
             band.noise_window_hz,
             f"{band_name} noise_window_hz",
         )
@@ -211,6 +216,10 @@ def validate_config(config: ApplicationConfig) -> None:
         if band.frequency_tolerance_hz < 0:
             raise ValueError(
                 f"{band_name} frequency_tolerance_hz must be non-negative"
+            )
+        if band.frequency_stability_max_std_hz <= 0:
+            raise ValueError(
+                f"{band_name} frequency_stability_max_std_hz must be positive"
             )
         if band.noise_window_hz <= 0:
             raise ValueError(
@@ -249,6 +258,9 @@ def load_config(
             min_distance_hz=entry["min_distance_hz"],
             min_stability=entry["min_stability"],
             frequency_tolerance_hz=entry["frequency_tolerance_hz"],
+            frequency_stability_max_std_hz=entry[
+                "frequency_stability_max_std_hz"
+            ],
             noise_window_hz=entry["noise_window_hz"],
         )
         for entry in band_entries
@@ -1171,6 +1183,7 @@ class PeakResult:
 class PeakCandidateDiagnostic:
     band_name: str
     min_stability: float
+    frequency_stability_max_std_hz: float
     frequency: float
     prominence_db: float
     window_power_stability: float
@@ -1178,6 +1191,7 @@ class PeakCandidateDiagnostic:
     local_snr_db: float
     mean_session_frequency: float
     frequency_std_hz: float
+    frequency_stability_passed: bool | None
     minimum_session_frequency: float
     maximum_session_frequency: float
     accepted: bool
@@ -1260,7 +1274,8 @@ def print_peak_candidate_diagnostics(
         print(
             f"{'Band':<{band_width}}  {'Freq Hz':>7}  {'Prom dB':>7}  "
             f"{'Win.Stab':>8}  {'Min.Stab':>8}  {'SNR dB':>7}  "
-            f"{'σf Hz':>6}  {'Range Hz':>13}  Result"
+            f"{'σf Hz':>6}  {'σf Max':>6}  {'Range Hz':>13}  "
+            f"{'Freq.Stab':>9}  Result"
         )
         for item in candidates:
             if item.accepted:
@@ -1272,6 +1287,13 @@ def print_peak_candidate_diagnostics(
             else:
                 result = f"REJECT {item.rejection_reason}"
 
+            if item.frequency_stability_passed is None:
+                frequency_stability = "N/A"
+            elif item.frequency_stability_passed:
+                frequency_stability = "PASS"
+            else:
+                frequency_stability = "FAIL"
+
             frequency_range = (
                 f"{item.minimum_session_frequency:.2f}–"
                 f"{item.maximum_session_frequency:.2f}"
@@ -1281,8 +1303,9 @@ def print_peak_candidate_diagnostics(
                 f"{item.prominence_db:7.2f}  "
                 f"{item.window_power_stability:8.2f}  "
                 f"{item.min_stability:8.2f}  {item.local_snr_db:7.2f}  "
-                f"{item.frequency_std_hz:6.2f}  {frequency_range:>13}  "
-                f"{result}"
+                f"{item.frequency_std_hz:6.2f}  "
+                f"{item.frequency_stability_max_std_hz:6.2f}  "
+                f"{frequency_range:>13}  {frequency_stability:>9}  {result}"
             )
 
 
@@ -1679,6 +1702,9 @@ def _find_axis_peaks_by_bands(
                         PeakCandidateDiagnostic(
                             band_name=band.name,
                             min_stability=band.min_stability,
+                            frequency_stability_max_std_hz=(
+                                band.frequency_stability_max_std_hz
+                            ),
                             frequency=float(candidate_frequency),
                             prominence_db=candidate_prominence_db,
                             window_power_stability=unavailable,
@@ -1686,6 +1712,7 @@ def _find_axis_peaks_by_bands(
                             local_snr_db=unavailable,
                             mean_session_frequency=unavailable,
                             frequency_std_hz=unavailable,
+                            frequency_stability_passed=None,
                             minimum_session_frequency=unavailable,
                             maximum_session_frequency=unavailable,
                             accepted=False,
@@ -1724,6 +1751,10 @@ def _find_axis_peaks_by_bands(
             )
             mean_session_frequency = float(np.mean(session_peak_frequencies))
             frequency_std_hz = float(np.std(session_peak_frequencies))
+            frequency_stability_passed = (
+                frequency_std_hz
+                <= band.frequency_stability_max_std_hz
+            )
             minimum_session_frequency = float(np.min(session_peak_frequencies))
             maximum_session_frequency = float(np.max(session_peak_frequencies))
             accepted_peak_diagnostics = {
@@ -1743,6 +1774,9 @@ def _find_axis_peaks_by_bands(
                 PeakCandidateDiagnostic(
                     band_name=band.name,
                     min_stability=band.min_stability,
+                    frequency_stability_max_std_hz=(
+                        band.frequency_stability_max_std_hz
+                    ),
                     frequency=float(candidate_frequency),
                     prominence_db=candidate_prominence_db,
                     window_power_stability=float(window_power_stability),
@@ -1750,6 +1784,9 @@ def _find_axis_peaks_by_bands(
                     local_snr_db=local_snr_db,
                     mean_session_frequency=mean_session_frequency,
                     frequency_std_hz=frequency_std_hz,
+                    frequency_stability_passed=bool(
+                        frequency_stability_passed
+                    ),
                     minimum_session_frequency=minimum_session_frequency,
                     maximum_session_frequency=maximum_session_frequency,
                     accepted=bool(accepted),
