@@ -25,6 +25,7 @@ prominence_db = 1.8
 min_distance_hz = 1.0
 min_stability = 4.5
 frequency_tolerance_hz = 0.25
+frequency_stability_max_std_hz = 0.20
 noise_window_hz = 1.0
 
 [[analysis.bands]]
@@ -35,4 +36,5 @@ prominence_db = 1.8
 min_distance_hz = 1.0
 min_stability = 4.5
 frequency_tolerance_hz = 0.25
+frequency_stability_max_std_hz = 0.20
 noise_window_hz = 2.0
