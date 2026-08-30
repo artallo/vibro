@@ -20,7 +20,7 @@ min_weight = 0.2
 [visualization.trusted_frequency]
 min_support_fraction = 0.50
 min_median_prominence_db = 1.55
-background_weight = 0.25
+background_weight = 0.45
 
 [analysis.frequency_cluster_consolidation]
 median_frequency_tolerance_hz = 0.20
