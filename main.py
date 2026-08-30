@@ -1404,13 +1404,18 @@ def build_trusted_frequency_mask(
             )
         if not is_trusted_frequency_cluster(diagnostic, config):
             continue
+        peak_frequency = diagnostic.median_evidence.peak_frequency
+        if peak_frequency is None:
+            raise ValueError(
+                "Trusted frequency cluster must have a Median PSD peak"
+            )
         region_min = max(
             band.min_frequency,
-            cluster.minimum_frequency - band.frequency_tolerance_hz,
+            peak_frequency - band.frequency_tolerance_hz,
         )
         region_max = min(
             band.max_frequency,
-            cluster.maximum_frequency + band.frequency_tolerance_hz,
+            peak_frequency + band.frequency_tolerance_hz,
         )
         mask |= (frequency >= region_min) & (frequency <= region_max)
     return mask
