@@ -1289,6 +1289,7 @@ class MedianPSDEvidence:
     peak_psd: float | None
     prominence_db: float | None
     local_contrast_db: float | None
+    band_contrast_db: float | None
     passed_prominence: bool | None
 
 
@@ -1880,6 +1881,7 @@ def compute_median_psd_evidence(
         peak_psd=None,
         prominence_db=None,
         local_contrast_db=None,
+        band_contrast_db=None,
         passed_prominence=None,
     )
     search_min = max(
@@ -1938,11 +1940,22 @@ def compute_median_psd_evidence(
         if np.isfinite(contrast_value)
         else None
     )
+    peak_psd = float(median_psd[global_peak_index])
+    band_reference = float(np.median(median_psd[band_mask]))
+    tiny = np.finfo(float).tiny
+    safe_peak_psd = max(peak_psd, tiny)
+    safe_band_reference = max(band_reference, tiny)
+    band_contrast_db = float(
+        10.0 * np.log10(safe_peak_psd / safe_band_reference)
+    )
+    if not np.isfinite(band_contrast_db):
+        raise ValueError("Band-level Median PSD contrast must be finite")
     return MedianPSDEvidence(
         peak_frequency=peak_frequency,
-        peak_psd=float(median_psd[global_peak_index]),
+        peak_psd=peak_psd,
         prominence_db=prominence_db,
         local_contrast_db=local_contrast,
+        band_contrast_db=band_contrast_db,
         passed_prominence=bool(prominence_db >= band.prominence_db),
     )
 
@@ -2066,7 +2079,7 @@ def print_session_frequency_clusters(
             f"{'Band':<{band_width}}  {'Freq Hz':>7}  {'Support':>7}  "
             f"{'Support %':>9}  {'σf Hz':>6}  {'Range Hz':>13}  "
             f"{'Med.Freq':>8}  {'Med.Prom':>8}  {'Med.Contr':>9}  "
-            f"{'Med.Pass':>8}  Sessions"
+            f"{'Band.Contr':>10}  {'Med.Pass':>8}  Sessions"
         )
         for diagnostic in sorted_diagnostics:
             cluster = diagnostic.cluster
@@ -2093,6 +2106,11 @@ def print_session_frequency_clusters(
                 if evidence.local_contrast_db is not None
                 else "N/A"
             )
+            band_contrast = (
+                f"{evidence.band_contrast_db:.2f}"
+                if evidence.band_contrast_db is not None
+                else "N/A"
+            )
             if evidence.passed_prominence is None:
                 median_pass = "N/A"
             elif evidence.passed_prominence:
@@ -2107,7 +2125,7 @@ def print_session_frequency_clusters(
                 f"{cluster.frequency_std_hz:6.2f}  "
                 f"{frequency_range:>13}  {median_frequency:>8}  "
                 f"{median_prominence:>8}  {median_contrast:>9}  "
-                f"{median_pass:>8}  {session_indices}"
+                f"{band_contrast:>10}  {median_pass:>8}  {session_indices}"
             )
 
 
@@ -2139,17 +2157,30 @@ def print_trusted_frequency_regions(
         )
         print(
             f"{'Band':<{band_width}}  {'Freq Hz':>7}  {'Support':>7}  "
-            f"{'Med.Freq':>8}  {'Med.Prom':>8}  {'Range Hz':>13}"
+            f"{'Med.Freq':>8}  {'Med.Prom':>8}  {'Med.Contr':>9}  "
+            f"{'Band.Contr':>10}  {'Range Hz':>13}"
         )
         for diagnostic in trusted_diagnostics:
             cluster = diagnostic.cluster
             evidence = diagnostic.median_evidence
+            median_contrast = (
+                f"{evidence.local_contrast_db:.2f}"
+                if evidence.local_contrast_db is not None
+                else "N/A"
+            )
+            band_contrast = (
+                f"{evidence.band_contrast_db:.2f}"
+                if evidence.band_contrast_db is not None
+                else "N/A"
+            )
             print(
                 f"{cluster.band_name:<{band_width}}  "
                 f"{cluster.frequency:7.2f}  "
                 f"{cluster.support_count:>3}/{total_sessions:<3}  "
                 f"{evidence.peak_frequency:8.2f}  "
                 f"{evidence.prominence_db:8.2f}  "
+                f"{median_contrast:>9}  "
+                f"{band_contrast:>10}  "
                 f"{cluster.minimum_frequency:.2f}–"
                 f"{cluster.maximum_frequency:.2f}"
             )
