@@ -82,8 +82,16 @@ class RepeatabilityWeightingConfig:
 
 
 @dataclass(frozen=True)
+class TrustedFrequencyVisualizationConfig:
+    min_support_fraction: float
+    min_median_prominence_db: float
+    background_weight: float
+
+
+@dataclass(frozen=True)
 class VisualizationConfig:
     repeatability_weighting: RepeatabilityWeightingConfig
+    trusted_frequency: TrustedFrequencyVisualizationConfig
 
 
 @dataclass(frozen=True)
@@ -152,6 +160,35 @@ def validate_config(config: ApplicationConfig) -> None:
         raise ValueError(
             "Visualization repeatability min_weight must be greater than zero "
             "and at most one"
+        )
+
+    trusted_frequency = config.visualization.trusted_frequency
+    require_finite_number(
+        trusted_frequency.min_support_fraction,
+        "Visualization trusted frequency min_support_fraction",
+    )
+    require_finite_number(
+        trusted_frequency.min_median_prominence_db,
+        "Visualization trusted frequency min_median_prominence_db",
+    )
+    require_finite_number(
+        trusted_frequency.background_weight,
+        "Visualization trusted frequency background_weight",
+    )
+    if not 0 < trusted_frequency.min_support_fraction <= 1:
+        raise ValueError(
+            "Visualization trusted frequency min_support_fraction must be "
+            "greater than zero and at most one"
+        )
+    if trusted_frequency.min_median_prominence_db < 0:
+        raise ValueError(
+            "Visualization trusted frequency min_median_prominence_db must "
+            "be non-negative"
+        )
+    if not 0 <= trusted_frequency.background_weight <= 1:
+        raise ValueError(
+            "Visualization trusted frequency background_weight must be "
+            "between zero and one"
         )
 
     if not isinstance(config.analysis_bands, list) or not config.analysis_bands:
@@ -247,6 +284,9 @@ def load_config(
     repeatability_weighting_data = raw_config["visualization"][
         "repeatability_weighting"
     ]
+    trusted_frequency_data = raw_config["visualization"][
+        "trusted_frequency"
+    ]
     band_entries = raw_config["analysis"]["bands"]
 
     analysis_bands = [
@@ -286,6 +326,17 @@ def load_config(
         visualization=VisualizationConfig(
             repeatability_weighting=RepeatabilityWeightingConfig(
                 min_weight=repeatability_weighting_data["min_weight"],
+            ),
+            trusted_frequency=TrustedFrequencyVisualizationConfig(
+                min_support_fraction=trusted_frequency_data[
+                    "min_support_fraction"
+                ],
+                min_median_prominence_db=trusted_frequency_data[
+                    "min_median_prominence_db"
+                ],
+                background_weight=trusted_frequency_data[
+                    "background_weight"
+                ],
             ),
         ),
         analysis_bands=analysis_bands,
@@ -1254,6 +1305,161 @@ class FrequencyClusterDiagnostics:
     z: list[FrequencyClusterDiagnostic]
 
 
+def validate_trusted_frequency_visualization_config(
+    config: TrustedFrequencyVisualizationConfig,
+) -> None:
+    if not isinstance(config, TrustedFrequencyVisualizationConfig):
+        raise ValueError(
+            "Trusted frequency config must be a "
+            "TrustedFrequencyVisualizationConfig"
+        )
+    values = (
+        (config.min_support_fraction, "min_support_fraction"),
+        (config.min_median_prominence_db, "min_median_prominence_db"),
+        (config.background_weight, "background_weight"),
+    )
+    for value, name in values:
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not np.isfinite(value)
+        ):
+            raise ValueError(
+                f"Trusted frequency {name} must be a finite number"
+            )
+    if not 0 < config.min_support_fraction <= 1:
+        raise ValueError(
+            "Trusted frequency min_support_fraction must be greater than "
+            "zero and at most one"
+        )
+    if config.min_median_prominence_db < 0:
+        raise ValueError(
+            "Trusted frequency min_median_prominence_db must be non-negative"
+        )
+    if not 0 <= config.background_weight <= 1:
+        raise ValueError(
+            "Trusted frequency background_weight must be between zero and one"
+        )
+
+
+def is_trusted_frequency_cluster(
+    diagnostic: FrequencyClusterDiagnostic,
+    config: TrustedFrequencyVisualizationConfig,
+) -> bool:
+    if not isinstance(diagnostic, FrequencyClusterDiagnostic):
+        raise ValueError(
+            "Trusted frequency diagnostic must be a "
+            "FrequencyClusterDiagnostic"
+        )
+    validate_trusted_frequency_visualization_config(config)
+    prominence_db = diagnostic.median_evidence.prominence_db
+    return bool(
+        diagnostic.cluster.support_fraction
+        >= config.min_support_fraction
+        and prominence_db is not None
+        and prominence_db >= config.min_median_prominence_db
+    )
+
+
+def build_trusted_frequency_mask(
+    frequency: np.ndarray,
+    diagnostics: list[FrequencyClusterDiagnostic],
+    analysis_bands: list[AnalysisBand],
+    config: TrustedFrequencyVisualizationConfig,
+) -> np.ndarray:
+    if not isinstance(frequency, np.ndarray):
+        raise ValueError("Frequency axis must be a NumPy array")
+    if frequency.ndim != 1:
+        raise ValueError("Frequency axis must be one-dimensional")
+    if len(frequency) == 0:
+        raise ValueError("Frequency axis must not be empty")
+    try:
+        if not np.all(np.isfinite(frequency)):
+            raise ValueError("Frequency axis must contain only finite values")
+        if not np.all(np.diff(frequency) > 0):
+            raise ValueError("Frequency axis must be strictly increasing")
+    except TypeError as error:
+        raise ValueError("Frequency axis must contain numeric values") from error
+    if not isinstance(diagnostics, list):
+        raise ValueError("Frequency cluster diagnostics must be a list")
+    if not isinstance(analysis_bands, list) or not analysis_bands:
+        raise ValueError("At least one analysis band is required")
+    if not all(isinstance(band, AnalysisBand) for band in analysis_bands):
+        raise ValueError("Analysis bands must contain AnalysisBand values")
+    validate_trusted_frequency_visualization_config(config)
+
+    bands_by_name = {band.name: band for band in analysis_bands}
+    mask = np.zeros_like(frequency, dtype=bool)
+    for diagnostic in diagnostics:
+        if not isinstance(diagnostic, FrequencyClusterDiagnostic):
+            raise ValueError(
+                "Frequency cluster diagnostics must contain "
+                "FrequencyClusterDiagnostic values"
+            )
+        cluster = diagnostic.cluster
+        band = bands_by_name.get(cluster.band_name)
+        if band is None:
+            raise ValueError(
+                f"Frequency cluster band {cluster.band_name!r} is not configured"
+            )
+        if not is_trusted_frequency_cluster(diagnostic, config):
+            continue
+        region_min = max(
+            band.min_frequency,
+            cluster.minimum_frequency - band.frequency_tolerance_hz,
+        )
+        region_max = min(
+            band.max_frequency,
+            cluster.maximum_frequency + band.frequency_tolerance_hz,
+        )
+        mask |= (frequency >= region_min) & (frequency <= region_max)
+    return mask
+
+
+def compute_trusted_frequency_psd(
+    median_psd: np.ndarray,
+    trusted_mask: np.ndarray,
+    background_weight: float,
+) -> np.ndarray:
+    if not isinstance(median_psd, np.ndarray):
+        raise ValueError("Median PSD must be a NumPy array")
+    if median_psd.ndim != 1:
+        raise ValueError("Median PSD must be one-dimensional")
+    try:
+        if not np.all(np.isfinite(median_psd)):
+            raise ValueError("Median PSD must contain only finite values")
+        if np.any(median_psd < 0):
+            raise ValueError("Median PSD must be non-negative")
+    except TypeError as error:
+        raise ValueError("Median PSD must contain numeric values") from error
+    if not isinstance(trusted_mask, np.ndarray):
+        raise ValueError("Trusted frequency mask must be a NumPy array")
+    if trusted_mask.ndim != 1:
+        raise ValueError("Trusted frequency mask must be one-dimensional")
+    if trusted_mask.dtype != np.bool_:
+        raise ValueError("Trusted frequency mask must have boolean dtype")
+    if len(trusted_mask) != len(median_psd):
+        raise ValueError(
+            "Trusted frequency mask length must match Median PSD length"
+        )
+    if (
+        not isinstance(background_weight, (int, float))
+        or isinstance(background_weight, bool)
+        or not np.isfinite(background_weight)
+    ):
+        raise ValueError("Background weight must be a finite number")
+    if not 0 <= background_weight <= 1:
+        raise ValueError("Background weight must be between zero and one")
+
+    result = median_psd * background_weight
+    result[trusted_mask] = median_psd[trusted_mask]
+    if np.any(result < 0) or np.any(result > median_psd):
+        raise ValueError("Trusted frequency PSD is outside expected bounds")
+    if not np.array_equal(result[trusted_mask], median_psd[trusted_mask]):
+        raise ValueError("Trusted frequency PSD must preserve trusted bins")
+    return result
+
+
 @dataclass
 class VisualizationAxis:
     frequency: np.ndarray
@@ -1267,6 +1473,8 @@ class VisualizationAxis:
     repeatability_reference_stability: float | None
     repeatability_weight: np.ndarray
     repeatability_weighted_psd: np.ndarray
+    trusted_frequency_mask: np.ndarray
+    trusted_frequency_psd: np.ndarray
     peak_frequencies: np.ndarray
     peak_amplitudes: np.ndarray
     peak_window_power_stability: np.ndarray
@@ -1898,6 +2106,50 @@ def print_session_frequency_clusters(
             )
 
 
+def print_trusted_frequency_regions(
+    diagnostics: FrequencyClusterDiagnostics,
+    config: TrustedFrequencyVisualizationConfig,
+    total_sessions: int,
+) -> None:
+    validate_trusted_frequency_visualization_config(config)
+    for axis_name, axis_diagnostics in (
+        ("X", diagnostics.x),
+        ("Y", diagnostics.y),
+        ("Z", diagnostics.z),
+    ):
+        print()
+        print(f"Trusted frequency regions — {axis_name}")
+        trusted_diagnostics = [
+            diagnostic
+            for diagnostic in axis_diagnostics
+            if is_trusted_frequency_cluster(diagnostic, config)
+        ]
+        if not trusted_diagnostics:
+            print("No trusted frequency regions.")
+            continue
+        band_width = max(
+            len("Band"),
+            *(len(diagnostic.cluster.band_name)
+              for diagnostic in trusted_diagnostics),
+        )
+        print(
+            f"{'Band':<{band_width}}  {'Freq Hz':>7}  {'Support':>7}  "
+            f"{'Med.Freq':>8}  {'Med.Prom':>8}  {'Range Hz':>13}"
+        )
+        for diagnostic in trusted_diagnostics:
+            cluster = diagnostic.cluster
+            evidence = diagnostic.median_evidence
+            print(
+                f"{cluster.band_name:<{band_width}}  "
+                f"{cluster.frequency:7.2f}  "
+                f"{cluster.support_count:>3}/{total_sessions:<3}  "
+                f"{evidence.peak_frequency:8.2f}  "
+                f"{evidence.prominence_db:8.2f}  "
+                f"{cluster.minimum_frequency:.2f}–"
+                f"{cluster.maximum_frequency:.2f}"
+            )
+
+
 def draw_analysis_bands(
     ax,
     analysis_bands: list[AnalysisBand],
@@ -1970,6 +2222,8 @@ def build_visualization_data(
     aligned: AlignedPSDData,
     analysis_bands: list[AnalysisBand],
     repeatability_weighting: RepeatabilityWeightingConfig,
+    frequency_cluster_diagnostics: FrequencyClusterDiagnostics,
+    trusted_frequency_config: TrustedFrequencyVisualizationConfig,
 ) -> VisualizationData:
     validate_aligned_psd_data(aligned)
     frequency = aligned.frequency
@@ -1992,6 +2246,7 @@ def build_visualization_data(
         axis_statistics: AxisStatistics,
         axis_peaks: AxisPeaks,
         session_psd_stack: np.ndarray,
+        axis_cluster_diagnostics: list[FrequencyClusterDiagnostic],
     ) -> VisualizationAxis:
         expected_length = len(frequency)
         arrays = {
@@ -2096,6 +2351,17 @@ def build_visualization_data(
                     f"Repeatability-weighted PSD is outside expected bounds "
                     f"for {axis_name}"
                 )
+        trusted_frequency_mask = build_trusted_frequency_mask(
+            frequency,
+            axis_cluster_diagnostics,
+            analysis_bands,
+            trusted_frequency_config,
+        )
+        trusted_frequency_psd = compute_trusted_frequency_psd(
+            axis_statistics.median,
+            trusted_frequency_mask,
+            trusted_frequency_config.background_weight,
+        )
         if len(local_psd_background) != expected_length:
             raise ValueError(
                 f"Local PSD background length does not match frequency length "
@@ -2121,6 +2387,16 @@ def build_visualization_data(
                 f"Local window power stability length does not match frequency "
                 f"length for {axis_name}"
             )
+        if len(trusted_frequency_mask) != expected_length:
+            raise ValueError(
+                f"Trusted frequency mask length does not match frequency "
+                f"length for {axis_name}"
+            )
+        if len(trusted_frequency_psd) != expected_length:
+            raise ValueError(
+                f"Trusted frequency PSD length does not match frequency "
+                f"length for {axis_name}"
+            )
         return VisualizationAxis(
             frequency=frequency,
             median_psd=axis_statistics.median,
@@ -2135,6 +2411,8 @@ def build_visualization_data(
             ),
             repeatability_weight=repeatability_weight,
             repeatability_weighted_psd=repeatability_weighted_psd,
+            trusted_frequency_mask=trusted_frequency_mask,
+            trusted_frequency_psd=trusted_frequency_psd,
             peak_frequencies=axis_peaks.frequencies,
             peak_amplitudes=axis_peaks.amplitudes,
             peak_window_power_stability=(
@@ -2159,9 +2437,27 @@ def build_visualization_data(
         )
 
     return VisualizationData(
-        x=build_axis("X", statistics.x, peaks.x, aligned.x_stack),
-        y=build_axis("Y", statistics.y, peaks.y, aligned.y_stack),
-        z=build_axis("Z", statistics.z, peaks.z, aligned.z_stack),
+        x=build_axis(
+            "X",
+            statistics.x,
+            peaks.x,
+            aligned.x_stack,
+            frequency_cluster_diagnostics.x,
+        ),
+        y=build_axis(
+            "Y",
+            statistics.y,
+            peaks.y,
+            aligned.y_stack,
+            frequency_cluster_diagnostics.y,
+        ),
+        z=build_axis(
+            "Z",
+            statistics.z,
+            peaks.z,
+            aligned.z_stack,
+            frequency_cluster_diagnostics.z,
+        ),
     )
 
 
@@ -2836,6 +3132,7 @@ print()
 statistics: StatisticsResult | None = None
 peaks: PeakResult | None = None
 visualization_data: VisualizationData | None = None
+frequency_cluster_diagnostics: FrequencyClusterDiagnostics | None = None
 
 if sessions:
     aligned_psd = build_aligned_psd_data(sessions)
@@ -2865,12 +3162,19 @@ if sessions:
         analysis_bands,
         aligned_psd.x_stack.shape[0],
     )
+    print_trusted_frequency_regions(
+        frequency_cluster_diagnostics,
+        config.visualization.trusted_frequency,
+        aligned_psd.x_stack.shape[0],
+    )
     visualization_data = build_visualization_data(
         statistics,
         peaks,
         aligned_psd,
         analysis_bands,
         config.visualization.repeatability_weighting,
+        frequency_cluster_diagnostics,
+        config.visualization.trusted_frequency,
     )
     print_repeatability_weighting_reference(visualization_data)
 
@@ -3041,5 +3345,81 @@ for repeatability_axis, (axis_name, axis_data) in zip(
 
 repeatability_axes[-1].set_xlabel("Frequency, Hz")
 repeatability_fig.suptitle("Repeatability-weighted Median PSD")
+
+
+if frequency_cluster_diagnostics is None:
+    raise RuntimeError("Frequency cluster diagnostics were not built")
+
+trusted_fig, trusted_axes = plt.subplots(
+    3,
+    1,
+    figsize=(14, 10),
+    sharex=True,
+    constrained_layout=True,
+)
+
+trusted_diagnostics_by_axis = {
+    "X": frequency_cluster_diagnostics.x,
+    "Y": frequency_cluster_diagnostics.y,
+    "Z": frequency_cluster_diagnostics.z,
+}
+
+for trusted_axis, (axis_name, axis_data) in zip(
+    trusted_axes,
+    visualization_axes.items(),
+):
+    trusted_axis.plot(
+        axis_data.frequency,
+        axis_data.trusted_frequency_psd,
+        color=COLORS[axis_name],
+        label=f"{axis_name} Trusted Median PSD",
+    )
+    for diagnostic in trusted_diagnostics_by_axis[axis_name]:
+        if not is_trusted_frequency_cluster(
+            diagnostic,
+            config.visualization.trusted_frequency,
+        ):
+            continue
+        evidence = diagnostic.median_evidence
+        matching_indices = np.flatnonzero(
+            axis_data.frequency == evidence.peak_frequency
+        )
+        if len(matching_indices) != 1:
+            raise ValueError(
+                f"Trusted Median peak frequency {evidence.peak_frequency} Hz "
+                f"does not match exactly one {axis_name} frequency bin"
+            )
+        peak_psd = axis_data.median_psd[matching_indices[0]]
+        trusted_axis.scatter(
+            evidence.peak_frequency,
+            peak_psd,
+            color=COLORS[axis_name],
+            marker="x",
+        )
+        trusted_axis.annotate(
+            f"{evidence.peak_frequency:.1f} Hz\n"
+            f"{diagnostic.cluster.support_count}/"
+            f"{aligned_psd.x_stack.shape[0]}\n"
+            f"{evidence.prominence_db:.2f} dB",
+            xy=(evidence.peak_frequency, peak_psd),
+            xytext=(0, 6),
+            textcoords="offset points",
+            ha="center",
+            va="bottom",
+            fontsize=8,
+        )
+    trusted_axis.set_title(f"{axis_name} axis — Trusted Median PSD")
+    trusted_axis.set_ylabel("Trusted PSD [g²/Hz]")
+    trusted_axis.set_ylim(bottom=0)
+    trusted_axis.set_xlim(
+        analysis_min_frequency,
+        analysis_max_frequency,
+    )
+    trusted_axis.grid(True, alpha=0.25, linewidth=0.6)
+    if axis_name == "X":
+        trusted_axis.legend()
+
+trusted_axes[-1].set_xlabel("Frequency, Hz")
+trusted_fig.suptitle("Trusted Median PSD")
 
 plt.show()
