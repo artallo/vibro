@@ -14,9 +14,6 @@ odr_hz = 250
 nperseg = 1024
 noverlap = 512
 
-[visualization.repeatability_weighting]
-min_weight = 0.2
-
 [visualization.trusted_frequency]
 min_support_fraction = 0.50
 min_median_prominence_db = 1.55
