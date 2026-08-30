@@ -22,6 +22,9 @@ min_support_fraction = 0.50
 min_median_prominence_db = 1.55
 background_weight = 0.25
 
+[analysis.frequency_cluster_consolidation]
+median_frequency_tolerance_hz = 0.20
+
 [[analysis.bands]]
 name = "Low frequency"
 min_frequency = 0.5
