@@ -89,6 +89,11 @@ class TrustedFrequencyVisualizationConfig:
 
 
 @dataclass(frozen=True)
+class FrequencyClusterConsolidationConfig:
+    median_frequency_tolerance_hz: float
+
+
+@dataclass(frozen=True)
 class VisualizationConfig:
     repeatability_weighting: RepeatabilityWeightingConfig
     trusted_frequency: TrustedFrequencyVisualizationConfig
@@ -101,6 +106,7 @@ class ApplicationConfig:
     sensor: SensorConfig
     welch: WelchConfig
     visualization: VisualizationConfig
+    frequency_cluster_consolidation: FrequencyClusterConsolidationConfig
     analysis_bands: list[AnalysisBand]
 
 
@@ -189,6 +195,17 @@ def validate_config(config: ApplicationConfig) -> None:
         raise ValueError(
             "Visualization trusted frequency background_weight must be "
             "between zero and one"
+        )
+
+    consolidation = config.frequency_cluster_consolidation
+    require_finite_number(
+        consolidation.median_frequency_tolerance_hz,
+        "Frequency cluster consolidation median_frequency_tolerance_hz",
+    )
+    if consolidation.median_frequency_tolerance_hz <= 0:
+        raise ValueError(
+            "Frequency cluster consolidation "
+            "median_frequency_tolerance_hz must be positive"
         )
 
     if not isinstance(config.analysis_bands, list) or not config.analysis_bands:
@@ -287,6 +304,9 @@ def load_config(
     trusted_frequency_data = raw_config["visualization"][
         "trusted_frequency"
     ]
+    consolidation_data = raw_config["analysis"][
+        "frequency_cluster_consolidation"
+    ]
     band_entries = raw_config["analysis"]["bands"]
 
     analysis_bands = [
@@ -338,6 +358,11 @@ def load_config(
                     "background_weight"
                 ],
             ),
+        ),
+        frequency_cluster_consolidation=FrequencyClusterConsolidationConfig(
+            median_frequency_tolerance_hz=consolidation_data[
+                "median_frequency_tolerance_hz"
+            ],
         ),
         analysis_bands=analysis_bands,
     )
@@ -1306,6 +1331,235 @@ class FrequencyClusterDiagnostics:
     z: list[FrequencyClusterDiagnostic]
 
 
+@dataclass(frozen=True)
+class ConsolidatedFrequencyRegion:
+    band_name: str
+    frequency: float
+    support_count: int
+    support_fraction: float
+    minimum_frequency: float
+    maximum_frequency: float
+    session_indices: tuple[int, ...]
+    median_evidence: MedianPSDEvidence
+    source_clusters: tuple[FrequencyClusterDiagnostic, ...]
+
+
+@dataclass(frozen=True)
+class ConsolidatedFrequencyRegions:
+    x: list[ConsolidatedFrequencyRegion]
+    y: list[ConsolidatedFrequencyRegion]
+    z: list[ConsolidatedFrequencyRegion]
+
+
+def validate_frequency_cluster_consolidation_config(
+    config: FrequencyClusterConsolidationConfig,
+) -> None:
+    if not isinstance(config, FrequencyClusterConsolidationConfig):
+        raise ValueError(
+            "Frequency cluster consolidation config must be a "
+            "FrequencyClusterConsolidationConfig"
+        )
+    tolerance = config.median_frequency_tolerance_hz
+    if (
+        not isinstance(tolerance, (int, float))
+        or isinstance(tolerance, bool)
+        or not np.isfinite(tolerance)
+    ):
+        raise ValueError(
+            "Frequency cluster consolidation tolerance must be finite"
+        )
+    if tolerance <= 0:
+        raise ValueError(
+            "Frequency cluster consolidation tolerance must be positive"
+        )
+
+
+def consolidate_frequency_cluster_diagnostics(
+    diagnostics: list[FrequencyClusterDiagnostic],
+    analysis_bands: list[AnalysisBand],
+    total_sessions: int,
+    config: FrequencyClusterConsolidationConfig,
+) -> list[ConsolidatedFrequencyRegion]:
+    if not isinstance(diagnostics, list):
+        raise ValueError("Frequency cluster diagnostics must be a list")
+    if not isinstance(analysis_bands, list) or not analysis_bands:
+        raise ValueError("At least one analysis band is required")
+    if not all(isinstance(band, AnalysisBand) for band in analysis_bands):
+        raise ValueError("Analysis bands must contain AnalysisBand values")
+    if (
+        not isinstance(total_sessions, int)
+        or isinstance(total_sessions, bool)
+        or total_sessions <= 0
+    ):
+        raise ValueError("Total sessions must be a positive integer")
+    validate_frequency_cluster_consolidation_config(config)
+
+    band_order = {
+        band.name: band_index
+        for band_index, band in enumerate(analysis_bands)
+    }
+    for diagnostic in diagnostics:
+        if not isinstance(diagnostic, FrequencyClusterDiagnostic):
+            raise ValueError(
+                "Frequency cluster diagnostics must contain "
+                "FrequencyClusterDiagnostic values"
+            )
+        if diagnostic.cluster.band_name not in band_order:
+            raise ValueError(
+                f"Frequency cluster band "
+                f"{diagnostic.cluster.band_name!r} is not configured"
+            )
+
+    sorted_diagnostics = sorted(
+        diagnostics,
+        key=lambda diagnostic: (
+            band_order[diagnostic.cluster.band_name],
+            (
+                diagnostic.median_evidence.peak_frequency
+                if diagnostic.median_evidence.peak_frequency is not None
+                else float("inf")
+            ),
+            diagnostic.cluster.frequency,
+        ),
+    )
+    source_groups: list[list[FrequencyClusterDiagnostic]] = []
+    tolerance = config.median_frequency_tolerance_hz
+    for diagnostic in sorted_diagnostics:
+        diagnostic_frequency = diagnostic.median_evidence.peak_frequency
+        diagnostic_sessions = set(diagnostic.cluster.session_indices)
+        merged = False
+        for source_group in source_groups:
+            if (
+                source_group[0].cluster.band_name
+                != diagnostic.cluster.band_name
+            ):
+                continue
+            group_frequencies = [
+                source.median_evidence.peak_frequency
+                for source in source_group
+            ]
+            if (
+                diagnostic_frequency is None
+                or any(frequency is None for frequency in group_frequencies)
+            ):
+                continue
+            group_sessions = {
+                session_index
+                for source in source_group
+                for session_index in source.cluster.session_indices
+            }
+            if not diagnostic_sessions.isdisjoint(group_sessions):
+                continue
+            frequencies = [
+                float(frequency) for frequency in group_frequencies
+            ] + [diagnostic_frequency]
+            if max(frequencies) - min(frequencies) > tolerance:
+                continue
+            source_group.append(diagnostic)
+            merged = True
+            break
+        if not merged:
+            source_groups.append([diagnostic])
+
+    consolidated_regions = []
+    for source_group in source_groups:
+        source_clusters = tuple(source_group)
+        session_indices = tuple(sorted({
+            session_index
+            for source in source_clusters
+            for session_index in source.cluster.session_indices
+        }))
+        median_frequencies = [
+            source.median_evidence.peak_frequency
+            for source in source_clusters
+            if source.median_evidence.peak_frequency is not None
+        ]
+        representative_frequency = (
+            float(np.median(median_frequencies))
+            if median_frequencies
+            else None
+        )
+
+        def evidence_key(
+            source: FrequencyClusterDiagnostic,
+        ) -> tuple[float, float, float, float]:
+            evidence = source.median_evidence
+            prominence = evidence.prominence_db
+            peak_frequency = evidence.peak_frequency
+            return (
+                -prominence if prominence is not None else float("inf"),
+                (
+                    abs(peak_frequency - representative_frequency)
+                    if peak_frequency is not None
+                    and representative_frequency is not None
+                    else float("inf")
+                ),
+                (
+                    peak_frequency
+                    if peak_frequency is not None
+                    else float("inf")
+                ),
+                source.cluster.frequency,
+            )
+
+        representative_source = min(source_clusters, key=evidence_key)
+        consolidated_regions.append(
+            ConsolidatedFrequencyRegion(
+                band_name=source_clusters[0].cluster.band_name,
+                frequency=float(np.median([
+                    source.cluster.frequency for source in source_clusters
+                ])),
+                support_count=len(session_indices),
+                support_fraction=len(session_indices) / total_sessions,
+                minimum_frequency=min(
+                    source.cluster.minimum_frequency
+                    for source in source_clusters
+                ),
+                maximum_frequency=max(
+                    source.cluster.maximum_frequency
+                    for source in source_clusters
+                ),
+                session_indices=session_indices,
+                median_evidence=representative_source.median_evidence,
+                source_clusters=source_clusters,
+            )
+        )
+    return consolidated_regions
+
+
+def build_consolidated_frequency_regions(
+    diagnostics: FrequencyClusterDiagnostics,
+    analysis_bands: list[AnalysisBand],
+    total_sessions: int,
+    config: FrequencyClusterConsolidationConfig,
+) -> ConsolidatedFrequencyRegions:
+    if not isinstance(diagnostics, FrequencyClusterDiagnostics):
+        raise ValueError(
+            "Frequency cluster diagnostics must be a "
+            "FrequencyClusterDiagnostics"
+        )
+    return ConsolidatedFrequencyRegions(
+        x=consolidate_frequency_cluster_diagnostics(
+            diagnostics.x,
+            analysis_bands,
+            total_sessions,
+            config,
+        ),
+        y=consolidate_frequency_cluster_diagnostics(
+            diagnostics.y,
+            analysis_bands,
+            total_sessions,
+            config,
+        ),
+        z=consolidate_frequency_cluster_diagnostics(
+            diagnostics.z,
+            analysis_bands,
+            total_sessions,
+            config,
+        ),
+    )
+
+
 def validate_trusted_frequency_visualization_config(
     config: TrustedFrequencyVisualizationConfig,
 ) -> None:
@@ -1344,19 +1598,18 @@ def validate_trusted_frequency_visualization_config(
 
 
 def is_trusted_frequency_cluster(
-    diagnostic: FrequencyClusterDiagnostic,
+    region: ConsolidatedFrequencyRegion,
     config: TrustedFrequencyVisualizationConfig,
 ) -> bool:
-    if not isinstance(diagnostic, FrequencyClusterDiagnostic):
+    if not isinstance(region, ConsolidatedFrequencyRegion):
         raise ValueError(
-            "Trusted frequency diagnostic must be a "
-            "FrequencyClusterDiagnostic"
+            "Trusted frequency region must be a "
+            "ConsolidatedFrequencyRegion"
         )
     validate_trusted_frequency_visualization_config(config)
-    prominence_db = diagnostic.median_evidence.prominence_db
+    prominence_db = region.median_evidence.prominence_db
     return bool(
-        diagnostic.cluster.support_fraction
-        >= config.min_support_fraction
+        region.support_fraction >= config.min_support_fraction
         and prominence_db is not None
         and prominence_db >= config.min_median_prominence_db
     )
@@ -1364,7 +1617,7 @@ def is_trusted_frequency_cluster(
 
 def build_trusted_frequency_mask(
     frequency: np.ndarray,
-    diagnostics: list[FrequencyClusterDiagnostic],
+    regions: list[ConsolidatedFrequencyRegion],
     analysis_bands: list[AnalysisBand],
     config: TrustedFrequencyVisualizationConfig,
 ) -> np.ndarray:
@@ -1381,8 +1634,8 @@ def build_trusted_frequency_mask(
             raise ValueError("Frequency axis must be strictly increasing")
     except TypeError as error:
         raise ValueError("Frequency axis must contain numeric values") from error
-    if not isinstance(diagnostics, list):
-        raise ValueError("Frequency cluster diagnostics must be a list")
+    if not isinstance(regions, list):
+        raise ValueError("Consolidated frequency regions must be a list")
     if not isinstance(analysis_bands, list) or not analysis_bands:
         raise ValueError("At least one analysis band is required")
     if not all(isinstance(band, AnalysisBand) for band in analysis_bands):
@@ -1391,21 +1644,20 @@ def build_trusted_frequency_mask(
 
     bands_by_name = {band.name: band for band in analysis_bands}
     mask = np.zeros_like(frequency, dtype=bool)
-    for diagnostic in diagnostics:
-        if not isinstance(diagnostic, FrequencyClusterDiagnostic):
+    for region in regions:
+        if not isinstance(region, ConsolidatedFrequencyRegion):
             raise ValueError(
-                "Frequency cluster diagnostics must contain "
-                "FrequencyClusterDiagnostic values"
+                "Consolidated frequency regions must contain "
+                "ConsolidatedFrequencyRegion values"
             )
-        cluster = diagnostic.cluster
-        band = bands_by_name.get(cluster.band_name)
+        band = bands_by_name.get(region.band_name)
         if band is None:
             raise ValueError(
-                f"Frequency cluster band {cluster.band_name!r} is not configured"
+                f"Frequency region band {region.band_name!r} is not configured"
             )
-        if not is_trusted_frequency_cluster(diagnostic, config):
+        if not is_trusted_frequency_cluster(region, config):
             continue
-        peak_frequency = diagnostic.median_evidence.peak_frequency
+        peak_frequency = region.median_evidence.peak_frequency
         if peak_frequency is None:
             raise ValueError(
                 "Trusted frequency cluster must have a Median PSD peak"
@@ -2129,40 +2381,98 @@ def print_session_frequency_clusters(
             )
 
 
+def print_consolidated_frequency_regions(
+    regions: ConsolidatedFrequencyRegions,
+    total_sessions: int,
+) -> None:
+    for axis_name, axis_regions in (
+        ("X", regions.x),
+        ("Y", regions.y),
+        ("Z", regions.z),
+    ):
+        print()
+        print(f"Consolidated frequency regions — {axis_name}")
+        if not axis_regions:
+            print("No consolidated frequency regions.")
+            continue
+        band_width = max(
+            len("Band"),
+            *(len(region.band_name) for region in axis_regions),
+        )
+        print(
+            f"{'Band':<{band_width}}  {'Freq Hz':>7}  {'Support':>7}  "
+            f"{'Med.Freq':>8}  {'Med.Prom':>8}  {'Med.Contr':>9}  "
+            f"{'Band.Contr':>10}  {'Range Hz':>13}  {'Sources':>7}"
+        )
+        for region in axis_regions:
+            evidence = region.median_evidence
+            median_frequency = (
+                f"{evidence.peak_frequency:.2f}"
+                if evidence.peak_frequency is not None
+                else "N/A"
+            )
+            median_prominence = (
+                f"{evidence.prominence_db:.2f}"
+                if evidence.prominence_db is not None
+                else "N/A"
+            )
+            median_contrast = (
+                f"{evidence.local_contrast_db:.2f}"
+                if evidence.local_contrast_db is not None
+                else "N/A"
+            )
+            band_contrast = (
+                f"{evidence.band_contrast_db:.2f}"
+                if evidence.band_contrast_db is not None
+                else "N/A"
+            )
+            frequency_range = (
+                f"{region.minimum_frequency:.2f}–"
+                f"{region.maximum_frequency:.2f}"
+            )
+            print(
+                f"{region.band_name:<{band_width}}  "
+                f"{region.frequency:7.2f}  "
+                f"{region.support_count:>3}/{total_sessions:<3}  "
+                f"{median_frequency:>8}  {median_prominence:>8}  "
+                f"{median_contrast:>9}  {band_contrast:>10}  "
+                f"{frequency_range:>13}  "
+                f"{len(region.source_clusters):7d}"
+            )
+
+
 def print_trusted_frequency_regions(
-    diagnostics: FrequencyClusterDiagnostics,
+    regions: ConsolidatedFrequencyRegions,
     config: TrustedFrequencyVisualizationConfig,
     total_sessions: int,
 ) -> None:
     validate_trusted_frequency_visualization_config(config)
-    for axis_name, axis_diagnostics in (
-        ("X", diagnostics.x),
-        ("Y", diagnostics.y),
-        ("Z", diagnostics.z),
+    for axis_name, axis_regions in (
+        ("X", regions.x),
+        ("Y", regions.y),
+        ("Z", regions.z),
     ):
         print()
         print(f"Trusted frequency regions — {axis_name}")
-        trusted_diagnostics = [
-            diagnostic
-            for diagnostic in axis_diagnostics
-            if is_trusted_frequency_cluster(diagnostic, config)
+        trusted_regions = [
+            region
+            for region in axis_regions
+            if is_trusted_frequency_cluster(region, config)
         ]
-        if not trusted_diagnostics:
+        if not trusted_regions:
             print("No trusted frequency regions.")
             continue
         band_width = max(
             len("Band"),
-            *(len(diagnostic.cluster.band_name)
-              for diagnostic in trusted_diagnostics),
+            *(len(region.band_name) for region in trusted_regions),
         )
         print(
             f"{'Band':<{band_width}}  {'Freq Hz':>7}  {'Support':>7}  "
             f"{'Med.Freq':>8}  {'Med.Prom':>8}  {'Med.Contr':>9}  "
             f"{'Band.Contr':>10}  {'Range Hz':>13}"
         )
-        for diagnostic in trusted_diagnostics:
-            cluster = diagnostic.cluster
-            evidence = diagnostic.median_evidence
+        for region in trusted_regions:
+            evidence = region.median_evidence
             median_contrast = (
                 f"{evidence.local_contrast_db:.2f}"
                 if evidence.local_contrast_db is not None
@@ -2174,15 +2484,15 @@ def print_trusted_frequency_regions(
                 else "N/A"
             )
             print(
-                f"{cluster.band_name:<{band_width}}  "
-                f"{cluster.frequency:7.2f}  "
-                f"{cluster.support_count:>3}/{total_sessions:<3}  "
+                f"{region.band_name:<{band_width}}  "
+                f"{region.frequency:7.2f}  "
+                f"{region.support_count:>3}/{total_sessions:<3}  "
                 f"{evidence.peak_frequency:8.2f}  "
                 f"{evidence.prominence_db:8.2f}  "
                 f"{median_contrast:>9}  "
                 f"{band_contrast:>10}  "
-                f"{cluster.minimum_frequency:.2f}–"
-                f"{cluster.maximum_frequency:.2f}"
+                f"{region.minimum_frequency:.2f}–"
+                f"{region.maximum_frequency:.2f}"
             )
 
 
@@ -2258,7 +2568,7 @@ def build_visualization_data(
     aligned: AlignedPSDData,
     analysis_bands: list[AnalysisBand],
     repeatability_weighting: RepeatabilityWeightingConfig,
-    frequency_cluster_diagnostics: FrequencyClusterDiagnostics,
+    consolidated_frequency_regions: ConsolidatedFrequencyRegions,
     trusted_frequency_config: TrustedFrequencyVisualizationConfig,
 ) -> VisualizationData:
     validate_aligned_psd_data(aligned)
@@ -2282,7 +2592,7 @@ def build_visualization_data(
         axis_statistics: AxisStatistics,
         axis_peaks: AxisPeaks,
         session_psd_stack: np.ndarray,
-        axis_cluster_diagnostics: list[FrequencyClusterDiagnostic],
+        axis_frequency_regions: list[ConsolidatedFrequencyRegion],
     ) -> VisualizationAxis:
         expected_length = len(frequency)
         arrays = {
@@ -2389,7 +2699,7 @@ def build_visualization_data(
                 )
         trusted_frequency_mask = build_trusted_frequency_mask(
             frequency,
-            axis_cluster_diagnostics,
+            axis_frequency_regions,
             analysis_bands,
             trusted_frequency_config,
         )
@@ -2478,21 +2788,21 @@ def build_visualization_data(
             statistics.x,
             peaks.x,
             aligned.x_stack,
-            frequency_cluster_diagnostics.x,
+            consolidated_frequency_regions.x,
         ),
         y=build_axis(
             "Y",
             statistics.y,
             peaks.y,
             aligned.y_stack,
-            frequency_cluster_diagnostics.y,
+            consolidated_frequency_regions.y,
         ),
         z=build_axis(
             "Z",
             statistics.z,
             peaks.z,
             aligned.z_stack,
-            frequency_cluster_diagnostics.z,
+            consolidated_frequency_regions.z,
         ),
     )
 
@@ -3169,6 +3479,7 @@ statistics: StatisticsResult | None = None
 peaks: PeakResult | None = None
 visualization_data: VisualizationData | None = None
 frequency_cluster_diagnostics: FrequencyClusterDiagnostics | None = None
+consolidated_frequency_regions: ConsolidatedFrequencyRegions | None = None
 
 if sessions:
     aligned_psd = build_aligned_psd_data(sessions)
@@ -3198,8 +3509,18 @@ if sessions:
         analysis_bands,
         aligned_psd.x_stack.shape[0],
     )
-    print_trusted_frequency_regions(
+    consolidated_frequency_regions = build_consolidated_frequency_regions(
         frequency_cluster_diagnostics,
+        analysis_bands,
+        aligned_psd.x_stack.shape[0],
+        config.frequency_cluster_consolidation,
+    )
+    print_consolidated_frequency_regions(
+        consolidated_frequency_regions,
+        aligned_psd.x_stack.shape[0],
+    )
+    print_trusted_frequency_regions(
+        consolidated_frequency_regions,
         config.visualization.trusted_frequency,
         aligned_psd.x_stack.shape[0],
     )
@@ -3209,7 +3530,7 @@ if sessions:
         aligned_psd,
         analysis_bands,
         config.visualization.repeatability_weighting,
-        frequency_cluster_diagnostics,
+        consolidated_frequency_regions,
         config.visualization.trusted_frequency,
     )
     print_repeatability_weighting_reference(visualization_data)
@@ -3383,8 +3704,8 @@ repeatability_axes[-1].set_xlabel("Frequency, Hz")
 repeatability_fig.suptitle("Repeatability-weighted Median PSD")
 
 
-if frequency_cluster_diagnostics is None:
-    raise RuntimeError("Frequency cluster diagnostics were not built")
+if consolidated_frequency_regions is None:
+    raise RuntimeError("Consolidated frequency regions were not built")
 
 trusted_fig, trusted_axes = plt.subplots(
     3,
@@ -3394,10 +3715,10 @@ trusted_fig, trusted_axes = plt.subplots(
     constrained_layout=True,
 )
 
-trusted_diagnostics_by_axis = {
-    "X": frequency_cluster_diagnostics.x,
-    "Y": frequency_cluster_diagnostics.y,
-    "Z": frequency_cluster_diagnostics.z,
+trusted_regions_by_axis = {
+    "X": consolidated_frequency_regions.x,
+    "Y": consolidated_frequency_regions.y,
+    "Z": consolidated_frequency_regions.z,
 }
 
 for trusted_axis, (axis_name, axis_data) in zip(
@@ -3410,13 +3731,13 @@ for trusted_axis, (axis_name, axis_data) in zip(
         color=COLORS[axis_name],
         label=f"{axis_name} Trusted Median PSD",
     )
-    for diagnostic in trusted_diagnostics_by_axis[axis_name]:
+    for region in trusted_regions_by_axis[axis_name]:
         if not is_trusted_frequency_cluster(
-            diagnostic,
+            region,
             config.visualization.trusted_frequency,
         ):
             continue
-        evidence = diagnostic.median_evidence
+        evidence = region.median_evidence
         matching_indices = np.flatnonzero(
             axis_data.frequency == evidence.peak_frequency
         )
@@ -3434,7 +3755,7 @@ for trusted_axis, (axis_name, axis_data) in zip(
         )
         trusted_axis.annotate(
             f"{evidence.peak_frequency:.1f} Hz\n"
-            f"{diagnostic.cluster.support_count}/"
+            f"{region.support_count}/"
             f"{aligned_psd.x_stack.shape[0]}\n"
             f"{evidence.prominence_db:.2f} dB",
             xy=(evidence.peak_frequency, peak_psd),
