@@ -17,9 +17,9 @@ noverlap = 512
 [visualization.trusted_frequency]
 min_support_fraction = 0.50
 min_median_prominence_db = 1.55
-background_weight = 0.45
+background_weight = 0.5
 min_band_contrast_db = 1.0
-weak_trusted_weight = 0.8
+weak_trusted_weight = 0.7
 
 [analysis.frequency_cluster_consolidation]
 median_frequency_tolerance_hz = 0.20
