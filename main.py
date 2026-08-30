@@ -86,6 +86,8 @@ class TrustedFrequencyVisualizationConfig:
     min_support_fraction: float
     min_median_prominence_db: float
     background_weight: float
+    min_band_contrast_db: float
+    weak_trusted_weight: float
 
 
 @dataclass(frozen=True)
@@ -181,6 +183,14 @@ def validate_config(config: ApplicationConfig) -> None:
         trusted_frequency.background_weight,
         "Visualization trusted frequency background_weight",
     )
+    require_finite_number(
+        trusted_frequency.min_band_contrast_db,
+        "Visualization trusted frequency min_band_contrast_db",
+    )
+    require_finite_number(
+        trusted_frequency.weak_trusted_weight,
+        "Visualization trusted frequency weak_trusted_weight",
+    )
     if not 0 < trusted_frequency.min_support_fraction <= 1:
         raise ValueError(
             "Visualization trusted frequency min_support_fraction must be "
@@ -195,6 +205,24 @@ def validate_config(config: ApplicationConfig) -> None:
         raise ValueError(
             "Visualization trusted frequency background_weight must be "
             "between zero and one"
+        )
+    if trusted_frequency.min_band_contrast_db < 0:
+        raise ValueError(
+            "Visualization trusted frequency min_band_contrast_db must be "
+            "non-negative"
+        )
+    if not 0 <= trusted_frequency.weak_trusted_weight <= 1:
+        raise ValueError(
+            "Visualization trusted frequency weak_trusted_weight must be "
+            "between zero and one"
+        )
+    if (
+        trusted_frequency.weak_trusted_weight
+        < trusted_frequency.background_weight
+    ):
+        raise ValueError(
+            "Visualization trusted frequency weak_trusted_weight must not be "
+            "less than background_weight"
         )
 
     consolidation = config.frequency_cluster_consolidation
@@ -356,6 +384,12 @@ def load_config(
                 ],
                 background_weight=trusted_frequency_data[
                     "background_weight"
+                ],
+                min_band_contrast_db=trusted_frequency_data[
+                    "min_band_contrast_db"
+                ],
+                weak_trusted_weight=trusted_frequency_data[
+                    "weak_trusted_weight"
                 ],
             ),
         ),
@@ -1572,6 +1606,8 @@ def validate_trusted_frequency_visualization_config(
         (config.min_support_fraction, "min_support_fraction"),
         (config.min_median_prominence_db, "min_median_prominence_db"),
         (config.background_weight, "background_weight"),
+        (config.min_band_contrast_db, "min_band_contrast_db"),
+        (config.weak_trusted_weight, "weak_trusted_weight"),
     )
     for value, name in values:
         if (
@@ -1595,6 +1631,19 @@ def validate_trusted_frequency_visualization_config(
         raise ValueError(
             "Trusted frequency background_weight must be between zero and one"
         )
+    if config.min_band_contrast_db < 0:
+        raise ValueError(
+            "Trusted frequency min_band_contrast_db must be non-negative"
+        )
+    if not 0 <= config.weak_trusted_weight <= 1:
+        raise ValueError(
+            "Trusted frequency weak_trusted_weight must be between zero and one"
+        )
+    if config.weak_trusted_weight < config.background_weight:
+        raise ValueError(
+            "Trusted frequency weak_trusted_weight must not be less than "
+            "background_weight"
+        )
 
 
 def is_trusted_frequency_cluster(
@@ -1613,6 +1662,27 @@ def is_trusted_frequency_cluster(
         and prominence_db is not None
         and prominence_db >= config.min_median_prominence_db
     )
+
+
+def get_trusted_frequency_weight(
+    region: ConsolidatedFrequencyRegion,
+    config: TrustedFrequencyVisualizationConfig,
+) -> float:
+    if not isinstance(region, ConsolidatedFrequencyRegion):
+        raise ValueError(
+            "Trusted frequency region must be a "
+            "ConsolidatedFrequencyRegion"
+        )
+    validate_trusted_frequency_visualization_config(config)
+    if not is_trusted_frequency_cluster(region, config):
+        return float(config.background_weight)
+    band_contrast = region.median_evidence.band_contrast_db
+    if (
+        band_contrast is not None
+        and band_contrast >= config.min_band_contrast_db
+    ):
+        return 1.0
+    return float(config.weak_trusted_weight)
 
 
 def build_trusted_frequency_mask(
@@ -1674,10 +1744,57 @@ def build_trusted_frequency_mask(
     return mask
 
 
+def build_trusted_frequency_weight(
+    frequency: np.ndarray,
+    regions: list[ConsolidatedFrequencyRegion],
+    analysis_bands: list[AnalysisBand],
+    config: TrustedFrequencyVisualizationConfig,
+) -> np.ndarray:
+    trusted_mask = build_trusted_frequency_mask(
+        frequency,
+        regions,
+        analysis_bands,
+        config,
+    )
+    weights = np.full_like(
+        frequency,
+        config.background_weight,
+        dtype=float,
+    )
+    weights[trusted_mask] = config.weak_trusted_weight
+
+    bands_by_name = {band.name: band for band in analysis_bands}
+    for region in regions:
+        if get_trusted_frequency_weight(region, config) < 1.0:
+            continue
+        band = bands_by_name[region.band_name]
+        peak_frequency = region.median_evidence.peak_frequency
+        if peak_frequency is None:
+            raise ValueError(
+                "Trusted frequency cluster must have a Median PSD peak"
+            )
+        region_min = max(
+            band.min_frequency,
+            peak_frequency - band.frequency_tolerance_hz,
+        )
+        region_max = min(
+            band.max_frequency,
+            peak_frequency + band.frequency_tolerance_hz,
+        )
+        region_mask = (
+            (frequency >= region_min)
+            & (frequency <= region_max)
+        )
+        weights[region_mask] = np.maximum(weights[region_mask], 1.0)
+
+    if np.any(weights < config.background_weight) or np.any(weights > 1):
+        raise ValueError("Trusted frequency weights are outside expected bounds")
+    return weights
+
+
 def compute_trusted_frequency_psd(
     median_psd: np.ndarray,
-    trusted_mask: np.ndarray,
-    background_weight: float,
+    trusted_frequency_weight: np.ndarray,
 ) -> np.ndarray:
     if not isinstance(median_psd, np.ndarray):
         raise ValueError("Median PSD must be a NumPy array")
@@ -1690,31 +1807,33 @@ def compute_trusted_frequency_psd(
             raise ValueError("Median PSD must be non-negative")
     except TypeError as error:
         raise ValueError("Median PSD must contain numeric values") from error
-    if not isinstance(trusted_mask, np.ndarray):
-        raise ValueError("Trusted frequency mask must be a NumPy array")
-    if trusted_mask.ndim != 1:
-        raise ValueError("Trusted frequency mask must be one-dimensional")
-    if trusted_mask.dtype != np.bool_:
-        raise ValueError("Trusted frequency mask must have boolean dtype")
-    if len(trusted_mask) != len(median_psd):
+    if not isinstance(trusted_frequency_weight, np.ndarray):
+        raise ValueError("Trusted frequency weight must be a NumPy array")
+    if trusted_frequency_weight.ndim != 1:
+        raise ValueError("Trusted frequency weight must be one-dimensional")
+    if len(trusted_frequency_weight) != len(median_psd):
         raise ValueError(
-            "Trusted frequency mask length must match Median PSD length"
+            "Trusted frequency weight length must match Median PSD length"
         )
-    if (
-        not isinstance(background_weight, (int, float))
-        or isinstance(background_weight, bool)
-        or not np.isfinite(background_weight)
-    ):
-        raise ValueError("Background weight must be a finite number")
-    if not 0 <= background_weight <= 1:
-        raise ValueError("Background weight must be between zero and one")
+    try:
+        if not np.all(np.isfinite(trusted_frequency_weight)):
+            raise ValueError(
+                "Trusted frequency weight must contain only finite values"
+            )
+        if np.any(trusted_frequency_weight < 0) or np.any(
+            trusted_frequency_weight > 1
+        ):
+            raise ValueError(
+                "Trusted frequency weight must be between zero and one"
+            )
+    except TypeError as error:
+        raise ValueError(
+            "Trusted frequency weight must contain numeric values"
+        ) from error
 
-    result = median_psd * background_weight
-    result[trusted_mask] = median_psd[trusted_mask]
+    result = median_psd * trusted_frequency_weight
     if np.any(result < 0) or np.any(result > median_psd):
         raise ValueError("Trusted frequency PSD is outside expected bounds")
-    if not np.array_equal(result[trusted_mask], median_psd[trusted_mask]):
-        raise ValueError("Trusted frequency PSD must preserve trusted bins")
     return result
 
 
@@ -1732,6 +1851,7 @@ class VisualizationAxis:
     repeatability_weight: np.ndarray
     repeatability_weighted_psd: np.ndarray
     trusted_frequency_mask: np.ndarray
+    trusted_frequency_weight: np.ndarray
     trusted_frequency_psd: np.ndarray
     peak_frequencies: np.ndarray
     peak_amplitudes: np.ndarray
@@ -2469,7 +2589,7 @@ def print_trusted_frequency_regions(
         print(
             f"{'Band':<{band_width}}  {'Freq Hz':>7}  {'Support':>7}  "
             f"{'Med.Freq':>8}  {'Med.Prom':>8}  {'Med.Contr':>9}  "
-            f"{'Band.Contr':>10}  {'Range Hz':>13}"
+            f"{'Band.Contr':>10}  {'Weight':>6}  {'Range Hz':>13}"
         )
         for region in trusted_regions:
             evidence = region.median_evidence
@@ -2483,6 +2603,7 @@ def print_trusted_frequency_regions(
                 if evidence.band_contrast_db is not None
                 else "N/A"
             )
+            weight = get_trusted_frequency_weight(region, config)
             print(
                 f"{region.band_name:<{band_width}}  "
                 f"{region.frequency:7.2f}  "
@@ -2491,6 +2612,7 @@ def print_trusted_frequency_regions(
                 f"{evidence.prominence_db:8.2f}  "
                 f"{median_contrast:>9}  "
                 f"{band_contrast:>10}  "
+                f"{weight:6.2f}  "
                 f"{region.minimum_frequency:.2f}–"
                 f"{region.maximum_frequency:.2f}"
             )
@@ -2703,10 +2825,15 @@ def build_visualization_data(
             analysis_bands,
             trusted_frequency_config,
         )
+        trusted_frequency_weight = build_trusted_frequency_weight(
+            frequency,
+            axis_frequency_regions,
+            analysis_bands,
+            trusted_frequency_config,
+        )
         trusted_frequency_psd = compute_trusted_frequency_psd(
             axis_statistics.median,
-            trusted_frequency_mask,
-            trusted_frequency_config.background_weight,
+            trusted_frequency_weight,
         )
         if len(local_psd_background) != expected_length:
             raise ValueError(
@@ -2738,6 +2865,11 @@ def build_visualization_data(
                 f"Trusted frequency mask length does not match frequency "
                 f"length for {axis_name}"
             )
+        if len(trusted_frequency_weight) != expected_length:
+            raise ValueError(
+                f"Trusted frequency weight length does not match frequency "
+                f"length for {axis_name}"
+            )
         if len(trusted_frequency_psd) != expected_length:
             raise ValueError(
                 f"Trusted frequency PSD length does not match frequency "
@@ -2758,6 +2890,7 @@ def build_visualization_data(
             repeatability_weight=repeatability_weight,
             repeatability_weighted_psd=repeatability_weighted_psd,
             trusted_frequency_mask=trusted_frequency_mask,
+            trusted_frequency_weight=trusted_frequency_weight,
             trusted_frequency_psd=trusted_frequency_psd,
             peak_frequencies=axis_peaks.frequencies,
             peak_amplitudes=axis_peaks.amplitudes,
@@ -3746,7 +3879,7 @@ for trusted_axis, (axis_name, axis_data) in zip(
                 f"Trusted Median peak frequency {evidence.peak_frequency} Hz "
                 f"does not match exactly one {axis_name} frequency bin"
             )
-        peak_psd = axis_data.median_psd[matching_indices[0]]
+        peak_psd = axis_data.trusted_frequency_psd[matching_indices[0]]
         trusted_axis.scatter(
             evidence.peak_frequency,
             peak_psd,
