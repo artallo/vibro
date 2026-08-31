@@ -568,9 +568,9 @@ def save_run_figures(
     trusted_fig,
 ) -> None:
     with paths.figure1.open("xb") as figure1_file:
-        stat_fig.savefig(figure1_file, format="png", dpi=150)
+        stat_fig.savefig(figure1_file, format="png", dpi=100)
     with paths.figure2.open("xb") as figure2_file:
-        trusted_fig.savefig(figure2_file, format="png", dpi=150)
+        trusted_fig.savefig(figure2_file, format="png", dpi=100)
 
 
 def get_analysis_frequency_limits(
