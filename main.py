@@ -400,7 +400,18 @@ def parse_cli_arguments(
     parser.add_argument("--odr", type=float)
     parser.add_argument("--packets-per-session", type=int)
     parser.add_argument("--min-recommended-sessions", type=int)
+    parser.add_argument("--repeat", type=positive_integer, default=1)
     return parser.parse_args(arguments)
+
+
+def positive_integer(value: str) -> int:
+    try:
+        parsed_value = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be an integer") from error
+    if parsed_value < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed_value
 
 
 def normalize_cli_odr_hz(odr_hz: float) -> float:
@@ -444,6 +455,14 @@ def build_effective_config(
 ) -> ApplicationConfig:
     config = load_config(path, validate=False)
     cli_arguments = parse_cli_arguments(arguments)
+    return apply_cli_overrides(config, cli_arguments)
+
+
+def build_effective_config_from_cli(
+    path: Path,
+    cli_arguments: argparse.Namespace,
+) -> ApplicationConfig:
+    config = load_config(path, validate=False)
     return apply_cli_overrides(config, cli_arguments)
 
 
@@ -497,6 +516,8 @@ def initialize_run_log(
     paths: RunResultPaths,
     run_started_at: datetime,
     config: ApplicationConfig,
+    run_number: int,
+    total_runs: int,
     packet_count: int,
     duration_seconds: float,
     measured_fs: float,
@@ -504,7 +525,7 @@ def initialize_run_log(
     with paths.log.open("x", encoding="utf-8", newline="\n") as run_log:
         run_log.write(
             f"Run started: {run_started_at:%Y-%m-%d %H:%M:%S}\n"
-            "Run: 1/1\n"
+            f"Run: {run_number}/{total_runs}\n"
             f"ODR: {config.sensor.odr_hz:g} Hz\n"
             f"Packets/session: {config.session.packets_per_session}\n"
             f"Target sessions: {config.session.min_recommended_sessions}\n"
@@ -3204,13 +3225,16 @@ def compute_statistics(
 # ==========================================================
 
 try:
-    config = build_effective_config(CONFIG_PATH)
+    cli_arguments = parse_cli_arguments()
+    config = build_effective_config_from_cli(CONFIG_PATH, cli_arguments)
 except FileNotFoundError:
     raise SystemExit(f"Configuration file not found: {CONFIG_PATH}")
 except tomllib.TOMLDecodeError as error:
     raise SystemExit(f"Invalid TOML configuration: {error}")
 except (KeyError, TypeError, ValueError) as error:
     raise SystemExit(f"Invalid configuration: {error}")
+
+total_runs = cli_arguments.repeat
 
 print(f"ODR: {config.sensor.odr_hz:g} Hz")
 print(f"Packets/session: {config.session.packets_per_session}")
@@ -3416,372 +3440,404 @@ def process_session(session, session_fs, number):
 
 # ==========================================================
 
-print()
-input("Press ENTER to start recording...")
-run_started_at = datetime.now()
-ser.reset_input_buffer()
-
-print()
-print("Recording...")
-print("Press Ctrl+C to stop.")
-print()
-
-current_session = {
-    "X": [],
-    "Y": [],
-    "Z": [],
-}
-current_session_fs = []
-sessions = []
-stop_requested = False
-fs_list = []
-
-while True:
-
-    try:
-        packet = read_packet()
-    except KeyboardInterrupt:
-        stop_requested = True
-        if len(current_session["X"]) == 0:
-            break
-        continue
-
-    if packet is None:
-        continue
-
-    fs, x, y, z = packet
-
-    current_session["X"].append(x)
-    current_session["Y"].append(y)
-    current_session["Z"].append(z)
-    current_session_fs.append(fs)
-
-    fs_list.append(fs)
-
-    session_packets = len(current_session["X"])
-
-    if session_packets == config.session.packets_per_session:
-        session_result = process_session(
-            current_session,
-            current_session_fs,
-            len(sessions) + 1,
-        )
-        sessions.append(session_result)
-        current_session = {
-            "X": [],
-            "Y": [],
-            "Z": [],
-        }
-        current_session_fs = []
-    
-    packets = len(fs_list)
-    print(
-        f"\rPackets: {packets:4d}"
-        f"   Duration: {packets * len(x) / np.mean(fs_list):6.1f} s"
-        f"   Fs={np.mean(fs_list):6.2f}",
-        end=""
-    )
-
-    if len(sessions) >= config.session.min_recommended_sessions:
+def run_measurement(
+    run_number: int,
+    total_runs: int,
+    show_figures: bool,
+) -> bool:
+    if total_runs == 1:
         print()
-        print(f"Target session count reached: {len(sessions)}")
-        break
+        input("Press ENTER to start recording...")
+    else:
+        print()
+        print("=" * 60)
+        print(f"Starting run {run_number}/{total_runs}")
+        print("=" * 60)
 
-    if (
-        stop_requested
-        and session_packets == config.session.packets_per_session
-    ):
-        break
+    run_started_at = datetime.now()
+    ser.reset_input_buffer()
 
-print()
+    print()
+    print("Recording...")
+    print("Press Ctrl+C to stop.")
+    print()
 
-statistics: StatisticsResult | None = None
-peaks: PeakResult | None = None
-visualization_data: VisualizationData | None = None
-frequency_cluster_diagnostics: FrequencyClusterDiagnostics | None = None
-consolidated_frequency_regions: ConsolidatedFrequencyRegions | None = None
-run_result_paths: RunResultPaths | None = None
+    current_session = {
+        "X": [],
+        "Y": [],
+        "Z": [],
+    }
+    current_session_fs = []
+    sessions = []
+    stop_requested = False
+    fs_list = []
 
-if sessions:
-    measured_fs = float(np.mean(fs_list))
-    duration_seconds = sum(session.samples for session in sessions) / measured_fs
-    run_result_paths = build_run_result_paths(
-        run_started_at,
-        config.sensor.odr_hz,
-        1,
-    )
-    initialize_run_log(
-        run_result_paths,
-        run_started_at,
-        config,
-        len(fs_list),
-        duration_seconds,
-        measured_fs,
-    )
-    aligned_psd = build_aligned_psd_data(sessions)
-    statistics = compute_statistics(aligned_psd)
-    candidate_diagnostics = PeakCandidateDiagnostics(x=[], y=[], z=[])
-    peaks = find_psd_peaks(
-        statistics,
-        aligned_psd,
-        analysis_bands,
-        candidate_diagnostics,
-    )
-    append_run_diagnostics(
-        run_result_paths.log,
-        print_peak_candidate_diagnostics,
-        candidate_diagnostics,
-    )
-    frequency_clusters = build_session_frequency_clusters(
-        aligned_psd,
-        analysis_bands,
-    )
-    frequency_cluster_diagnostics = (
-        build_session_frequency_cluster_diagnostics(
-            statistics,
-            frequency_clusters,
-            analysis_bands,
-            aligned_psd.frequency,
-        )
-    )
-    append_run_diagnostics(
-        run_result_paths.log,
-        print_session_frequency_clusters,
-        frequency_cluster_diagnostics,
-        analysis_bands,
-        aligned_psd.x_stack.shape[0],
-    )
-    consolidated_frequency_regions = build_consolidated_frequency_regions(
-        frequency_cluster_diagnostics,
-        analysis_bands,
-        aligned_psd.x_stack.shape[0],
-        config.frequency_cluster_consolidation,
-    )
-    append_run_diagnostics(
-        run_result_paths.log,
-        print_consolidated_frequency_regions,
-        consolidated_frequency_regions,
-        aligned_psd.x_stack.shape[0],
-    )
-    append_run_diagnostics(
-        run_result_paths.log,
-        print_trusted_frequency_regions,
-        consolidated_frequency_regions,
-        config.visualization.trusted_frequency,
-        aligned_psd.x_stack.shape[0],
-    )
-    visualization_data = build_visualization_data(
-        statistics,
-        peaks,
-        aligned_psd,
-        analysis_bands,
-        consolidated_frequency_regions,
-        config.visualization.trusted_frequency,
-    )
+    while True:
 
-if not sessions:
-    print("No completed sessions available for analysis.")
-    ser.close()
-    raise SystemExit(0)
-
-if len(sessions) < config.session.min_recommended_sessions:
-    warning = (
-        f"Warning: only {len(sessions)} completed session(s); "
-        f"at least {config.session.min_recommended_sessions} are recommended."
-    )
-    print(warning)
-    if run_result_paths is not None:
-        with run_result_paths.log.open(
-            "a",
-            encoding="utf-8",
-            newline="\n",
-        ) as run_log:
-            run_log.write(f"{warning}\n")
-
-# ==========================================================
-# Statistical PSD visualization
-# ==========================================================
-
-if visualization_data is None:
-    raise RuntimeError("Visualization data was not built")
-
-stat_fig, stat_axes = plt.subplots(
-    6,
-    1,
-    figsize=(14, 16),
-    sharex=True,
-    constrained_layout=True,
-)
-
-visualization_axes = {
-    "X": visualization_data.x,
-    "Y": visualization_data.y,
-    "Z": visualization_data.z,
-}
-
-for axis_index, (axis_name, axis_data) in enumerate(visualization_axes.items()):
-    psd_axis = stat_axes[axis_index * 2]
-    stability_axis = stat_axes[axis_index * 2 + 1]
-
-    draw_analysis_bands(psd_axis, analysis_bands)
-    psd_axis.plot(
-        axis_data.frequency,
-        axis_data.median_psd,
-        color=COLORS[axis_name],
-        label=f"{axis_name} Median PSD",
-    )
-    psd_axis.scatter(
-        axis_data.peak_frequencies,
-        axis_data.peak_amplitudes,
-        color=COLORS[axis_name],
-        marker="x",
-        label="Stable peaks",
-    )
-    annotate_peak_frequencies(
-        psd_axis,
-        axis_data.peak_frequencies,
-        axis_data.peak_amplitudes,
-        axis_data.peak_frequency_std_hz,
-        axis_data.peak_local_snr_db,
-    )
-    psd_axis.set_title(f"{axis_name} axis — Median PSD")
-    psd_axis.set_ylabel("PSD [g²/Hz]")
-    psd_axis.set_xlim(analysis_min_frequency, analysis_max_frequency)
-    psd_axis.grid(True, alpha=0.25, linewidth=0.6)
-    if axis_index == 0:
-        psd_axis.legend()
-
-    stability_axis.plot(
-        axis_data.frequency,
-        axis_data.stability,
-        color=COLORS[axis_name],
-        label="Bin stability",
-    )
-    stability_axis.plot(
-        axis_data.frequency,
-        axis_data.local_window_power_stability,
-        color="tab:purple",
-        linewidth=1.0,
-        alpha=0.75,
-        label="Local window power stability",
-    )
-    for band_index, band in enumerate(analysis_bands):
-        stability_axis.hlines(
-            band.min_stability,
-            band.min_frequency,
-            band.max_frequency,
-            linestyle="--",
-            linewidth=1.0,
-            alpha=0.6,
-            label=(
-                "Minimum window-power stability"
-                if band_index == 0
-                else None
-            ),
-        )
-    stability_axis.scatter(
-        axis_data.peak_frequencies,
-        axis_data.peak_window_power_stability,
-        color=COLORS[axis_name],
-        marker="x",
-        label="Stable peaks — window power",
-    )
-    stability_axis.set_title(f"{axis_name} axis — Stability")
-    stability_axis.set_ylabel("Mean / Std")
-    stability_axis.set_xlim(
-        analysis_min_frequency,
-        analysis_max_frequency,
-    )
-    stability_axis.grid(True, alpha=0.25, linewidth=0.6)
-    if axis_index == 0:
-        stability_axis.legend()
-
-stat_axes[-1].set_xlabel("Frequency, Hz")
-stat_fig.suptitle("Statistical vibration analysis")
-
-
-if consolidated_frequency_regions is None:
-    raise RuntimeError("Consolidated frequency regions were not built")
-
-trusted_fig, trusted_axes = plt.subplots(
-    3,
-    1,
-    figsize=(14, 10),
-    sharex=True,
-    constrained_layout=True,
-)
-
-trusted_regions_by_axis = {
-    "X": consolidated_frequency_regions.x,
-    "Y": consolidated_frequency_regions.y,
-    "Z": consolidated_frequency_regions.z,
-}
-
-for trusted_axis, (axis_name, axis_data) in zip(
-    trusted_axes,
-    visualization_axes.items(),
-):
-    trusted_axis.plot(
-        axis_data.frequency,
-        axis_data.trusted_frequency_psd,
-        color=COLORS[axis_name],
-        label=f"{axis_name} Trusted Median PSD",
-    )
-    for region in trusted_regions_by_axis[axis_name]:
-        if not is_trusted_frequency_cluster(
-            region,
-            config.visualization.trusted_frequency,
-        ):
+        try:
+            packet = read_packet()
+        except KeyboardInterrupt:
+            stop_requested = True
+            if len(current_session["X"]) == 0:
+                break
             continue
-        evidence = region.median_evidence
-        matching_indices = np.flatnonzero(
-            axis_data.frequency == evidence.peak_frequency
-        )
-        if len(matching_indices) != 1:
-            raise ValueError(
-                f"Trusted Median peak frequency {evidence.peak_frequency} Hz "
-                f"does not match exactly one {axis_name} frequency bin"
+
+        if packet is None:
+            continue
+
+        fs, x, y, z = packet
+
+        current_session["X"].append(x)
+        current_session["Y"].append(y)
+        current_session["Z"].append(z)
+        current_session_fs.append(fs)
+
+        fs_list.append(fs)
+
+        session_packets = len(current_session["X"])
+
+        if session_packets == config.session.packets_per_session:
+            session_result = process_session(
+                current_session,
+                current_session_fs,
+                len(sessions) + 1,
             )
-        peak_psd = axis_data.trusted_frequency_psd[matching_indices[0]]
-        trusted_axis.scatter(
-            evidence.peak_frequency,
-            peak_psd,
+            sessions.append(session_result)
+            current_session = {
+                "X": [],
+                "Y": [],
+                "Z": [],
+            }
+            current_session_fs = []
+
+        packets = len(fs_list)
+        print(
+            f"\rPackets: {packets:4d}"
+            f"   Duration: {packets * len(x) / np.mean(fs_list):6.1f} s"
+            f"   Fs={np.mean(fs_list):6.2f}",
+            end=""
+        )
+
+        if len(sessions) >= config.session.min_recommended_sessions:
+            print()
+            print(f"Target session count reached: {len(sessions)}")
+            break
+
+        if (
+            stop_requested
+            and session_packets == config.session.packets_per_session
+        ):
+            break
+
+    print()
+
+    statistics: StatisticsResult | None = None
+    peaks: PeakResult | None = None
+    visualization_data: VisualizationData | None = None
+    frequency_cluster_diagnostics: FrequencyClusterDiagnostics | None = None
+    consolidated_frequency_regions: ConsolidatedFrequencyRegions | None = None
+    run_result_paths: RunResultPaths | None = None
+
+    if sessions:
+        measured_fs = float(np.mean(fs_list))
+        duration_seconds = sum(session.samples for session in sessions) / measured_fs
+        run_result_paths = build_run_result_paths(
+            run_started_at,
+            config.sensor.odr_hz,
+            run_number,
+        )
+        initialize_run_log(
+            run_result_paths,
+            run_started_at,
+            config,
+            run_number,
+            total_runs,
+            len(fs_list),
+            duration_seconds,
+            measured_fs,
+        )
+        aligned_psd = build_aligned_psd_data(sessions)
+        statistics = compute_statistics(aligned_psd)
+        candidate_diagnostics = PeakCandidateDiagnostics(x=[], y=[], z=[])
+        peaks = find_psd_peaks(
+            statistics,
+            aligned_psd,
+            analysis_bands,
+            candidate_diagnostics,
+        )
+        append_run_diagnostics(
+            run_result_paths.log,
+            print_peak_candidate_diagnostics,
+            candidate_diagnostics,
+        )
+        frequency_clusters = build_session_frequency_clusters(
+            aligned_psd,
+            analysis_bands,
+        )
+        frequency_cluster_diagnostics = (
+            build_session_frequency_cluster_diagnostics(
+                statistics,
+                frequency_clusters,
+                analysis_bands,
+                aligned_psd.frequency,
+            )
+        )
+        append_run_diagnostics(
+            run_result_paths.log,
+            print_session_frequency_clusters,
+            frequency_cluster_diagnostics,
+            analysis_bands,
+            aligned_psd.x_stack.shape[0],
+        )
+        consolidated_frequency_regions = build_consolidated_frequency_regions(
+            frequency_cluster_diagnostics,
+            analysis_bands,
+            aligned_psd.x_stack.shape[0],
+            config.frequency_cluster_consolidation,
+        )
+        append_run_diagnostics(
+            run_result_paths.log,
+            print_consolidated_frequency_regions,
+            consolidated_frequency_regions,
+            aligned_psd.x_stack.shape[0],
+        )
+        append_run_diagnostics(
+            run_result_paths.log,
+            print_trusted_frequency_regions,
+            consolidated_frequency_regions,
+            config.visualization.trusted_frequency,
+            aligned_psd.x_stack.shape[0],
+        )
+        visualization_data = build_visualization_data(
+            statistics,
+            peaks,
+            aligned_psd,
+            analysis_bands,
+            consolidated_frequency_regions,
+            config.visualization.trusted_frequency,
+        )
+
+    if not sessions:
+        print("No completed sessions available for analysis.")
+        return True
+
+    if len(sessions) < config.session.min_recommended_sessions:
+        warning = (
+            f"Warning: only {len(sessions)} completed session(s); "
+            f"at least {config.session.min_recommended_sessions} are recommended."
+        )
+        print(warning)
+        if run_result_paths is not None:
+            with run_result_paths.log.open(
+                "a",
+                encoding="utf-8",
+                newline="\n",
+            ) as run_log:
+                run_log.write(f"{warning}\n")
+
+    # ==========================================================
+    # Statistical PSD visualization
+    # ==========================================================
+
+    if visualization_data is None:
+        raise RuntimeError("Visualization data was not built")
+
+    stat_fig, stat_axes = plt.subplots(
+        6,
+        1,
+        figsize=(14, 16),
+        sharex=True,
+        constrained_layout=True,
+    )
+
+    visualization_axes = {
+        "X": visualization_data.x,
+        "Y": visualization_data.y,
+        "Z": visualization_data.z,
+    }
+
+    for axis_index, (axis_name, axis_data) in enumerate(visualization_axes.items()):
+        psd_axis = stat_axes[axis_index * 2]
+        stability_axis = stat_axes[axis_index * 2 + 1]
+
+        draw_analysis_bands(psd_axis, analysis_bands)
+        psd_axis.plot(
+            axis_data.frequency,
+            axis_data.median_psd,
+            color=COLORS[axis_name],
+            label=f"{axis_name} Median PSD",
+        )
+        psd_axis.scatter(
+            axis_data.peak_frequencies,
+            axis_data.peak_amplitudes,
             color=COLORS[axis_name],
             marker="x",
+            label="Stable peaks",
         )
-        trusted_axis.annotate(
-            f"{evidence.peak_frequency:.1f} Hz\n"
-            f"{region.support_count}/"
-            f"{aligned_psd.x_stack.shape[0]}\n"
-            f"{evidence.prominence_db:.2f} dB",
-            xy=(evidence.peak_frequency, peak_psd),
-            xytext=(0, 6),
-            textcoords="offset points",
-            ha="center",
-            va="bottom",
-            fontsize=8,
+        annotate_peak_frequencies(
+            psd_axis,
+            axis_data.peak_frequencies,
+            axis_data.peak_amplitudes,
+            axis_data.peak_frequency_std_hz,
+            axis_data.peak_local_snr_db,
         )
-    trusted_axis.set_title(f"{axis_name} axis — Trusted Median PSD")
-    trusted_axis.set_ylabel("Trusted PSD [g²/Hz]")
-    trusted_axis.set_ylim(bottom=0)
-    trusted_axis.set_xlim(
-        analysis_min_frequency,
-        analysis_max_frequency,
+        psd_axis.set_title(f"{axis_name} axis — Median PSD")
+        psd_axis.set_ylabel("PSD [g²/Hz]")
+        psd_axis.set_xlim(analysis_min_frequency, analysis_max_frequency)
+        psd_axis.grid(True, alpha=0.25, linewidth=0.6)
+        if axis_index == 0:
+            psd_axis.legend()
+
+        stability_axis.plot(
+            axis_data.frequency,
+            axis_data.stability,
+            color=COLORS[axis_name],
+            label="Bin stability",
+        )
+        stability_axis.plot(
+            axis_data.frequency,
+            axis_data.local_window_power_stability,
+            color="tab:purple",
+            linewidth=1.0,
+            alpha=0.75,
+            label="Local window power stability",
+        )
+        for band_index, band in enumerate(analysis_bands):
+            stability_axis.hlines(
+                band.min_stability,
+                band.min_frequency,
+                band.max_frequency,
+                linestyle="--",
+                linewidth=1.0,
+                alpha=0.6,
+                label=(
+                    "Minimum window-power stability"
+                    if band_index == 0
+                    else None
+                ),
+            )
+        stability_axis.scatter(
+            axis_data.peak_frequencies,
+            axis_data.peak_window_power_stability,
+            color=COLORS[axis_name],
+            marker="x",
+            label="Stable peaks — window power",
+        )
+        stability_axis.set_title(f"{axis_name} axis — Stability")
+        stability_axis.set_ylabel("Mean / Std")
+        stability_axis.set_xlim(
+            analysis_min_frequency,
+            analysis_max_frequency,
+        )
+        stability_axis.grid(True, alpha=0.25, linewidth=0.6)
+        if axis_index == 0:
+            stability_axis.legend()
+
+    stat_axes[-1].set_xlabel("Frequency, Hz")
+    stat_fig.suptitle("Statistical vibration analysis")
+
+
+    if consolidated_frequency_regions is None:
+        raise RuntimeError("Consolidated frequency regions were not built")
+
+    trusted_fig, trusted_axes = plt.subplots(
+        3,
+        1,
+        figsize=(14, 10),
+        sharex=True,
+        constrained_layout=True,
     )
-    trusted_axis.grid(True, alpha=0.25, linewidth=0.6)
-    if axis_name == "X":
-        trusted_axis.legend()
 
-trusted_axes[-1].set_xlabel("Frequency, Hz")
-trusted_fig.suptitle("Trusted Median PSD")
+    trusted_regions_by_axis = {
+        "X": consolidated_frequency_regions.x,
+        "Y": consolidated_frequency_regions.y,
+        "Z": consolidated_frequency_regions.z,
+    }
 
-if run_result_paths is None:
-    raise RuntimeError("Run result paths were not built")
+    for trusted_axis, (axis_name, axis_data) in zip(
+        trusted_axes,
+        visualization_axes.items(),
+    ):
+        trusted_axis.plot(
+            axis_data.frequency,
+            axis_data.trusted_frequency_psd,
+            color=COLORS[axis_name],
+            label=f"{axis_name} Trusted Median PSD",
+        )
+        for region in trusted_regions_by_axis[axis_name]:
+            if not is_trusted_frequency_cluster(
+                region,
+                config.visualization.trusted_frequency,
+            ):
+                continue
+            evidence = region.median_evidence
+            matching_indices = np.flatnonzero(
+                axis_data.frequency == evidence.peak_frequency
+            )
+            if len(matching_indices) != 1:
+                raise ValueError(
+                    f"Trusted Median peak frequency {evidence.peak_frequency} Hz "
+                    f"does not match exactly one {axis_name} frequency bin"
+                )
+            peak_psd = axis_data.trusted_frequency_psd[matching_indices[0]]
+            trusted_axis.scatter(
+                evidence.peak_frequency,
+                peak_psd,
+                color=COLORS[axis_name],
+                marker="x",
+            )
+            trusted_axis.annotate(
+                f"{evidence.peak_frequency:.1f} Hz\n"
+                f"{region.support_count}/"
+                f"{aligned_psd.x_stack.shape[0]}\n"
+                f"{evidence.prominence_db:.2f} dB",
+                xy=(evidence.peak_frequency, peak_psd),
+                xytext=(0, 6),
+                textcoords="offset points",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+            )
+        trusted_axis.set_title(f"{axis_name} axis — Trusted Median PSD")
+        trusted_axis.set_ylabel("Trusted PSD [g²/Hz]")
+        trusted_axis.set_ylim(bottom=0)
+        trusted_axis.set_xlim(
+            analysis_min_frequency,
+            analysis_max_frequency,
+        )
+        trusted_axis.grid(True, alpha=0.25, linewidth=0.6)
+        if axis_name == "X":
+            trusted_axis.legend()
 
-save_run_figures(run_result_paths, stat_fig, trusted_fig)
-print("Saved results:")
-print(f"  {run_result_paths.log}")
-print(f"  {run_result_paths.figure1}")
-print(f"  {run_result_paths.figure2}")
+    trusted_axes[-1].set_xlabel("Frequency, Hz")
+    trusted_fig.suptitle("Trusted Median PSD")
 
-plt.show()
+    if run_result_paths is None:
+        raise RuntimeError("Run result paths were not built")
+
+    save_run_figures(run_result_paths, stat_fig, trusted_fig)
+    print("Saved results:")
+    print(f"  {run_result_paths.log}")
+    print(f"  {run_result_paths.figure1}")
+    print(f"  {run_result_paths.figure2}")
+
+    if show_figures:
+        plt.show()
+    else:
+        plt.close(stat_fig)
+        plt.close(trusted_fig)
+
+    return stop_requested
+
+
+try:
+    for run_number in range(1, total_runs + 1):
+        stop_series = run_measurement(
+            run_number,
+            total_runs,
+            show_figures=(total_runs == 1),
+        )
+        if stop_series:
+            break
+finally:
+    ser.close()
