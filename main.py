@@ -1,7 +1,10 @@
 import argparse
 import struct
+import sys
 import tomllib
+from contextlib import redirect_stdout
 from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +19,7 @@ from scipy.signal import find_peaks
 # ==========================================================
 
 CONFIG_PATH = Path(__file__).with_name("config.toml")
+RESULTS_DIRECTORY = Path("results")
 
 # AXIS = "X"          # X / Y / Z
 
@@ -104,6 +108,13 @@ class ApplicationConfig:
     visualization: VisualizationConfig
     frequency_cluster_consolidation: FrequencyClusterConsolidationConfig
     analysis_bands: list[AnalysisBand]
+
+
+@dataclass(frozen=True)
+class RunResultPaths:
+    log: Path
+    figure1: Path
+    figure2: Path
 
 
 def validate_config(config: ApplicationConfig) -> None:
@@ -450,6 +461,95 @@ def send_adxl355_odr_command(
 ) -> None:
     serial_port.write(build_set_odr_command(config.sensor.odr_hz))
     serial_port.flush()
+
+
+def format_odr_for_filename(odr_hz: float) -> str:
+    return f"{odr_hz:g}".replace(".", "p")
+
+
+def build_run_result_paths(
+    run_started_at: datetime,
+    odr_hz: float,
+    run_number: int,
+) -> RunResultPaths:
+    RESULTS_DIRECTORY.mkdir(parents=True, exist_ok=True)
+    timestamp = run_started_at.strftime("%Y%m%d_%H%M%S")
+    base_name = (
+        f"{timestamp}_ODR{format_odr_for_filename(odr_hz)}_"
+        f"run{run_number:02d}"
+    )
+
+    collision_number = 1
+    while True:
+        suffix = "" if collision_number == 1 else f"_collision{collision_number:02d}"
+        candidate_base = f"{base_name}{suffix}"
+        paths = RunResultPaths(
+            log=RESULTS_DIRECTORY / f"{candidate_base}.txt",
+            figure1=RESULTS_DIRECTORY / f"{candidate_base}_figure1.png",
+            figure2=RESULTS_DIRECTORY / f"{candidate_base}_figure2.png",
+        )
+        if not any(path.exists() for path in (paths.log, paths.figure1, paths.figure2)):
+            return paths
+        collision_number += 1
+
+
+def initialize_run_log(
+    paths: RunResultPaths,
+    run_started_at: datetime,
+    config: ApplicationConfig,
+    packet_count: int,
+    duration_seconds: float,
+    measured_fs: float,
+) -> None:
+    with paths.log.open("x", encoding="utf-8", newline="\n") as run_log:
+        run_log.write(
+            f"Run started: {run_started_at:%Y-%m-%d %H:%M:%S}\n"
+            "Run: 1/1\n"
+            f"ODR: {config.sensor.odr_hz:g} Hz\n"
+            f"Packets/session: {config.session.packets_per_session}\n"
+            f"Target sessions: {config.session.min_recommended_sessions}\n"
+            f"Welch nperseg: {config.welch.nperseg}\n"
+            f"Welch noverlap: {config.welch.noverlap}\n"
+            "\n"
+            f"Packets: {packet_count:4d}"
+            f"   Duration: {duration_seconds:6.1f} s"
+            f"   Fs={measured_fs:6.2f}\n"
+        )
+
+
+class TeeTextOutput:
+    def __init__(self, *outputs) -> None:
+        self.outputs = outputs
+
+    def write(self, text: str) -> int:
+        for output in self.outputs:
+            output.write(text)
+        return len(text)
+
+    def flush(self) -> None:
+        for output in self.outputs:
+            output.flush()
+
+
+def append_run_diagnostics(
+    log_path: Path,
+    printer,
+    *args,
+) -> None:
+    with log_path.open("a", encoding="utf-8", newline="\n") as run_log:
+        with redirect_stdout(TeeTextOutput(sys.stdout, run_log)):
+            printer(*args)
+
+
+def save_run_figures(
+    paths: RunResultPaths,
+    stat_fig,
+    trusted_fig,
+) -> None:
+    with paths.figure1.open("xb") as figure1_file:
+        stat_fig.savefig(figure1_file, format="png", dpi=150)
+    with paths.figure2.open("xb") as figure2_file:
+        trusted_fig.savefig(figure2_file, format="png", dpi=150)
 
 
 def get_analysis_frequency_limits(
@@ -3318,6 +3418,7 @@ def process_session(session, session_fs, number):
 
 print()
 input("Press ENTER to start recording...")
+run_started_at = datetime.now()
 ser.reset_input_buffer()
 
 print()
@@ -3399,8 +3500,24 @@ peaks: PeakResult | None = None
 visualization_data: VisualizationData | None = None
 frequency_cluster_diagnostics: FrequencyClusterDiagnostics | None = None
 consolidated_frequency_regions: ConsolidatedFrequencyRegions | None = None
+run_result_paths: RunResultPaths | None = None
 
 if sessions:
+    measured_fs = float(np.mean(fs_list))
+    duration_seconds = sum(session.samples for session in sessions) / measured_fs
+    run_result_paths = build_run_result_paths(
+        run_started_at,
+        config.sensor.odr_hz,
+        1,
+    )
+    initialize_run_log(
+        run_result_paths,
+        run_started_at,
+        config,
+        len(fs_list),
+        duration_seconds,
+        measured_fs,
+    )
     aligned_psd = build_aligned_psd_data(sessions)
     statistics = compute_statistics(aligned_psd)
     candidate_diagnostics = PeakCandidateDiagnostics(x=[], y=[], z=[])
@@ -3410,7 +3527,11 @@ if sessions:
         analysis_bands,
         candidate_diagnostics,
     )
-    print_peak_candidate_diagnostics(candidate_diagnostics)
+    append_run_diagnostics(
+        run_result_paths.log,
+        print_peak_candidate_diagnostics,
+        candidate_diagnostics,
+    )
     frequency_clusters = build_session_frequency_clusters(
         aligned_psd,
         analysis_bands,
@@ -3423,7 +3544,9 @@ if sessions:
             aligned_psd.frequency,
         )
     )
-    print_session_frequency_clusters(
+    append_run_diagnostics(
+        run_result_paths.log,
+        print_session_frequency_clusters,
         frequency_cluster_diagnostics,
         analysis_bands,
         aligned_psd.x_stack.shape[0],
@@ -3434,11 +3557,15 @@ if sessions:
         aligned_psd.x_stack.shape[0],
         config.frequency_cluster_consolidation,
     )
-    print_consolidated_frequency_regions(
+    append_run_diagnostics(
+        run_result_paths.log,
+        print_consolidated_frequency_regions,
         consolidated_frequency_regions,
         aligned_psd.x_stack.shape[0],
     )
-    print_trusted_frequency_regions(
+    append_run_diagnostics(
+        run_result_paths.log,
+        print_trusted_frequency_regions,
         consolidated_frequency_regions,
         config.visualization.trusted_frequency,
         aligned_psd.x_stack.shape[0],
@@ -3458,10 +3585,18 @@ if not sessions:
     raise SystemExit(0)
 
 if len(sessions) < config.session.min_recommended_sessions:
-    print(
+    warning = (
         f"Warning: only {len(sessions)} completed session(s); "
         f"at least {config.session.min_recommended_sessions} are recommended."
     )
+    print(warning)
+    if run_result_paths is not None:
+        with run_result_paths.log.open(
+            "a",
+            encoding="utf-8",
+            newline="\n",
+        ) as run_log:
+            run_log.write(f"{warning}\n")
 
 # ==========================================================
 # Statistical PSD visualization
@@ -3639,5 +3774,14 @@ for trusted_axis, (axis_name, axis_data) in zip(
 
 trusted_axes[-1].set_xlabel("Frequency, Hz")
 trusted_fig.suptitle("Trusted Median PSD")
+
+if run_result_paths is None:
+    raise RuntimeError("Run result paths were not built")
+
+save_run_figures(run_result_paths, stat_fig, trusted_fig)
+print("Saved results:")
+print(f"  {run_result_paths.log}")
+print(f"  {run_result_paths.figure1}")
+print(f"  {run_result_paths.figure2}")
 
 plt.show()
