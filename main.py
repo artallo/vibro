@@ -123,6 +123,19 @@ class RunResultPaths:
     log: Path
     figure1: Path
     figure2: Path
+    raw: Path
+
+
+@dataclass(frozen=True)
+class RawMeasurement:
+    x: np.ndarray
+    y: np.ndarray
+    z: np.ndarray
+    packet_fs_hz: np.ndarray
+    created_at: str
+    requested_odr_hz: float
+    packets_per_session: int
+    target_sessions: int
 
 
 def validate_config(config: ApplicationConfig) -> None:
@@ -595,8 +608,12 @@ def build_run_result_paths(
             log=RESULTS_DIRECTORY / f"{candidate_base}.txt",
             figure1=RESULTS_DIRECTORY / f"{candidate_base}_figure1.png",
             figure2=RESULTS_DIRECTORY / f"{candidate_base}_figure2.png",
+            raw=RESULTS_DIRECTORY / f"{candidate_base}_raw.npz",
         )
-        if not any(path.exists() for path in (paths.log, paths.figure1, paths.figure2)):
+        if not any(
+            path.exists()
+            for path in (paths.log, paths.figure1, paths.figure2, paths.raw)
+        ):
             return paths
         collision_number += 1
 
@@ -610,6 +627,8 @@ def initialize_run_log(
     packet_count: int,
     duration_seconds: float,
     measured_fs: float,
+    raw_packet_count: int | None = None,
+    raw_samples_per_packet: int | None = None,
 ) -> None:
     with paths.log.open("x", encoding="utf-8", newline="\n") as run_log:
         run_log.write(
@@ -628,6 +647,101 @@ def initialize_run_log(
             f"   Duration: {duration_seconds:6.1f} s"
             f"   Fs={measured_fs:6.2f}\n"
         )
+        if raw_packet_count is not None:
+            if raw_samples_per_packet is None:
+                raise ValueError(
+                    "Raw samples per packet are required with raw packet count"
+                )
+            run_log.write(
+                f"Raw data: {paths.raw.name}\n"
+                f"Raw packets: {raw_packet_count}\n"
+                f"Samples/packet: {raw_samples_per_packet}\n"
+            )
+
+
+def validate_raw_measurement(raw: RawMeasurement) -> None:
+    packet_arrays = {
+        "x": raw.x,
+        "y": raw.y,
+        "z": raw.z,
+    }
+    for axis_name, values in packet_arrays.items():
+        if not isinstance(values, np.ndarray) or values.ndim != 2:
+            raise ValueError(
+                f"Raw {axis_name} data must be a two-dimensional NumPy array"
+            )
+        if not np.all(np.isfinite(values)):
+            raise ValueError(f"Raw {axis_name} data must be finite")
+    if raw.x.shape != raw.y.shape or raw.x.shape != raw.z.shape:
+        raise ValueError("Raw X/Y/Z data shapes must match")
+    packet_count, samples_per_packet = raw.x.shape
+    if packet_count == 0 or samples_per_packet == 0:
+        raise ValueError("Raw measurement must contain packets and samples")
+    if (
+        not isinstance(raw.packet_fs_hz, np.ndarray)
+        or raw.packet_fs_hz.shape != (packet_count,)
+    ):
+        raise ValueError("Raw packet_fs_hz shape must match packet count")
+    if (
+        not np.all(np.isfinite(raw.packet_fs_hz))
+        or np.any(raw.packet_fs_hz <= 0)
+    ):
+        raise ValueError("Raw packet_fs_hz must be positive and finite")
+    if not isinstance(raw.created_at, str) or not raw.created_at:
+        raise ValueError("Raw created_at must be a non-empty string")
+    if raw.requested_odr_hz not in SUPPORTED_ODR_HZ:
+        raise ValueError("Raw requested ODR is unsupported")
+    if raw.packets_per_session <= 0 or raw.target_sessions <= 0:
+        raise ValueError("Raw session dimensions must be positive")
+    expected_packet_count = raw.packets_per_session * raw.target_sessions
+    if packet_count != expected_packet_count:
+        raise ValueError(
+            "Raw packet count must match packets_per_session * target_sessions"
+        )
+
+
+def save_raw_measurement(path: Path, raw: RawMeasurement) -> None:
+    validate_raw_measurement(raw)
+    with path.open("xb") as raw_file:
+        np.savez_compressed(
+            raw_file,
+            format_version=np.asarray(1, dtype=np.int64),
+            created_at=np.asarray(raw.created_at),
+            requested_odr_hz=np.asarray(raw.requested_odr_hz, dtype=float),
+            packet_count=np.asarray(raw.x.shape[0], dtype=np.int64),
+            samples_per_packet=np.asarray(raw.x.shape[1], dtype=np.int64),
+            packets_per_session=np.asarray(
+                raw.packets_per_session,
+                dtype=np.int64,
+            ),
+            target_sessions=np.asarray(raw.target_sessions, dtype=np.int64),
+            x=raw.x,
+            y=raw.y,
+            z=raw.z,
+            packet_fs_hz=raw.packet_fs_hz,
+        )
+
+
+def load_raw_measurement(path: Path) -> RawMeasurement:
+    with np.load(path, allow_pickle=False) as archive:
+        if int(archive["format_version"]) != 1:
+            raise ValueError("Unsupported raw measurement format version")
+        raw = RawMeasurement(
+            x=np.asarray(archive["x"]),
+            y=np.asarray(archive["y"]),
+            z=np.asarray(archive["z"]),
+            packet_fs_hz=np.asarray(archive["packet_fs_hz"]),
+            created_at=str(archive["created_at"]),
+            requested_odr_hz=float(archive["requested_odr_hz"]),
+            packets_per_session=int(archive["packets_per_session"]),
+            target_sessions=int(archive["target_sessions"]),
+        )
+        if int(archive["packet_count"]) != raw.x.shape[0]:
+            raise ValueError("Raw packet_count metadata does not match data")
+        if int(archive["samples_per_packet"]) != raw.x.shape[1]:
+            raise ValueError("Raw samples_per_packet metadata does not match data")
+    validate_raw_measurement(raw)
+    return raw
 
 
 class TeeTextOutput:
@@ -3568,6 +3682,11 @@ def run_measurement(
     sessions = []
     stop_requested = False
     fs_list = []
+    raw_packets = {
+        "X": [],
+        "Y": [],
+        "Z": [],
+    }
 
     while True:
 
@@ -3583,6 +3702,10 @@ def run_measurement(
             continue
 
         fs, x, y, z = packet
+
+        raw_packets["X"].append(x)
+        raw_packets["Y"].append(y)
+        raw_packets["Z"].append(z)
 
         current_session["X"].append(x)
         current_session["Y"].append(y)
@@ -3636,6 +3759,9 @@ def run_measurement(
     run_result_paths: RunResultPaths | None = None
 
     if sessions:
+        run_is_complete = (
+            len(sessions) >= config.session.min_recommended_sessions
+        )
         measured_fs = float(np.mean(fs_list))
         duration_seconds = sum(session.samples for session in sessions) / measured_fs
         run_result_paths = build_run_result_paths(
@@ -3643,6 +3769,22 @@ def run_measurement(
             config.sensor.odr_hz,
             run_number,
         )
+        raw_packet_count = None
+        raw_samples_per_packet = None
+        if run_is_complete:
+            raw_measurement = RawMeasurement(
+                x=np.stack(raw_packets["X"]),
+                y=np.stack(raw_packets["Y"]),
+                z=np.stack(raw_packets["Z"]),
+                packet_fs_hz=np.asarray(fs_list, dtype=float),
+                created_at=run_started_at.isoformat(timespec="seconds"),
+                requested_odr_hz=config.sensor.odr_hz,
+                packets_per_session=config.session.packets_per_session,
+                target_sessions=config.session.min_recommended_sessions,
+            )
+            save_raw_measurement(run_result_paths.raw, raw_measurement)
+            raw_packet_count = raw_measurement.x.shape[0]
+            raw_samples_per_packet = raw_measurement.x.shape[1]
         initialize_run_log(
             run_result_paths,
             run_started_at,
@@ -3652,6 +3794,8 @@ def run_measurement(
             len(fs_list),
             duration_seconds,
             measured_fs,
+            raw_packet_count,
+            raw_samples_per_packet,
         )
         aligned_psd = build_aligned_psd_data(sessions)
         statistics = compute_statistics(aligned_psd)
@@ -3917,6 +4061,8 @@ def run_measurement(
     print(f"  {run_result_paths.log}")
     print(f"  {run_result_paths.figure1}")
     print(f"  {run_result_paths.figure2}")
+    if run_result_paths.raw.exists():
+        print(f"  {run_result_paths.raw}")
 
     if show_figures:
         plt.show()
