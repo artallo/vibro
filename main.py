@@ -1,4 +1,5 @@
 import argparse
+import csv
 import struct
 import sys
 import tomllib
@@ -48,6 +49,9 @@ VIRTUAL_SESSION_LAYOUTS = {
     "6x8": (6, 8),
     "8x8": (8, 8),
 }
+
+DEFAULT_SWEEP_TOLERANCES_HZ = (0.25, 0.35, 0.40, 0.50)
+COMPARISON_MATCH_TOLERANCE_HZ = 0.35
 
 # ==========================================================
 
@@ -490,6 +494,12 @@ def parse_cli_arguments(
         choices=(*VIRTUAL_SESSION_LAYOUTS, "all"),
         default="8x8",
     )
+    parser.add_argument(
+        "--tolerances",
+        nargs="+",
+        type=positive_float,
+        default=DEFAULT_SWEEP_TOLERANCES_HZ,
+    )
     return parser.parse_args(arguments)
 
 
@@ -500,6 +510,16 @@ def positive_integer(value: str) -> int:
         raise argparse.ArgumentTypeError("must be an integer") from error
     if parsed_value < 1:
         raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed_value
+
+
+def positive_float(value: str) -> float:
+    try:
+        parsed_value = float(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be a number") from error
+    if not np.isfinite(parsed_value) or parsed_value <= 0:
+        raise argparse.ArgumentTypeError("must be positive and finite")
     return parsed_value
 
 
@@ -4250,12 +4270,15 @@ def build_replay_result_paths(
     source_raw_path: Path,
     virtual_mode: str,
     virtual_run_number: int,
+    frequency_tolerance_hz: float,
 ) -> RunResultPaths:
+    tolerance_name = format_odr_for_filename(frequency_tolerance_hz)
     result_directory = (
         REPLAY_RESULTS_DIRECTORY
         / source_raw_path.stem
         / virtual_mode
         / f"virtual_run{virtual_run_number:02d}"
+        / f"tol_{tolerance_name}"
     )
     result_directory.mkdir(parents=True, exist_ok=False)
     return RunResultPaths(
@@ -4264,6 +4287,30 @@ def build_replay_result_paths(
         figure2=result_directory / "figure2.png",
         raw=source_raw_path,
     )
+
+
+def build_tolerance_sweep_config(
+    replay_config: ApplicationConfig,
+    frequency_tolerance_hz: float,
+) -> ApplicationConfig:
+    clustering = FrequencyClusteringConfig(
+        frequency_tolerance_hz_250=frequency_tolerance_hz,
+        frequency_tolerance_hz_125=frequency_tolerance_hz,
+        frequency_tolerance_hz_62p5=frequency_tolerance_hz,
+    )
+    sweep_config = replace(
+        replay_config,
+        frequency_clustering=clustering,
+        analysis_bands=[
+            replace(
+                band,
+                frequency_tolerance_hz=frequency_tolerance_hz,
+            )
+            for band in replay_config.analysis_bands
+        ],
+    )
+    validate_config(sweep_config)
+    return sweep_config
 
 
 def initialize_replay_log(
@@ -4337,12 +4384,237 @@ def save_replay_analysis(
     plt.close(trusted_fig)
 
 
+def mean_or_none(values: list[float]) -> float | None:
+    return float(np.mean(values)) if values else None
+
+
+def build_sweep_summary_rows(
+    source_raw_path: Path,
+    virtual_mode: str,
+    virtual_run_number: int,
+    frequency_tolerance_hz: float,
+    analysis_result: AnalysisResult,
+    run_config: ApplicationConfig,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    run_rows = []
+    region_rows = []
+    axis_values = (
+        (
+            "X",
+            analysis_result.frequency_clusters.x,
+            analysis_result.consolidated_frequency_regions.x,
+        ),
+        (
+            "Y",
+            analysis_result.frequency_clusters.y,
+            analysis_result.consolidated_frequency_regions.y,
+        ),
+        (
+            "Z",
+            analysis_result.frequency_clusters.z,
+            analysis_result.consolidated_frequency_regions.z,
+        ),
+    )
+    support_total = analysis_result.aligned_psd.x_stack.shape[0]
+    source_name = str(source_raw_path.resolve())
+    for axis_name, raw_clusters, consolidated_regions in axis_values:
+        trusted_regions = [
+            region
+            for region in consolidated_regions
+            if is_trusted_frequency_cluster(
+                region,
+                run_config.visualization.trusted_frequency,
+            )
+        ]
+        run_rows.append({
+            "source": source_name,
+            "mode": virtual_mode,
+            "virtual_run": virtual_run_number,
+            "tolerance_hz": frequency_tolerance_hz,
+            "axis": axis_name,
+            "raw_clusters": len(raw_clusters),
+            "consolidated_regions": len(consolidated_regions),
+            "trusted_regions": len(trusted_regions),
+            "sources_ge_2": sum(
+                len(region.source_clusters) >= 2
+                for region in consolidated_regions
+            ),
+            "mean_support_fraction": mean_or_none([
+                region.support_fraction
+                for region in consolidated_regions
+            ]),
+            "mean_sigma_f_hz": mean_or_none([
+                cluster.frequency_std_hz
+                for cluster in raw_clusters
+            ]),
+            "mean_raw_cluster_span_hz": mean_or_none([
+                cluster.maximum_frequency - cluster.minimum_frequency
+                for cluster in raw_clusters
+            ]),
+            "repeatability_freq_hz": None,
+            "repeatability_med_freq": None,
+            "_freq_values": [
+                region.frequency
+                for region in trusted_regions
+            ],
+            "_med_values": [
+                region.median_evidence.peak_frequency
+                for region in trusted_regions
+                if region.median_evidence.peak_frequency is not None
+            ],
+        })
+        for region in trusted_regions:
+            evidence = region.median_evidence
+            region_rows.append({
+                "source": source_name,
+                "mode": virtual_mode,
+                "virtual_run": virtual_run_number,
+                "tolerance_hz": frequency_tolerance_hz,
+                "axis": axis_name,
+                "band": region.band_name,
+                "freq_hz": region.frequency,
+                "med_freq_hz": evidence.peak_frequency,
+                "support_n": region.support_count,
+                "support_total": support_total,
+                "support_fraction": region.support_fraction,
+                "range_min_hz": region.minimum_frequency,
+                "range_max_hz": region.maximum_frequency,
+                "med_prom_db": evidence.prominence_db,
+                "med_contrast_db": evidence.local_contrast_db,
+                "band_contrast_db": evidence.band_contrast_db,
+                "sources": len(region.source_clusters),
+                "weight": get_trusted_frequency_weight(
+                    region,
+                    run_config.visualization.trusted_frequency,
+                ),
+            })
+    return run_rows, region_rows
+
+
+def compute_frequency_repeatability(
+    values_by_run: list[list[float]],
+    comparison_tolerance_hz: float,
+) -> float | None:
+    if len(values_by_run) < 2:
+        return None
+    total_values = sum(len(values) for values in values_by_run)
+    if total_values == 0:
+        return None
+    repeated_values = 0
+    for run_index, values in enumerate(values_by_run):
+        other_runs = [
+            other_values
+            for other_index, other_values in enumerate(values_by_run)
+            if other_index != run_index
+        ]
+        for value in values:
+            if all(
+                any(
+                    abs(value - other_value) <= comparison_tolerance_hz
+                    for other_value in other_values
+                )
+                for other_values in other_runs
+            ):
+                repeated_values += 1
+    return repeated_values / total_values
+
+
+def add_repeatability_to_sweep_rows(
+    run_rows: list[dict[str, Any]],
+) -> None:
+    group_keys = {
+        (row["mode"], row["tolerance_hz"], row["axis"])
+        for row in run_rows
+    }
+    for group_key in group_keys:
+        group = [
+            row
+            for row in run_rows
+            if (
+                row["mode"],
+                row["tolerance_hz"],
+                row["axis"],
+            ) == group_key
+        ]
+        group.sort(key=lambda row: row["virtual_run"])
+        repeatability_freq = compute_frequency_repeatability(
+            [row["_freq_values"] for row in group],
+            COMPARISON_MATCH_TOLERANCE_HZ,
+        )
+        repeatability_med = compute_frequency_repeatability(
+            [row["_med_values"] for row in group],
+            COMPARISON_MATCH_TOLERANCE_HZ,
+        )
+        for row in group:
+            row["repeatability_freq_hz"] = repeatability_freq
+            row["repeatability_med_freq"] = repeatability_med
+
+
+def write_csv_rows(path: Path, rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        raise ValueError(f"Cannot write empty CSV summary: {path.name}")
+    fieldnames = [name for name in rows[0] if not name.startswith("_")]
+    with path.open("x", encoding="utf-8", newline="") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({name: row[name] for name in fieldnames})
+
+
+def save_sweep_summaries(
+    result_root: Path,
+    run_rows: list[dict[str, Any]],
+    region_rows: list[dict[str, Any]],
+) -> None:
+    add_repeatability_to_sweep_rows(run_rows)
+    write_csv_rows(result_root / "sweep_runs.csv", run_rows)
+    if region_rows:
+        write_csv_rows(result_root / "sweep_regions.csv", region_rows)
+    else:
+        with (result_root / "sweep_regions.csv").open(
+            "x",
+            encoding="utf-8",
+            newline="",
+        ) as csv_file:
+            csv_file.write(
+                "source,mode,virtual_run,tolerance_hz,axis,band,freq_hz,"
+                "med_freq_hz,support_n,support_total,support_fraction,"
+                "range_min_hz,range_max_hz,med_prom_db,med_contrast_db,"
+                "band_contrast_db,sources,weight\n"
+            )
+    with (result_root / "sweep_metadata.txt").open(
+        "x",
+        encoding="utf-8",
+        newline="\n",
+    ) as metadata_file:
+        metadata_file.write(
+            "Comparison match tolerance: "
+            f"{COMPARISON_MATCH_TOLERANCE_HZ:.2f} Hz\n"
+            "Repeatability by Freq Hz and Med.Freq is the fraction of "
+            "trusted-region frequencies that have a match within the "
+            "comparison tolerance "
+            "in every other virtual run of the same mode/tolerance/axis.\n"
+        )
+
+
 def replay_raw_measurement(
     source_raw_path: Path,
     virtual_mode: str,
     base_config: ApplicationConfig,
+    tolerances_hz: list[float] | tuple[float, ...],
 ) -> None:
+    if not tolerances_hz:
+        raise ValueError("At least one sweep tolerance is required")
+    if (
+        any(not np.isfinite(value) or value <= 0 for value in tolerances_hz)
+        or len(set(tolerances_hz)) != len(tolerances_hz)
+    ):
+        raise ValueError(
+            "Sweep tolerances must be unique, positive, and finite"
+        )
     raw = load_raw_measurement(source_raw_path)
+    sweep_run_rows = []
+    sweep_region_rows = []
     modes = (
         list(VIRTUAL_SESSION_LAYOUTS)
         if virtual_mode == "all"
@@ -4350,7 +4622,7 @@ def replay_raw_measurement(
     )
     for mode in modes:
         packets_per_session, target_sessions = VIRTUAL_SESSION_LAYOUTS[mode]
-        run_config = build_replay_config(
+        replay_config = build_replay_config(
             base_config,
             raw,
             packets_per_session,
@@ -4373,30 +4645,54 @@ def replay_raw_measurement(
                 raw,
                 start_packet,
                 end_packet,
-                run_config,
+                replay_config,
             )
-            analysis_result = analyze_sessions(sessions, run_config)
-            paths = build_replay_result_paths(
-                source_raw_path,
-                mode,
-                virtual_run_index,
-            )
-            initialize_replay_log(
-                paths,
-                source_raw_path,
-                mode,
-                virtual_run_index,
-                len(run_slices),
-                start_packet,
-                end_packet,
-                run_config,
-                sessions,
-            )
-            save_replay_analysis(paths, analysis_result, run_config)
-            print(
-                f"Saved replay {mode} run "
-                f"{virtual_run_index}/{len(run_slices)}: {paths.log.parent}"
-            )
+            for frequency_tolerance_hz in tolerances_hz:
+                run_config = build_tolerance_sweep_config(
+                    replay_config,
+                    frequency_tolerance_hz,
+                )
+                analysis_result = analyze_sessions(sessions, run_config)
+                paths = build_replay_result_paths(
+                    source_raw_path,
+                    mode,
+                    virtual_run_index,
+                    frequency_tolerance_hz,
+                )
+                initialize_replay_log(
+                    paths,
+                    source_raw_path,
+                    mode,
+                    virtual_run_index,
+                    len(run_slices),
+                    start_packet,
+                    end_packet,
+                    run_config,
+                    sessions,
+                )
+                save_replay_analysis(paths, analysis_result, run_config)
+                run_rows, region_rows = build_sweep_summary_rows(
+                    source_raw_path,
+                    mode,
+                    virtual_run_index,
+                    frequency_tolerance_hz,
+                    analysis_result,
+                    run_config,
+                )
+                sweep_run_rows.extend(run_rows)
+                sweep_region_rows.extend(region_rows)
+                print(
+                    f"Saved replay {mode} run "
+                    f"{virtual_run_index}/{len(run_slices)}, "
+                    f"tolerance {frequency_tolerance_hz:.2f} Hz: "
+                    f"{paths.log.parent}"
+                )
+    result_root = REPLAY_RESULTS_DIRECTORY / source_raw_path.stem
+    save_sweep_summaries(
+        result_root,
+        sweep_run_rows,
+        sweep_region_rows,
+    )
 
 
 try:
@@ -4407,6 +4703,7 @@ try:
             cli_arguments.replay,
             cli_arguments.virtual_mode,
             config,
+            cli_arguments.tolerances,
         )
     else:
         for run_number in range(1, total_runs + 1):
