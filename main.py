@@ -20,6 +20,7 @@ from scipy.signal import find_peaks
 
 CONFIG_PATH = Path(__file__).with_name("config.toml")
 RESULTS_DIRECTORY = Path("results")
+REPLAY_RESULTS_DIRECTORY = Path("replay_results")
 
 # AXIS = "X"          # X / Y / Z
 
@@ -38,6 +39,14 @@ COLORS = {
     "X": "tab:blue",
     "Y": "tab:orange",
     "Z": "tab:green",
+}
+
+VIRTUAL_SESSION_LAYOUTS = {
+    "4x4": (4, 4),
+    "4x6": (4, 6),
+    "4x8": (4, 8),
+    "6x8": (6, 8),
+    "8x8": (8, 8),
 }
 
 # ==========================================================
@@ -475,6 +484,12 @@ def parse_cli_arguments(
     parser.add_argument("--packets-per-session", type=int)
     parser.add_argument("--min-recommended-sessions", type=int)
     parser.add_argument("--repeat", type=positive_integer, default=1)
+    parser.add_argument("--replay", type=Path)
+    parser.add_argument(
+        "--virtual-mode",
+        choices=(*VIRTUAL_SESSION_LAYOUTS, "all"),
+        default="8x8",
+    )
     return parser.parse_args(arguments)
 
 
@@ -2061,6 +2076,18 @@ class VisualizationData:
     z: VisualizationAxis
 
 
+@dataclass(frozen=True)
+class AnalysisResult:
+    aligned_psd: AlignedPSDData
+    statistics: StatisticsResult
+    candidate_diagnostics: PeakCandidateDiagnostics
+    peaks: PeakResult
+    frequency_clusters: FrequencyClusterResult
+    frequency_cluster_diagnostics: FrequencyClusterDiagnostics
+    consolidated_frequency_regions: ConsolidatedFrequencyRegions
+    visualization_data: VisualizationData
+
+
 def print_peak_candidate_diagnostics(
     diagnostics: PeakCandidateDiagnostics,
 ) -> None:
@@ -3442,30 +3469,32 @@ except (KeyError, TypeError, ValueError) as error:
 
 total_runs = cli_arguments.repeat
 
-print(f"ODR: {config.sensor.odr_hz:g} Hz")
-print(f"Packets/session: {config.session.packets_per_session}")
-print(f"Target sessions: {config.session.min_recommended_sessions}")
-print(
-    "Frequency tolerance: "
-    f"{resolve_frequency_tolerance_hz(config.frequency_clustering, config.sensor.odr_hz):.2f} "
-    "Hz"
-)
-
 analysis_bands = config.analysis_bands
 analysis_min_frequency, analysis_max_frequency = (
     get_analysis_frequency_limits(analysis_bands)
 )
 
-ser = serial.Serial(
-    config.serial.port,
-    config.serial.baud,
-    timeout=config.serial.timeout_seconds,
-)
+ser = None
+if cli_arguments.replay is None:
+    print(f"ODR: {config.sensor.odr_hz:g} Hz")
+    print(f"Packets/session: {config.session.packets_per_session}")
+    print(f"Target sessions: {config.session.min_recommended_sessions}")
+    print(
+        "Frequency tolerance: "
+        f"{resolve_frequency_tolerance_hz(config.frequency_clustering, config.sensor.odr_hz):.2f} "
+        "Hz"
+    )
 
-send_adxl355_odr_command(ser, config)
+    ser = serial.Serial(
+        config.serial.port,
+        config.serial.baud,
+        timeout=config.serial.timeout_seconds,
+    )
 
-print("Connected:", config.serial.port)
-print(f"ADXL355 ODR command sent: {config.sensor.odr_hz:g} Hz")
+    send_adxl355_odr_command(ser, config)
+
+    print("Connected:", config.serial.port)
+    print(f"ADXL355 ODR command sent: {config.sensor.odr_hz:g} Hz")
 
 
 # ==========================================================
@@ -3545,10 +3574,10 @@ def compute_fft(signal, fs):
         resolution=resolution
     )
 
-def compute_average_fft(signal, fs):
+def compute_average_fft(signal, fs, welch_config):
 
-    nperseg = min(config.welch.nperseg, len(signal))
-    noverlap = min(config.welch.noverlap, nperseg // 2)
+    nperseg = min(welch_config.nperseg, len(signal))
+    noverlap = min(welch_config.noverlap, nperseg // 2)
     step = nperseg - noverlap
 
     window = np.hanning(nperseg)
@@ -3580,26 +3609,26 @@ def compute_average_fft(signal, fs):
 # Welch PSD
 # ==========================================================
 
-def compute_psd(signal, fs):
+def compute_psd(signal, fs, welch_config, frequency_limits):
 
     freq, psd = welch(
         signal,
         fs=fs,
         window="hann",
-        nperseg=min(config.welch.nperseg, len(signal)),
-        noverlap=min(config.welch.noverlap, len(signal)//2),
+        nperseg=min(welch_config.nperseg, len(signal)),
+        noverlap=min(welch_config.noverlap, len(signal)//2),
         scaling="density"
     )
 
     mask = (
-        (freq >= analysis_min_frequency)
-        & (freq <= analysis_max_frequency)
+        (freq >= frequency_limits[0])
+        & (freq <= frequency_limits[1])
     )
 
     freq = freq[mask]
     psd = psd[mask]
 
-    resolution = fs / min(config.welch.nperseg, len(signal))
+    resolution = fs / min(welch_config.nperseg, len(signal))
 
     return PSDResult(
         freq=freq,
@@ -3607,20 +3636,23 @@ def compute_psd(signal, fs):
         resolution=resolution
     )
 
-def process_session(session, session_fs, number):
+def process_session(session, session_fs, number, run_config):
 
     if any(
-        len(session[axis]) != config.session.packets_per_session
+        len(session[axis]) != run_config.session.packets_per_session
         for axis in ("X", "Y", "Z")
     ):
         raise ValueError("Cannot process incomplete session")
 
-    if len(session_fs) != config.session.packets_per_session:
+    if len(session_fs) != run_config.session.packets_per_session:
         raise ValueError("Cannot process incomplete session")
 
     fs = np.mean(session_fs)
 
     axis_results = {}
+    frequency_limits = get_analysis_frequency_limits(
+        run_config.analysis_bands
+    )
 
     for axis in ("X", "Y", "Z"):
 
@@ -3630,8 +3662,13 @@ def process_session(session, session_fs, number):
 
         axis_results[axis] = AxisResult(
             fft=compute_fft(signal, fs),
-            average_fft=compute_average_fft(signal, fs),
-            psd=compute_psd(signal, fs)
+            average_fft=compute_average_fft(signal, fs, run_config.welch),
+            psd=compute_psd(
+                signal,
+                fs,
+                run_config.welch,
+                frequency_limits,
+            )
         )
 
     samples = len(np.concatenate(session["X"]))
@@ -3649,232 +3686,161 @@ def process_session(session, session_fs, number):
     )
 
 
+def build_replay_config(
+    base_config: ApplicationConfig,
+    raw: RawMeasurement,
+    packets_per_session: int,
+    target_sessions: int,
+) -> ApplicationConfig:
+    frequency_tolerance_hz = resolve_frequency_tolerance_hz(
+        base_config.frequency_clustering,
+        raw.requested_odr_hz,
+    )
+    replay_config = replace(
+        base_config,
+        sensor=replace(
+            base_config.sensor,
+            odr_hz=raw.requested_odr_hz,
+        ),
+        session=replace(
+            base_config.session,
+            packets_per_session=packets_per_session,
+            min_recommended_sessions=target_sessions,
+        ),
+        analysis_bands=[
+            replace(
+                band,
+                frequency_tolerance_hz=frequency_tolerance_hz,
+            )
+            for band in base_config.analysis_bands
+        ],
+    )
+    validate_config(replay_config)
+    return replay_config
+
+
+def build_virtual_run_slices(
+    packet_count: int,
+    packets_per_session: int,
+    target_sessions: int,
+) -> list[tuple[int, int]]:
+    packets_per_run = packets_per_session * target_sessions
+    if packets_per_run <= 0:
+        raise ValueError("Virtual layout dimensions must be positive")
+    run_count = packet_count // packets_per_run
+    return [
+        (
+            run_index * packets_per_run,
+            (run_index + 1) * packets_per_run,
+        )
+        for run_index in range(run_count)
+    ]
+
+
+def build_sessions_from_raw(
+    raw: RawMeasurement,
+    start_packet: int,
+    end_packet: int,
+    run_config: ApplicationConfig,
+) -> list[SessionResult]:
+    validate_raw_measurement(raw)
+    if not 0 <= start_packet < end_packet <= raw.x.shape[0]:
+        raise ValueError("Virtual packet range is outside raw measurement")
+    packet_count = end_packet - start_packet
+    packets_per_session = run_config.session.packets_per_session
+    if packet_count % packets_per_session != 0:
+        raise ValueError("Virtual packet range does not contain full sessions")
+    sessions = []
+    for session_offset in range(0, packet_count, packets_per_session):
+        packet_slice = slice(
+            start_packet + session_offset,
+            start_packet + session_offset + packets_per_session,
+        )
+        session = {
+            "X": list(raw.x[packet_slice]),
+            "Y": list(raw.y[packet_slice]),
+            "Z": list(raw.z[packet_slice]),
+        }
+        sessions.append(
+            process_session(
+                session,
+                list(raw.packet_fs_hz[packet_slice]),
+                len(sessions) + 1,
+                run_config,
+            )
+        )
+    if len(sessions) != run_config.session.min_recommended_sessions:
+        raise ValueError("Virtual packet range produced unexpected session count")
+    return sessions
+
+
+def analyze_sessions(
+    sessions: list[SessionResult],
+    run_config: ApplicationConfig,
+) -> AnalysisResult:
+    aligned_psd = build_aligned_psd_data(sessions)
+    statistics = compute_statistics(aligned_psd)
+    candidate_diagnostics = PeakCandidateDiagnostics(x=[], y=[], z=[])
+    peaks = find_psd_peaks(
+        statistics,
+        aligned_psd,
+        run_config.analysis_bands,
+        candidate_diagnostics,
+    )
+    frequency_clusters = build_session_frequency_clusters(
+        aligned_psd,
+        run_config.analysis_bands,
+    )
+    frequency_cluster_diagnostics = (
+        build_session_frequency_cluster_diagnostics(
+            statistics,
+            frequency_clusters,
+            run_config.analysis_bands,
+            aligned_psd.frequency,
+        )
+    )
+    consolidated_frequency_regions = build_consolidated_frequency_regions(
+        frequency_cluster_diagnostics,
+        run_config.analysis_bands,
+        aligned_psd.x_stack.shape[0],
+        run_config.frequency_cluster_consolidation,
+    )
+    visualization_data = build_visualization_data(
+        statistics,
+        peaks,
+        aligned_psd,
+        run_config.analysis_bands,
+        consolidated_frequency_regions,
+        run_config.visualization.trusted_frequency,
+    )
+    return AnalysisResult(
+        aligned_psd=aligned_psd,
+        statistics=statistics,
+        candidate_diagnostics=candidate_diagnostics,
+        peaks=peaks,
+        frequency_clusters=frequency_clusters,
+        frequency_cluster_diagnostics=frequency_cluster_diagnostics,
+        consolidated_frequency_regions=consolidated_frequency_regions,
+        visualization_data=visualization_data,
+    )
+
+
 # ==========================================================
 
-def run_measurement(
-    run_number: int,
-    total_runs: int,
-    show_figures: bool,
-) -> bool:
-    if total_runs == 1:
-        print()
-        input("Press ENTER to start recording...")
-    else:
-        print()
-        print("=" * 60)
-        print(f"Starting run {run_number}/{total_runs}")
-        print("=" * 60)
-
-    run_started_at = datetime.now()
-    ser.reset_input_buffer()
-
-    print()
-    print("Recording...")
-    print("Press Ctrl+C to stop.")
-    print()
-
-    current_session = {
-        "X": [],
-        "Y": [],
-        "Z": [],
-    }
-    current_session_fs = []
-    sessions = []
-    stop_requested = False
-    fs_list = []
-    raw_packets = {
-        "X": [],
-        "Y": [],
-        "Z": [],
-    }
-
-    while True:
-
-        try:
-            packet = read_packet()
-        except KeyboardInterrupt:
-            stop_requested = True
-            if len(current_session["X"]) == 0:
-                break
-            continue
-
-        if packet is None:
-            continue
-
-        fs, x, y, z = packet
-
-        raw_packets["X"].append(x)
-        raw_packets["Y"].append(y)
-        raw_packets["Z"].append(z)
-
-        current_session["X"].append(x)
-        current_session["Y"].append(y)
-        current_session["Z"].append(z)
-        current_session_fs.append(fs)
-
-        fs_list.append(fs)
-
-        session_packets = len(current_session["X"])
-
-        if session_packets == config.session.packets_per_session:
-            session_result = process_session(
-                current_session,
-                current_session_fs,
-                len(sessions) + 1,
-            )
-            sessions.append(session_result)
-            current_session = {
-                "X": [],
-                "Y": [],
-                "Z": [],
-            }
-            current_session_fs = []
-
-        packets = len(fs_list)
-        print(
-            f"\rPackets: {packets:4d}"
-            f"   Duration: {packets * len(x) / np.mean(fs_list):6.1f} s"
-            f"   Fs={np.mean(fs_list):6.2f}",
-            end=""
-        )
-
-        if len(sessions) >= config.session.min_recommended_sessions:
-            print()
-            print(f"Target session count reached: {len(sessions)}")
-            break
-
-        if (
-            stop_requested
-            and session_packets == config.session.packets_per_session
-        ):
-            break
-
-    print()
-
-    statistics: StatisticsResult | None = None
-    peaks: PeakResult | None = None
-    visualization_data: VisualizationData | None = None
-    frequency_cluster_diagnostics: FrequencyClusterDiagnostics | None = None
-    consolidated_frequency_regions: ConsolidatedFrequencyRegions | None = None
-    run_result_paths: RunResultPaths | None = None
-
-    if sessions:
-        run_is_complete = (
-            len(sessions) >= config.session.min_recommended_sessions
-        )
-        measured_fs = float(np.mean(fs_list))
-        duration_seconds = sum(session.samples for session in sessions) / measured_fs
-        run_result_paths = build_run_result_paths(
-            run_started_at,
-            config.sensor.odr_hz,
-            run_number,
-        )
-        raw_packet_count = None
-        raw_samples_per_packet = None
-        if run_is_complete:
-            raw_measurement = RawMeasurement(
-                x=np.stack(raw_packets["X"]),
-                y=np.stack(raw_packets["Y"]),
-                z=np.stack(raw_packets["Z"]),
-                packet_fs_hz=np.asarray(fs_list, dtype=float),
-                created_at=run_started_at.isoformat(timespec="seconds"),
-                requested_odr_hz=config.sensor.odr_hz,
-                packets_per_session=config.session.packets_per_session,
-                target_sessions=config.session.min_recommended_sessions,
-            )
-            save_raw_measurement(run_result_paths.raw, raw_measurement)
-            raw_packet_count = raw_measurement.x.shape[0]
-            raw_samples_per_packet = raw_measurement.x.shape[1]
-        initialize_run_log(
-            run_result_paths,
-            run_started_at,
-            config,
-            run_number,
-            total_runs,
-            len(fs_list),
-            duration_seconds,
-            measured_fs,
-            raw_packet_count,
-            raw_samples_per_packet,
-        )
-        aligned_psd = build_aligned_psd_data(sessions)
-        statistics = compute_statistics(aligned_psd)
-        candidate_diagnostics = PeakCandidateDiagnostics(x=[], y=[], z=[])
-        peaks = find_psd_peaks(
-            statistics,
-            aligned_psd,
-            analysis_bands,
-            candidate_diagnostics,
-        )
-        append_run_diagnostics(
-            run_result_paths.log,
-            print_peak_candidate_diagnostics,
-            candidate_diagnostics,
-        )
-        frequency_clusters = build_session_frequency_clusters(
-            aligned_psd,
-            analysis_bands,
-        )
-        frequency_cluster_diagnostics = (
-            build_session_frequency_cluster_diagnostics(
-                statistics,
-                frequency_clusters,
-                analysis_bands,
-                aligned_psd.frequency,
-            )
-        )
-        append_run_diagnostics(
-            run_result_paths.log,
-            print_session_frequency_clusters,
-            frequency_cluster_diagnostics,
-            analysis_bands,
-            aligned_psd.x_stack.shape[0],
-        )
-        consolidated_frequency_regions = build_consolidated_frequency_regions(
-            frequency_cluster_diagnostics,
-            analysis_bands,
-            aligned_psd.x_stack.shape[0],
-            config.frequency_cluster_consolidation,
-        )
-        append_run_diagnostics(
-            run_result_paths.log,
-            print_consolidated_frequency_regions,
-            consolidated_frequency_regions,
-            aligned_psd.x_stack.shape[0],
-        )
-        append_run_diagnostics(
-            run_result_paths.log,
-            print_trusted_frequency_regions,
-            consolidated_frequency_regions,
-            config.visualization.trusted_frequency,
-            aligned_psd.x_stack.shape[0],
-        )
-        visualization_data = build_visualization_data(
-            statistics,
-            peaks,
-            aligned_psd,
-            analysis_bands,
-            consolidated_frequency_regions,
-            config.visualization.trusted_frequency,
-        )
-
-    if not sessions:
-        print("No completed sessions available for analysis.")
-        return True
-
-    if len(sessions) < config.session.min_recommended_sessions:
-        warning = (
-            f"Warning: only {len(sessions)} completed session(s); "
-            f"at least {config.session.min_recommended_sessions} are recommended."
-        )
-        print(warning)
-        if run_result_paths is not None:
-            with run_result_paths.log.open(
-                "a",
-                encoding="utf-8",
-                newline="\n",
-            ) as run_log:
-                run_log.write(f"{warning}\n")
+def build_analysis_figures(
+    analysis_result: AnalysisResult,
+    run_config: ApplicationConfig,
+):
+    aligned_psd = analysis_result.aligned_psd
+    visualization_data = analysis_result.visualization_data
+    consolidated_frequency_regions = (
+        analysis_result.consolidated_frequency_regions
+    )
+    config = run_config
+    analysis_bands = run_config.analysis_bands
+    analysis_min_frequency, analysis_max_frequency = (
+        get_analysis_frequency_limits(analysis_bands)
+    )
 
     # ==========================================================
     # Statistical PSD visualization
@@ -4053,6 +4019,213 @@ def run_measurement(
     trusted_axes[-1].set_xlabel("Frequency, Hz")
     trusted_fig.suptitle("Trusted Median PSD")
 
+    return stat_fig, trusted_fig
+
+
+
+def run_measurement(
+    run_number: int,
+    total_runs: int,
+    show_figures: bool,
+) -> bool:
+    if total_runs == 1:
+        print()
+        input("Press ENTER to start recording...")
+    else:
+        print()
+        print("=" * 60)
+        print(f"Starting run {run_number}/{total_runs}")
+        print("=" * 60)
+
+    run_started_at = datetime.now()
+    ser.reset_input_buffer()
+
+    print()
+    print("Recording...")
+    print("Press Ctrl+C to stop.")
+    print()
+
+    current_session = {
+        "X": [],
+        "Y": [],
+        "Z": [],
+    }
+    current_session_fs = []
+    sessions = []
+    stop_requested = False
+    fs_list = []
+    raw_packets = {
+        "X": [],
+        "Y": [],
+        "Z": [],
+    }
+
+    while True:
+
+        try:
+            packet = read_packet()
+        except KeyboardInterrupt:
+            stop_requested = True
+            if len(current_session["X"]) == 0:
+                break
+            continue
+
+        if packet is None:
+            continue
+
+        fs, x, y, z = packet
+
+        raw_packets["X"].append(x)
+        raw_packets["Y"].append(y)
+        raw_packets["Z"].append(z)
+
+        current_session["X"].append(x)
+        current_session["Y"].append(y)
+        current_session["Z"].append(z)
+        current_session_fs.append(fs)
+
+        fs_list.append(fs)
+
+        session_packets = len(current_session["X"])
+
+        if session_packets == config.session.packets_per_session:
+            session_result = process_session(
+                current_session,
+                current_session_fs,
+                len(sessions) + 1,
+                config,
+            )
+            sessions.append(session_result)
+            current_session = {
+                "X": [],
+                "Y": [],
+                "Z": [],
+            }
+            current_session_fs = []
+
+        packets = len(fs_list)
+        print(
+            f"\rPackets: {packets:4d}"
+            f"   Duration: {packets * len(x) / np.mean(fs_list):6.1f} s"
+            f"   Fs={np.mean(fs_list):6.2f}",
+            end=""
+        )
+
+        if len(sessions) >= config.session.min_recommended_sessions:
+            print()
+            print(f"Target session count reached: {len(sessions)}")
+            break
+
+        if (
+            stop_requested
+            and session_packets == config.session.packets_per_session
+        ):
+            break
+
+    print()
+
+    statistics: StatisticsResult | None = None
+    peaks: PeakResult | None = None
+    visualization_data: VisualizationData | None = None
+    frequency_cluster_diagnostics: FrequencyClusterDiagnostics | None = None
+    consolidated_frequency_regions: ConsolidatedFrequencyRegions | None = None
+    run_result_paths: RunResultPaths | None = None
+
+    if sessions:
+        run_is_complete = (
+            len(sessions) >= config.session.min_recommended_sessions
+        )
+        measured_fs = float(np.mean(fs_list))
+        duration_seconds = sum(session.samples for session in sessions) / measured_fs
+        run_result_paths = build_run_result_paths(
+            run_started_at,
+            config.sensor.odr_hz,
+            run_number,
+        )
+        raw_packet_count = None
+        raw_samples_per_packet = None
+        if run_is_complete:
+            raw_measurement = RawMeasurement(
+                x=np.stack(raw_packets["X"]),
+                y=np.stack(raw_packets["Y"]),
+                z=np.stack(raw_packets["Z"]),
+                packet_fs_hz=np.asarray(fs_list, dtype=float),
+                created_at=run_started_at.isoformat(timespec="seconds"),
+                requested_odr_hz=config.sensor.odr_hz,
+                packets_per_session=config.session.packets_per_session,
+                target_sessions=config.session.min_recommended_sessions,
+            )
+            save_raw_measurement(run_result_paths.raw, raw_measurement)
+            raw_packet_count = raw_measurement.x.shape[0]
+            raw_samples_per_packet = raw_measurement.x.shape[1]
+        initialize_run_log(
+            run_result_paths,
+            run_started_at,
+            config,
+            run_number,
+            total_runs,
+            len(fs_list),
+            duration_seconds,
+            measured_fs,
+            raw_packet_count,
+            raw_samples_per_packet,
+        )
+        analysis_result = analyze_sessions(sessions, config)
+        aligned_psd = analysis_result.aligned_psd
+        statistics = analysis_result.statistics
+        peaks = analysis_result.peaks
+        visualization_data = analysis_result.visualization_data
+        frequency_cluster_diagnostics = (
+            analysis_result.frequency_cluster_diagnostics
+        )
+        consolidated_frequency_regions = (
+            analysis_result.consolidated_frequency_regions
+        )
+        append_run_diagnostics(
+            run_result_paths.log,
+            print_peak_candidate_diagnostics,
+            analysis_result.candidate_diagnostics,
+        )
+        append_run_diagnostics(
+            run_result_paths.log,
+            print_session_frequency_clusters,
+            frequency_cluster_diagnostics,
+            analysis_bands,
+            aligned_psd.x_stack.shape[0],
+        )
+        append_run_diagnostics(
+            run_result_paths.log,
+            print_consolidated_frequency_regions,
+            consolidated_frequency_regions,
+            aligned_psd.x_stack.shape[0],
+        )
+        append_run_diagnostics(
+            run_result_paths.log,
+            print_trusted_frequency_regions,
+            consolidated_frequency_regions,
+            config.visualization.trusted_frequency,
+            aligned_psd.x_stack.shape[0],
+        )
+
+    if not sessions:
+        print("No completed sessions available for analysis.")
+        return True
+
+    if len(sessions) < config.session.min_recommended_sessions:
+        warning = (
+            f"Warning: only {len(sessions)} completed session(s); "
+            f"at least {config.session.min_recommended_sessions} are recommended."
+        )
+        print(warning)
+        if run_result_paths is not None:
+            with run_result_paths.log.open(
+                "a",
+                encoding="utf-8",
+                newline="\n",
+            ) as run_log:
+                run_log.write(f"{warning}\n")
+
+    stat_fig, trusted_fig = build_analysis_figures(analysis_result, config)
     if run_result_paths is None:
         raise RuntimeError("Run result paths were not built")
 
@@ -4073,14 +4246,177 @@ def run_measurement(
     return stop_requested
 
 
-try:
-    for run_number in range(1, total_runs + 1):
-        stop_series = run_measurement(
-            run_number,
-            total_runs,
-            show_figures=(total_runs == 1),
+def build_replay_result_paths(
+    source_raw_path: Path,
+    virtual_mode: str,
+    virtual_run_number: int,
+) -> RunResultPaths:
+    result_directory = (
+        REPLAY_RESULTS_DIRECTORY
+        / source_raw_path.stem
+        / virtual_mode
+        / f"virtual_run{virtual_run_number:02d}"
+    )
+    result_directory.mkdir(parents=True, exist_ok=False)
+    return RunResultPaths(
+        log=result_directory / "result.txt",
+        figure1=result_directory / "figure1.png",
+        figure2=result_directory / "figure2.png",
+        raw=source_raw_path,
+    )
+
+
+def initialize_replay_log(
+    paths: RunResultPaths,
+    source_raw_path: Path,
+    virtual_mode: str,
+    virtual_run_number: int,
+    virtual_run_count: int,
+    start_packet: int,
+    end_packet: int,
+    run_config: ApplicationConfig,
+    sessions: list[SessionResult],
+) -> None:
+    measured_fs = float(np.mean([session.fs for session in sessions]))
+    with paths.log.open("x", encoding="utf-8", newline="\n") as run_log:
+        run_log.write(
+            "Analysis source: raw replay\n"
+            f"Source raw file: {source_raw_path.resolve()}\n"
+            f"Virtual mode: {virtual_mode}\n"
+            f"Virtual run: {virtual_run_number}/{virtual_run_count}\n"
+            f"Packet range: {start_packet + 1}-{end_packet}\n"
+            f"Packets/session: {run_config.session.packets_per_session}\n"
+            f"Sessions: {len(sessions)}\n"
+            f"ODR: {run_config.sensor.odr_hz:g} Hz\n"
+            "Frequency tolerance: "
+            f"{resolve_frequency_tolerance_hz(run_config.frequency_clustering, run_config.sensor.odr_hz):.2f} "
+            "Hz\n"
+            f"Welch nperseg: {run_config.welch.nperseg}\n"
+            f"Welch noverlap: {run_config.welch.noverlap}\n"
+            f"Fs={measured_fs:6.2f}\n\n"
         )
-        if stop_series:
-            break
+
+
+def save_replay_analysis(
+    paths: RunResultPaths,
+    analysis_result: AnalysisResult,
+    run_config: ApplicationConfig,
+) -> None:
+    session_count = analysis_result.aligned_psd.x_stack.shape[0]
+    append_run_diagnostics(
+        paths.log,
+        print_peak_candidate_diagnostics,
+        analysis_result.candidate_diagnostics,
+    )
+    append_run_diagnostics(
+        paths.log,
+        print_session_frequency_clusters,
+        analysis_result.frequency_cluster_diagnostics,
+        run_config.analysis_bands,
+        session_count,
+    )
+    append_run_diagnostics(
+        paths.log,
+        print_consolidated_frequency_regions,
+        analysis_result.consolidated_frequency_regions,
+        session_count,
+    )
+    append_run_diagnostics(
+        paths.log,
+        print_trusted_frequency_regions,
+        analysis_result.consolidated_frequency_regions,
+        run_config.visualization.trusted_frequency,
+        session_count,
+    )
+    stat_fig, trusted_fig = build_analysis_figures(
+        analysis_result,
+        run_config,
+    )
+    save_run_figures(paths, stat_fig, trusted_fig)
+    plt.close(stat_fig)
+    plt.close(trusted_fig)
+
+
+def replay_raw_measurement(
+    source_raw_path: Path,
+    virtual_mode: str,
+    base_config: ApplicationConfig,
+) -> None:
+    raw = load_raw_measurement(source_raw_path)
+    modes = (
+        list(VIRTUAL_SESSION_LAYOUTS)
+        if virtual_mode == "all"
+        else [virtual_mode]
+    )
+    for mode in modes:
+        packets_per_session, target_sessions = VIRTUAL_SESSION_LAYOUTS[mode]
+        run_config = build_replay_config(
+            base_config,
+            raw,
+            packets_per_session,
+            target_sessions,
+        )
+        run_slices = build_virtual_run_slices(
+            raw.x.shape[0],
+            packets_per_session,
+            target_sessions,
+        )
+        if not run_slices:
+            raise ValueError(
+                f"Raw measurement does not contain one complete {mode} run"
+            )
+        for virtual_run_index, (start_packet, end_packet) in enumerate(
+            run_slices,
+            start=1,
+        ):
+            sessions = build_sessions_from_raw(
+                raw,
+                start_packet,
+                end_packet,
+                run_config,
+            )
+            analysis_result = analyze_sessions(sessions, run_config)
+            paths = build_replay_result_paths(
+                source_raw_path,
+                mode,
+                virtual_run_index,
+            )
+            initialize_replay_log(
+                paths,
+                source_raw_path,
+                mode,
+                virtual_run_index,
+                len(run_slices),
+                start_packet,
+                end_packet,
+                run_config,
+                sessions,
+            )
+            save_replay_analysis(paths, analysis_result, run_config)
+            print(
+                f"Saved replay {mode} run "
+                f"{virtual_run_index}/{len(run_slices)}: {paths.log.parent}"
+            )
+
+
+try:
+    if cli_arguments.replay is not None:
+        if total_runs != 1:
+            raise ValueError("--repeat cannot be used with --replay")
+        replay_raw_measurement(
+            cli_arguments.replay,
+            cli_arguments.virtual_mode,
+            config,
+        )
+    else:
+        for run_number in range(1, total_runs + 1):
+            stop_series = run_measurement(
+                run_number,
+                total_runs,
+                show_figures=(total_runs == 1),
+            )
+            if stop_series:
+                break
 finally:
-    ser.close()
+    if ser is not None:
+        ser.close()
