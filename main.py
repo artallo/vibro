@@ -95,6 +95,13 @@ class FrequencyClusterConsolidationConfig:
 
 
 @dataclass(frozen=True)
+class FrequencyClusteringConfig:
+    frequency_tolerance_hz_250: float
+    frequency_tolerance_hz_125: float
+    frequency_tolerance_hz_62p5: float
+
+
+@dataclass(frozen=True)
 class VisualizationConfig:
     trusted_frequency: TrustedFrequencyVisualizationConfig
 
@@ -106,6 +113,7 @@ class ApplicationConfig:
     sensor: SensorConfig
     welch: WelchConfig
     visualization: VisualizationConfig
+    frequency_clustering: FrequencyClusteringConfig
     frequency_cluster_consolidation: FrequencyClusterConsolidationConfig
     analysis_bands: list[AnalysisBand]
 
@@ -230,6 +238,33 @@ def validate_config(config: ApplicationConfig) -> None:
             "median_frequency_tolerance_hz must be positive"
         )
 
+    frequency_clustering = config.frequency_clustering
+    clustering_tolerances = {
+        "frequency_tolerance_hz_250": (
+            frequency_clustering.frequency_tolerance_hz_250
+        ),
+        "frequency_tolerance_hz_125": (
+            frequency_clustering.frequency_tolerance_hz_125
+        ),
+        "frequency_tolerance_hz_62p5": (
+            frequency_clustering.frequency_tolerance_hz_62p5
+        ),
+    }
+    for tolerance_name, tolerance in clustering_tolerances.items():
+        require_finite_number(
+            tolerance,
+            f"Frequency clustering {tolerance_name}",
+        )
+        if tolerance <= 0:
+            raise ValueError(
+                f"Frequency clustering {tolerance_name} must be positive"
+            )
+
+    effective_frequency_tolerance_hz = resolve_frequency_tolerance_hz(
+        frequency_clustering,
+        config.sensor.odr_hz,
+    )
+
     if not isinstance(config.analysis_bands, list) or not config.analysis_bands:
         raise ValueError("At least one analysis band is required")
 
@@ -293,6 +328,11 @@ def validate_config(config: ApplicationConfig) -> None:
             raise ValueError(
                 f"{band_name} frequency_tolerance_hz must be non-negative"
             )
+        if band.frequency_tolerance_hz != effective_frequency_tolerance_hz:
+            raise ValueError(
+                f"{band_name} frequency_tolerance_hz does not match "
+                "the effective ODR-dependent tolerance"
+            )
         if band.frequency_stability_max_std_hz <= 0:
             raise ValueError(
                 f"{band_name} frequency_stability_max_std_hz must be positive"
@@ -326,7 +366,27 @@ def load_config(
     consolidation_data = raw_config["analysis"][
         "frequency_cluster_consolidation"
     ]
+    frequency_clustering_data = raw_config["analysis"][
+        "frequency_clustering"
+    ]
     band_entries = raw_config["analysis"]["bands"]
+
+    sensor_odr_hz = float(sensor_data["odr_hz"])
+    frequency_clustering = FrequencyClusteringConfig(
+        frequency_tolerance_hz_250=frequency_clustering_data[
+            "frequency_tolerance_hz_250"
+        ],
+        frequency_tolerance_hz_125=frequency_clustering_data[
+            "frequency_tolerance_hz_125"
+        ],
+        frequency_tolerance_hz_62p5=frequency_clustering_data[
+            "frequency_tolerance_hz_62p5"
+        ],
+    )
+    frequency_tolerance_hz = resolve_frequency_tolerance_hz(
+        frequency_clustering,
+        sensor_odr_hz,
+    )
 
     analysis_bands = [
         AnalysisBand(
@@ -336,7 +396,7 @@ def load_config(
             prominence_db=entry["prominence_db"],
             min_distance_hz=entry["min_distance_hz"],
             min_stability=entry["min_stability"],
-            frequency_tolerance_hz=entry["frequency_tolerance_hz"],
+            frequency_tolerance_hz=frequency_tolerance_hz,
             frequency_stability_max_std_hz=entry[
                 "frequency_stability_max_std_hz"
             ],
@@ -356,7 +416,7 @@ def load_config(
             min_recommended_sessions=session_data["min_recommended_sessions"],
         ),
         sensor=SensorConfig(
-            odr_hz=float(sensor_data["odr_hz"]),
+            odr_hz=sensor_odr_hz,
         ),
         welch=WelchConfig(
             nperseg=welch_data["nperseg"],
@@ -381,6 +441,7 @@ def load_config(
                 ],
             ),
         ),
+        frequency_clustering=frequency_clustering,
         frequency_cluster_consolidation=FrequencyClusterConsolidationConfig(
             median_frequency_tolerance_hz=consolidation_data[
                 "median_frequency_tolerance_hz"
@@ -420,6 +481,23 @@ def normalize_cli_odr_hz(odr_hz: float) -> float:
     return odr_hz
 
 
+def resolve_frequency_tolerance_hz(
+    config: FrequencyClusteringConfig,
+    odr_hz: float,
+) -> float:
+    tolerance_by_odr = {
+        250.0: config.frequency_tolerance_hz_250,
+        125.0: config.frequency_tolerance_hz_125,
+        62.5: config.frequency_tolerance_hz_62p5,
+    }
+    try:
+        return float(tolerance_by_odr[odr_hz])
+    except KeyError as error:
+        raise ValueError(
+            f"Unsupported ODR for frequency clustering: {odr_hz} Hz"
+        ) from error
+
+
 def apply_cli_overrides(
     config: ApplicationConfig,
     arguments: argparse.Namespace,
@@ -428,9 +506,20 @@ def apply_cli_overrides(
     if arguments.odr is not None:
         odr_hz = normalize_cli_odr_hz(arguments.odr)
 
+    frequency_tolerance_hz = resolve_frequency_tolerance_hz(
+        config.frequency_clustering,
+        odr_hz,
+    )
     effective_config = replace(
         config,
         sensor=replace(config.sensor, odr_hz=odr_hz),
+        analysis_bands=[
+            replace(
+                band,
+                frequency_tolerance_hz=frequency_tolerance_hz,
+            )
+            for band in config.analysis_bands
+        ],
         session=replace(
             config.session,
             packets_per_session=(
@@ -529,6 +618,9 @@ def initialize_run_log(
             f"ODR: {config.sensor.odr_hz:g} Hz\n"
             f"Packets/session: {config.session.packets_per_session}\n"
             f"Target sessions: {config.session.min_recommended_sessions}\n"
+            "Frequency tolerance: "
+            f"{resolve_frequency_tolerance_hz(config.frequency_clustering, config.sensor.odr_hz):.2f} "
+            "Hz\n"
             f"Welch nperseg: {config.welch.nperseg}\n"
             f"Welch noverlap: {config.welch.noverlap}\n"
             "\n"
@@ -3239,6 +3331,11 @@ total_runs = cli_arguments.repeat
 print(f"ODR: {config.sensor.odr_hz:g} Hz")
 print(f"Packets/session: {config.session.packets_per_session}")
 print(f"Target sessions: {config.session.min_recommended_sessions}")
+print(
+    "Frequency tolerance: "
+    f"{resolve_frequency_tolerance_hz(config.frequency_clustering, config.sensor.odr_hz):.2f} "
+    "Hz"
+)
 
 analysis_bands = config.analysis_bands
 analysis_min_frequency, analysis_max_frequency = (
