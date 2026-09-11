@@ -55,7 +55,7 @@ import argparse
 import csv
 import sys
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -78,6 +78,15 @@ DEFAULT_MIN_DISTANCE_HZ = 1.0
 # occasional false peaks appear. Measured on the evening captures: zero false
 # peaks at 64 and 256 packets, about one per ten analyses at 32.
 MINIMUM_RELIABLE_PACKETS = 64
+
+# Support is counted over independent stretches of the record. The frequency
+# has already been chosen by the full-record estimate, so testing it in a
+# single window costs no multiple-comparison penalty and an uncorrected
+# one-sided quantile is the right one. Under pure noise a frequency would
+# collect support in about SUPPORT_ALPHA of the windows.
+WINDOW_TARGET_COUNT = 16
+MINIMUM_WINDOW_PACKETS = 16
+SUPPORT_ALPHA = 0.05
 
 AXIS_KEYS = (("X", "x"), ("Y", "y"), ("Z", "z"))
 AXIS_COLORS = {"X": "tab:blue", "Y": "tab:orange", "Z": "tab:green"}
@@ -116,6 +125,14 @@ class StablePeak:
     half_z_high: float
     persistent: bool
     band: str
+    support_windows: int = 0
+    support_total: int = 0
+
+    @property
+    def support_fraction(self) -> float:
+        if self.support_total == 0:
+            return 0.0
+        return self.support_windows / self.support_total
 
 
 @dataclass(frozen=True)
@@ -145,6 +162,9 @@ class CaptureResult:
     peaks: list[StablePeak]
     detection_limit_db: dict[str, float]
     probes: list[ProbeResult]
+    window_count: int
+    window_packets: int
+    expected_support: float
 
 
 # ==========================================================
@@ -343,6 +363,38 @@ def find_stable_peaks(
     return peaks
 
 
+def split_into_windows(packet_count: int) -> list[np.ndarray]:
+    """Consecutive, non-overlapping stretches of the record."""
+    window_packets = max(
+        MINIMUM_WINDOW_PACKETS, packet_count // WINDOW_TARGET_COUNT,
+    )
+    window_count = packet_count // window_packets
+    if window_count < 2:
+        return []
+    return [
+        np.arange(index * window_packets, (index + 1) * window_packets)
+        for index in range(window_count)
+    ]
+
+
+def count_support(
+    window_spectra: list[AxisSpectrum],
+    frequency_hz: float,
+    support_threshold: float,
+) -> int:
+    """In how many independent windows this frequency rises above its noise.
+
+    The frequency is fixed in advance by the full-record estimate, so each
+    window is a single pre-registered test rather than a search.
+    """
+    support = 0
+    for spectrum in window_spectra:
+        index = int(np.argmin(np.abs(spectrum.frequencies - frequency_hz)))
+        if spectrum.z[index] >= support_threshold:
+            support += 1
+    return support
+
+
 UPPER_BOUND_SIGMA = 1.96
 
 
@@ -407,6 +459,35 @@ def analyze_capture(
         bins_tested, settings.alpha, packet_count,
     )
     peaks = find_stable_peaks(spectra, z_threshold, settings, bands)
+
+    windows = split_into_windows(packet_count)
+    window_packets = int(windows[0].size) if windows else 0
+    support_threshold = (
+        float(t.isf(SUPPORT_ALPHA, max(1, window_packets - 1)))
+        if windows else 0.0
+    )
+    if windows and peaks:
+        window_spectra = {
+            axis: [
+                analyze_axis(
+                    axis, axes[key][indices], sampling_rate_hz, settings,
+                )
+                for indices in windows
+            ]
+            for axis, key in AXIS_KEYS
+        }
+        peaks = [
+            replace(
+                peak,
+                support_windows=count_support(
+                    window_spectra[peak.axis],
+                    peak.frequency_hz,
+                    support_threshold,
+                ),
+                support_total=len(windows),
+            )
+            for peak in peaks
+        ]
     detection_limit_db = {
         spectrum.axis: float(
             z_threshold * np.median(spectrum.standard_error_db)
@@ -431,6 +512,9 @@ def analyze_capture(
             z_threshold,
             settings.min_distance_hz / 2.0,
         ),
+        window_count=len(windows),
+        window_packets=window_packets,
+        expected_support=SUPPORT_ALPHA * len(windows),
     )
 
 
@@ -443,6 +527,7 @@ PEAK_FIELDS = [
     "capture", "packet_count", "duration_seconds", "sampling_rate_hz",
     "z_threshold", "axis", "band", "frequency_hz", "prominence_db",
     "standard_error_db", "z", "half_z_low", "half_z_high", "persistent",
+    "support_windows", "support_total",
 ]
 
 
@@ -463,6 +548,8 @@ def peak_rows(result: CaptureResult) -> list[dict[str, Any]]:
             "half_z_low": round(peak.half_z_low, 2),
             "half_z_high": round(peak.half_z_high, 2),
             "persistent": int(peak.persistent),
+            "support_windows": peak.support_windows,
+            "support_total": peak.support_total,
         }
         for peak in result.peaks
     ]
@@ -553,6 +640,131 @@ def format_probes(result: CaptureResult) -> str:
             f"{verdict}"
         )
     return "\n" + "\n".join(lines)
+
+
+def noise_ceiling_psd(
+    spectrum: AxisSpectrum,
+    z_threshold: float,
+) -> np.ndarray:
+    """Power spectral density a bump has to exceed to not be sensor noise."""
+    return spectrum.baseline_psd * 10.0 ** (
+        z_threshold * spectrum.standard_error_db / 10.0
+    )
+
+
+def save_overview_figure(
+    path: Path,
+    result: CaptureResult,
+) -> None:
+    """Presentation figure: which frequencies stand out of the sensor noise.
+
+    The shaded region is everything the record cannot distinguish from the
+    noise of the instrument and of the estimate. A curve leaving that
+    region is a real spectral structure; a curve inside it is not, however
+    peaked it looks.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+
+    figure, panels = plt.subplots(3, 1, figsize=(13, 10), sharex=True)
+    for panel, spectrum in zip(panels, result.spectra):
+        color = AXIS_COLORS[spectrum.axis]
+        ceiling = noise_ceiling_psd(spectrum, result.z_threshold)
+        panel.fill_between(
+            spectrum.frequencies, 0.0, ceiling, color="0.86", lw=0,
+        )
+        panel.plot(spectrum.frequencies, ceiling, color="0.55", lw=1.0)
+        panel.plot(
+            spectrum.frequencies, spectrum.baseline_psd,
+            color="0.45", lw=0.8, ls="--",
+        )
+        panel.plot(
+            spectrum.frequencies, spectrum.mean_psd, color=color, lw=1.6,
+        )
+        axis_peaks = [
+            peak for peak in result.peaks if peak.axis == spectrum.axis
+        ]
+        for peak in axis_peaks:
+            index = int(np.argmin(
+                np.abs(spectrum.frequencies - peak.frequency_hz)
+            ))
+            height = float(spectrum.mean_psd[index])
+            panel.plot(
+                [peak.frequency_hz], [height],
+                marker="x", color="crimson", markersize=9,
+                markeredgewidth=2, lw=0, zorder=5,
+            )
+            support = (
+                f"{peak.support_windows}/{peak.support_total} win\n"
+                if peak.support_total else ""
+            )
+            panel.annotate(
+                f"{peak.frequency_hz:.2f} Hz\n{support}"
+                f"{peak.prominence_db:.2f} dB",
+                xy=(peak.frequency_hz, height),
+                xytext=(0, 13), textcoords="offset points",
+                ha="center", va="bottom", fontsize=8.5, color="crimson",
+                zorder=6,
+            )
+        top = max(
+            float(np.max(spectrum.mean_psd)), float(np.max(ceiling)),
+        )
+        panel.set_ylim(0.0, top * (1.42 if axis_peaks else 1.08))
+        panel.set_ylabel(f"{spectrum.axis} axis\nPSD [g$^2$/Hz]")
+        panel.grid(True, alpha=0.3)
+        if not axis_peaks:
+            panel.text(
+                0.012, 0.94,
+                "nothing rises out of the noise on this axis",
+                transform=panel.transAxes, fontsize=9,
+                color="0.3", va="top",
+            )
+    panels[-1].set_xlabel("Frequency, Hz")
+    figure.legend(
+        handles=[
+            Patch(color="0.86"),
+            Line2D([0], [0], color="0.55", lw=1.0),
+            Line2D([0], [0], color="0.45", lw=0.8, ls="--"),
+            Line2D([0], [0], color="0.2", lw=1.6),
+            Line2D([0], [0], color="crimson", marker="x", lw=0,
+                   markersize=9, markeredgewidth=2),
+        ],
+        labels=[
+            "sensor noise: nothing here is a structure",
+            "detection threshold",
+            "broadband floor",
+            "measured PSD (axis colour)",
+            "frequency that stands out",
+        ],
+        loc="lower center", ncol=5, fontsize=9,
+        bbox_to_anchor=(0.5, 0.0), frameon=False,
+    )
+    if result.peaks:
+        listed = ", ".join(
+            f"{peak.axis} {peak.frequency_hz:.2f} Hz"
+            for peak in sorted(result.peaks, key=lambda item: item.frequency_hz)
+        )
+        verdict = f"Stands out of the noise: {listed}"
+    else:
+        verdict = (
+            "Nothing stands out of the noise — a peak of "
+            f"{max(result.detection_limit_db.values()):.2f} dB "
+            "would have been needed"
+        )
+    figure.suptitle(
+        f"Dominant frequencies: {result.capture}\n"
+        f"{result.packet_count} packets, {result.duration_seconds:.0f} s; "
+        f"support counted over {result.window_count} independent windows "
+        f"of {result.window_packets} packets\n"
+        f"{verdict}",
+        fontsize=11,
+    )
+    figure.tight_layout(rect=(0, 0.035, 1, 0.925))
+    figure.savefig(path, dpi=110)
+    plt.close(figure)
 
 
 def save_figure(path: Path, result: CaptureResult) -> None:
@@ -657,6 +869,10 @@ def run_stable_spectrum(
         report_parts.append(format_capture_report(result))
         save_figure(
             output_directory / f"figure_stable_spectrum_{result.capture}.png",
+            result,
+        )
+        save_overview_figure(
+            output_directory / f"figure_dominant_{result.capture}.png",
             result,
         )
         verdict = (

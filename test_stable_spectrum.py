@@ -146,6 +146,52 @@ class DetectionTests(unittest.TestCase):
         self.assertLess(float(np.std(spectrum.z)), 1.6)
 
 
+class SupportTests(unittest.TestCase):
+    def test_windows_are_disjoint_and_cover_the_record(self) -> None:
+        from stable_spectrum import split_into_windows
+
+        windows = split_into_windows(256)
+        self.assertEqual(len(windows), 16)
+        joined = np.concatenate(windows)
+        self.assertEqual(joined.size, len(set(joined.tolist())))
+        self.assertEqual(joined.min(), 0)
+        self.assertEqual(joined.max(), 255)
+
+    def test_short_records_still_get_at_least_two_windows(self) -> None:
+        from stable_spectrum import split_into_windows
+
+        self.assertEqual(len(split_into_windows(64)), 4)
+        self.assertEqual(split_into_windows(16), [])
+
+    def test_a_persistent_tone_is_supported_by_most_windows(self) -> None:
+        from stable_spectrum import count_support, split_into_windows
+        from scipy.stats import t as student
+
+        signal = add_tone(noise_packets(128, 51), 6.0, 0.30, seed=52)
+        windows = split_into_windows(signal.shape[0])
+        spectra = [
+            analyze_axis("X", signal[indices], SAMPLING_RATE_HZ, SETTINGS)
+            for indices in windows
+        ]
+        threshold = float(student.isf(0.05, windows[0].size - 1))
+        support = count_support(spectra, 6.0, threshold)
+        self.assertGreaterEqual(support, int(0.7 * len(windows)))
+
+    def test_noise_collects_little_support(self) -> None:
+        from stable_spectrum import count_support, split_into_windows
+        from scipy.stats import t as student
+
+        signal = noise_packets(128, 53)
+        windows = split_into_windows(signal.shape[0])
+        spectra = [
+            analyze_axis("X", signal[indices], SAMPLING_RATE_HZ, SETTINGS)
+            for indices in windows
+        ]
+        threshold = float(student.isf(0.05, windows[0].size - 1))
+        support = count_support(spectra, 6.0, threshold)
+        self.assertLessEqual(support, int(0.4 * len(windows)))
+
+
 class ProbeTests(unittest.TestCase):
     def test_probe_reports_a_detected_tone_as_present(self) -> None:
         from stable_spectrum import probe_frequencies

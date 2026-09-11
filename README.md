@@ -106,6 +106,20 @@ Peaks are flagged `persistent` when they also clear `z / sqrt(2)` in both the
 even and the odd packets of the record. Below 64 packets the error bar is
 itself too noisy and the report says so.
 
+Two figures are written per capture. `figure_dominant_<capture>.png` is the
+one to show a reader: measured PSD per axis in g²/Hz, with everything the
+record cannot distinguish from sensor noise shaded out. A curve that leaves
+the shaded region is a real spectral structure, and it is labelled with its
+frequency, its support over independent windows, and its prominence in dB.
+`figure_stable_spectrum_<capture>.png` shows the same thing as prominence in
+dB against the error band, which is easier to read when peaks are small.
+
+Support is counted over consecutive non-overlapping windows of the record.
+The frequency has already been chosen by the full-record estimate, so each
+window is one pre-registered test rather than a search and an uncorrected
+one-sided quantile applies; under pure noise a frequency would collect
+support in about 5% of the windows.
+
 To ask about a specific frequency, detected or not:
 
 ```bash
