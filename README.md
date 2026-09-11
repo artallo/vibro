@@ -106,6 +106,17 @@ Peaks are flagged `persistent` when they also clear `z / sqrt(2)` in both the
 even and the odd packets of the record. Below 64 packets the error bar is
 itself too noisy and the report says so.
 
+To ask about a specific frequency, detected or not:
+
+```bash
+python stable_spectrum.py real_results/<capture>_raw.npz --probe 3.66 3.17
+```
+
+Each probe reports the prominence measured there, the prominence that would
+have been needed, and the 95% upper bound. A structure stronger than that
+bound is excluded by the record; a weaker one is not. This turns "we saw
+nothing" into a measurement.
+
 ### Measuring repeatability
 
 `repeatability_check.py` splits each capture into halves that share no

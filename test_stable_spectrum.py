@@ -146,5 +146,35 @@ class DetectionTests(unittest.TestCase):
         self.assertLess(float(np.std(spectrum.z)), 1.6)
 
 
+class ProbeTests(unittest.TestCase):
+    def test_probe_reports_a_detected_tone_as_present(self) -> None:
+        from stable_spectrum import probe_frequencies
+
+        signal = add_tone(noise_packets(64, 41), 5.0, 0.30, seed=42)
+        spectrum, _ = peaks_for(signal)
+        threshold = significance_threshold(
+            spectrum.frequencies.size * 3, SETTINGS.alpha, 64,
+        )
+        probes = probe_frequencies([spectrum], [5.0], threshold, 0.5)
+        self.assertEqual(len(probes), 1)
+        self.assertTrue(probes[0].detected)
+        self.assertAlmostEqual(probes[0].frequency_hz, 5.0, delta=0.25)
+
+    def test_probe_on_noise_reports_an_upper_bound(self) -> None:
+        from stable_spectrum import probe_frequencies
+
+        spectrum, _ = peaks_for(noise_packets(256, 43))
+        threshold = significance_threshold(
+            spectrum.frequencies.size * 3, SETTINGS.alpha, 256,
+        )
+        probes = probe_frequencies([spectrum], [5.0], threshold, 0.5)
+        probe = probes[0]
+        self.assertFalse(probe.detected)
+        # The bound has to sit above what was measured and below what would
+        # have been needed to call a detection, or it says nothing useful.
+        self.assertGreater(probe.upper_bound_db, probe.prominence_db)
+        self.assertLess(probe.upper_bound_db, 2.0 * probe.detection_limit_db)
+
+
 if __name__ == "__main__":
     unittest.main()

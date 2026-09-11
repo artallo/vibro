@@ -119,6 +119,19 @@ class StablePeak:
 
 
 @dataclass(frozen=True)
+class ProbeResult:
+    axis: str
+    requested_hz: float
+    frequency_hz: float
+    prominence_db: float
+    standard_error_db: float
+    z: float
+    upper_bound_db: float
+    detection_limit_db: float
+    detected: bool
+
+
+@dataclass(frozen=True)
 class CaptureResult:
     capture: str
     source: Path
@@ -131,6 +144,7 @@ class CaptureResult:
     spectra: list[AxisSpectrum]
     peaks: list[StablePeak]
     detection_limit_db: dict[str, float]
+    probes: list[ProbeResult]
 
 
 # ==========================================================
@@ -329,10 +343,53 @@ def find_stable_peaks(
     return peaks
 
 
+UPPER_BOUND_SIGMA = 1.96
+
+
+def probe_frequencies(
+    spectra: list[AxisSpectrum],
+    requested: list[float],
+    z_threshold: float,
+    search_radius_hz: float,
+) -> list[ProbeResult]:
+    """Report what sits at named frequencies, detected or not.
+
+    A non-detection is only meaningful with a number attached, so each
+    probe carries the 95% upper bound on any peak there and the prominence
+    that would have been needed. A structure stronger than the upper bound
+    is excluded by this record; a weaker one is not.
+    """
+    probes: list[ProbeResult] = []
+    for spectrum in spectra:
+        for requested_hz in requested:
+            window = np.abs(spectrum.frequencies - requested_hz) <= search_radius_hz
+            if not window.any():
+                continue
+            candidates = np.flatnonzero(window)
+            index = int(candidates[int(np.argmax(spectrum.z[candidates]))])
+            standard_error = float(spectrum.standard_error_db[index])
+            probes.append(ProbeResult(
+                axis=spectrum.axis,
+                requested_hz=requested_hz,
+                frequency_hz=float(spectrum.frequencies[index]),
+                prominence_db=float(spectrum.prominence_db[index]),
+                standard_error_db=standard_error,
+                z=float(spectrum.z[index]),
+                upper_bound_db=float(
+                    spectrum.prominence_db[index]
+                    + UPPER_BOUND_SIGMA * standard_error
+                ),
+                detection_limit_db=z_threshold * standard_error,
+                detected=bool(spectrum.z[index] >= z_threshold),
+            ))
+    return probes
+
+
 def analyze_capture(
     raw_path: Path,
     settings: SpectrumSettings,
     bands: list[tuple[str, float, float]],
+    probe_hz: list[float] | None = None,
 ) -> CaptureResult:
     with np.load(raw_path, allow_pickle=False) as archive:
         axes = {key: np.asarray(archive[key]) for _, key in AXIS_KEYS}
@@ -368,6 +425,12 @@ def analyze_capture(
         spectra=spectra,
         peaks=peaks,
         detection_limit_db=detection_limit_db,
+        probes=probe_frequencies(
+            spectra,
+            probe_hz or [],
+            z_threshold,
+            settings.min_distance_hz / 2.0,
+        ),
     )
 
 
@@ -453,7 +516,7 @@ def format_capture_report(result: CaptureResult) -> str:
             "This is a stable result: a longer record is required, not a "
             "lower threshold."
         )
-        return "\n".join(lines) + "\n"
+        return "\n".join(lines) + format_probes(result) + "\n"
     lines.append(f"Significant frequencies: {len(result.peaks)}")
     lines.append(
         "Axis  Band              Freq Hz   Prom dB   SE dB      z   "
@@ -467,7 +530,29 @@ def format_capture_report(result: CaptureResult) -> str:
             f"{peak.half_z_low:4.1f}/{peak.half_z_high:<4.1f}  "
             f"{'yes' if peak.persistent else 'no':>10}"
         )
-    return "\n".join(lines) + "\n"
+    return "\n".join(lines) + format_probes(result) + "\n"
+
+
+def format_probes(result: CaptureResult) -> str:
+    if not result.probes:
+        return ""
+    lines = [
+        "",
+        "Requested frequencies:",
+        "Axis  Asked    Bin     Prom dB      z   Needed   95% upper   Verdict",
+    ]
+    for probe in result.probes:
+        verdict = (
+            "present" if probe.detected
+            else f"absent above {probe.upper_bound_db:.2f} dB"
+        )
+        lines.append(
+            f"{probe.axis:<5} {probe.requested_hz:6.2f} {probe.frequency_hz:6.2f}  "
+            f"{probe.prominence_db:9.2f}  {probe.z:5.1f}  "
+            f"{probe.detection_limit_db:7.2f}  {probe.upper_bound_db:10.2f}   "
+            f"{verdict}"
+        )
+    return "\n" + "\n".join(lines)
 
 
 def save_figure(path: Path, result: CaptureResult) -> None:
@@ -546,6 +631,7 @@ def run_stable_spectrum(
     raw_paths: list[Path],
     output_directory: Path,
     settings: SpectrumSettings,
+    probe_hz: list[float] | None = None,
 ) -> Path:
     bands = load_band_names()
     output_directory.mkdir(parents=True, exist_ok=True)
@@ -565,7 +651,7 @@ def run_stable_spectrum(
         "",
     ]
     for raw_path in raw_paths:
-        result = analyze_capture(raw_path, settings, bands)
+        result = analyze_capture(raw_path, settings, bands, probe_hz)
         all_rows.extend(peak_rows(result))
         report_parts.append("=" * 72)
         report_parts.append(format_capture_report(result))
@@ -607,6 +693,11 @@ def parse_cli_arguments(arguments: list[str] | None = None) -> argparse.Namespac
         metavar=("MIN_HZ", "MAX_HZ"),
         help="override the analysis band (default: from config.toml)",
     )
+    parser.add_argument(
+        "--probe", type=float, nargs="+", default=None, metavar="HZ",
+        help="report what sits at these frequencies on every axis, "
+             "including the 95%% upper bound when nothing is detected",
+    )
     return parser.parse_args(arguments)
 
 
@@ -618,6 +709,7 @@ def main(arguments: list[str] | None = None) -> int:
         cli.raw_paths,
         resolve_output_directory(cli.output, cli.raw_paths),
         settings,
+        cli.probe,
     )
     return 0
 
