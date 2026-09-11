@@ -146,6 +146,59 @@ class DetectionTests(unittest.TestCase):
         self.assertLess(float(np.std(spectrum.z)), 1.6)
 
 
+class QualityTests(unittest.TestCase):
+    def spectra_for(self, signals: dict[str, np.ndarray]):
+        return [
+            analyze_axis(axis, signal, SAMPLING_RATE_HZ, SETTINGS)
+            for axis, signal in signals.items()
+        ]
+
+    def test_clean_recording_raises_no_warning(self) -> None:
+        from stable_spectrum import assess_quality
+
+        spectra = self.spectra_for({
+            "X": noise_packets(64, 61),
+            "Y": noise_packets(64, 62),
+            "Z": noise_packets(64, 63),
+        })
+        rates = np.full(64, 250.0)
+        self.assertEqual(assess_quality(spectra, rates).warnings, [])
+
+    def test_a_knock_is_reported(self) -> None:
+        from stable_spectrum import assess_quality
+
+        loud = noise_packets(64, 64)
+        loud[10] *= 12.0
+        spectra = self.spectra_for({
+            "X": loud,
+            "Y": noise_packets(64, 65),
+            "Z": noise_packets(64, 66),
+        })
+        report = assess_quality(spectra, np.full(64, 250.0))
+        self.assertEqual(report.loud_packets["X"], 1)
+        self.assertTrue(any("louder" in text for text in report.warnings))
+
+    def test_a_dead_axis_is_reported(self) -> None:
+        from stable_spectrum import assess_quality
+
+        spectra = self.spectra_for({
+            "X": noise_packets(64, 67),
+            "Y": noise_packets(64, 68),
+            "Z": noise_packets(64, 69, amplitude=0.001),
+        })
+        report = assess_quality(spectra, np.full(64, 250.0))
+        self.assertEqual(report.quiet_axes, ["Z"])
+
+    def test_drifting_sampling_rate_is_reported(self) -> None:
+        from stable_spectrum import assess_quality
+
+        spectra = self.spectra_for({"X": noise_packets(64, 70)})
+        rates = np.linspace(249.0, 251.0, 64)
+        report = assess_quality(spectra, rates)
+        self.assertGreater(report.sampling_rate_spread_ppm, 1000.0)
+        self.assertTrue(any("sampling rate" in text for text in report.warnings))
+
+
 class SupportTests(unittest.TestCase):
     def test_windows_are_disjoint_and_cover_the_record(self) -> None:
         from stable_spectrum import split_into_windows

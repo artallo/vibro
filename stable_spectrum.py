@@ -112,6 +112,7 @@ class AxisSpectrum:
     standard_error_db: np.ndarray
     z: np.ndarray
     half_z: tuple[np.ndarray, np.ndarray]
+    packet_band_power: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -133,6 +134,34 @@ class StablePeak:
         if self.support_total == 0:
             return 0.0
         return self.support_windows / self.support_total
+
+
+@dataclass(frozen=True)
+class QualityReport:
+    sampling_rate_spread_ppm: float
+    axis_rms_g: dict[str, float]
+    loud_packets: dict[str, int]
+    quiet_axes: list[str]
+
+    @property
+    def warnings(self) -> list[str]:
+        messages = []
+        if self.sampling_rate_spread_ppm > 1000.0:
+            messages.append(
+                f"sampling rate varies by {self.sampling_rate_spread_ppm:.0f} "
+                "ppm across packets; frequencies may be smeared"
+            )
+        for axis, count in self.loud_packets.items():
+            if count:
+                messages.append(
+                    f"{axis}: {count} packet(s) far louder than the rest — "
+                    "a knock or footstep, which widens the error bar"
+                )
+        for axis in self.quiet_axes:
+            messages.append(
+                f"{axis}: level far below the other axes, check the wiring"
+            )
+        return messages
 
 
 @dataclass(frozen=True)
@@ -162,6 +191,7 @@ class CaptureResult:
     peaks: list[StablePeak]
     detection_limit_db: dict[str, float]
     probes: list[ProbeResult]
+    quality: QualityReport
     window_count: int
     window_packets: int
     expected_support: float
@@ -305,6 +335,7 @@ def analyze_axis(
         standard_error_db=standard_error_db,
         z=prominence_db / standard_error_db,
         half_z=(low_half[0] / low_half[1], high_half[0] / high_half[1]),
+        packet_band_power=psd.sum(axis=1) * bin_width_hz,
     )
 
 
@@ -361,6 +392,48 @@ def find_stable_peaks(
             ))
     peaks.sort(key=lambda peak: -peak.z)
     return peaks
+
+
+LOUD_PACKET_RATIO = 8.0
+QUIET_AXIS_RATIO = 0.05
+
+
+def assess_quality(
+    spectra: list[AxisSpectrum],
+    packet_fs_hz: np.ndarray,
+) -> QualityReport:
+    """Facts about the recording itself, not about its spectrum.
+
+    Covers what the measurement figures of main.py would otherwise be
+    consulted for: did the sampling rate hold, was every axis alive, did a
+    knock or a footstep dominate part of the record.
+    """
+    mean_rate = float(np.mean(packet_fs_hz))
+    spread_ppm = (
+        float(np.ptp(packet_fs_hz) / mean_rate * 1.0e6) if mean_rate else 0.0
+    )
+    axis_rms_g = {
+        spectrum.axis: float(np.sqrt(np.mean(spectrum.packet_band_power)))
+        for spectrum in spectra
+    }
+    loud_packets = {
+        spectrum.axis: int(np.sum(
+            spectrum.packet_band_power
+            > LOUD_PACKET_RATIO * np.median(spectrum.packet_band_power)
+        ))
+        for spectrum in spectra
+    }
+    loudest = max(axis_rms_g.values()) if axis_rms_g else 0.0
+    quiet_axes = [
+        axis for axis, rms in axis_rms_g.items()
+        if loudest > 0.0 and rms < QUIET_AXIS_RATIO * loudest
+    ]
+    return QualityReport(
+        sampling_rate_spread_ppm=spread_ppm,
+        axis_rms_g=axis_rms_g,
+        loud_packets=loud_packets,
+        quiet_axes=quiet_axes,
+    )
 
 
 def split_into_windows(packet_count: int) -> list[np.ndarray]:
@@ -512,6 +585,7 @@ def analyze_capture(
             z_threshold,
             settings.min_distance_hz / 2.0,
         ),
+        quality=assess_quality(spectra, packet_fs_hz),
         window_count=len(windows),
         window_packets=window_packets,
         expected_support=SUPPORT_ALPHA * len(windows),
@@ -578,8 +652,25 @@ def format_capture_report(result: CaptureResult) -> str:
             else "Support windows: none, record too short to split"
         ),
         f"Significance threshold: z >= {result.z_threshold:.2f}",
-        "Detection limit (prominence needed to be significant):",
     ]
+    lines[2] += (
+        f"   Rate spread: {result.quality.sampling_rate_spread_ppm:.0f} ppm"
+    )
+    lines.append("")
+    lines.append("Recording check:")
+    lines.append(
+        "  RMS in band: "
+        + ", ".join(
+            f"{axis} {rms:.2e} g"
+            for axis, rms in result.quality.axis_rms_g.items()
+        )
+    )
+    for message in result.quality.warnings:
+        lines.append(f"  ! {message}")
+    if not result.quality.warnings:
+        lines.append("  no anomaly found in the recording itself")
+    lines.append("")
+    lines.append("Detection limit (prominence needed to be significant):")
     if result.packet_count < MINIMUM_RELIABLE_PACKETS:
         lines.insert(
             3,

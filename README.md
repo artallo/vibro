@@ -4,6 +4,34 @@ Weak-vibration analysis of building structures with an ADXL355
 accelerometer (ESP32 firmware, binary `VIB2` packets over UART, Python
 analysis).
 
+## Workflow
+
+Two commands produce a result you can show to someone:
+
+```bash
+python main.py --odr 250 --packets-per-session 8 --min-recommended-sessions 32
+```
+
+```bash
+python stable_spectrum.py results/<capture>_raw.npz
+```
+
+The first records about 17 minutes and writes `results/<capture>_raw.npz`.
+The second reads that file and writes `stable_results/<capture>/` with the
+report, the peak table and the figures. `figure_dominant_<capture>.png` is
+the one to show.
+
+The analysis figures of `main.py` are a different, older view of the same
+data and can be skipped: its peak lists use fixed dB thresholds, which is
+what made the picture change from run to run. Its raw `.npz` is what
+matters. The recording checks that used to require looking at those figures
+(sampling rate held, every axis alive, no knock dominating the record) are
+now printed by `stable_spectrum.py` under "Recording check".
+
+Replay and the family analysis below stay useful for a different question:
+when in time a structure was present, and whether it returns across separate
+measurements.
+
 ## Measurement and replay
 
 ```bash
