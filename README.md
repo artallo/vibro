@@ -36,6 +36,10 @@ python family_analysis.py replay_results/<raw_stem>
 python family_analysis.py replay_results/<capture_1> replay_results/<capture_2> \
     --output family_results/<name>
 
+# measurement reports without raw data can be mixed in: each .txt report
+# enters as one window of its own layout (e.g. 8x8) and one capture
+python family_analysis.py replay_results/<capture_1> results/<old_run>.txt ...
+
 python -m unittest test_family_analysis
 ```
 

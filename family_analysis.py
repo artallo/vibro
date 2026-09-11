@@ -60,6 +60,7 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import re
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
@@ -240,6 +241,186 @@ def load_observations(
     return observations
 
 
+REPORT_HEADER_PATTERNS = {
+    "odr_hz": re.compile(r"^ODR:\s*([\d.]+)\s*Hz"),
+    "packets_per_session": re.compile(r"^Packets/session:\s*(\d+)"),
+    "target_sessions": re.compile(r"^(?:Target sessions|Sessions):\s*(\d+)"),
+    "frequency_tolerance_hz": re.compile(
+        r"^Frequency tolerance:\s*([\d.]+)\s*Hz"
+    ),
+}
+REPORT_PACKETS_PATTERN = re.compile(
+    r"^Packets:\s*(\d+)\s+Duration:\s*([\d.]+)\s*s"
+)
+REPORT_TRUSTED_SECTION_PATTERN = re.compile(
+    r"^Trusted frequency regions\s+[—-]\s+([XYZ])\s*$"
+)
+REPORT_TRUSTED_ROW_PATTERN = re.compile(
+    r"^(?P<band>.+?)\s{2,}(?P<freq>[\d.]+)\s+(?P<support_n>\d+)/(?P<support_total>\d+)"
+    r"\s+(?P<med>[\d.]+)\s+(?P<prom>-?[\d.]+)\s+(?P<contr>-?[\d.]+)"
+    r"\s+(?P<band_contr>-?[\d.]+)\s+(?P<weight>[\d.]+)"
+    r"\s+(?P<range_min>[\d.]+)\s*[–-]\s*(?P<range_max>[\d.]+)\s*$"
+)
+DEFAULT_TOLERANCE_BY_ODR = {250.0: 0.40, 125.0: 0.35, 62.5: 0.25}
+
+
+def default_frequency_tolerance_hz(odr_hz: float) -> float:
+    """Effective ODR tolerance for reports that predate the tolerance line.
+
+    Reads config.toml next to this file when available, otherwise falls back
+    to the documented ODR-dependent values.
+    """
+    key_by_odr = {250.0: "250", 125.0: "125", 62.5: "62p5"}
+    key = key_by_odr.get(float(odr_hz))
+    config_path = Path(__file__).with_name("config.toml")
+    if key is not None and config_path.exists():
+        try:
+            import tomllib
+
+            with config_path.open("rb") as config_file:
+                config = tomllib.load(config_file)
+            value = config["analysis"]["frequency_clustering"][
+                f"frequency_tolerance_hz_{key}"
+            ]
+            return float(value)
+        except (KeyError, OSError, ValueError):
+            pass
+    if float(odr_hz) in DEFAULT_TOLERANCE_BY_ODR:
+        return DEFAULT_TOLERANCE_BY_ODR[float(odr_hz)]
+    raise ValueError(
+        f"No frequency tolerance known for ODR {odr_hz:g} Hz; "
+        "pass --link-tolerance-hz"
+    )
+
+
+def parse_report(text: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Parse a measurement report (.txt) written by main.py.
+
+    Returns the header fields and the rows of the "Trusted frequency
+    regions" sections. Only trusted regions are used, matching the
+    replay_regions.csv semantics.
+    """
+    header: dict[str, Any] = {}
+    rows: list[dict[str, Any]] = []
+    current_axis: str | None = None
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip()
+        for name, pattern in REPORT_HEADER_PATTERNS.items():
+            match = pattern.match(line)
+            if match and name not in header:
+                header[name] = float(match.group(1))
+        match = REPORT_PACKETS_PATTERN.match(line)
+        if match and "packet_count" not in header:
+            header["packet_count"] = int(match.group(1))
+            header["duration_seconds"] = float(match.group(2))
+        section = REPORT_TRUSTED_SECTION_PATTERN.match(line)
+        if section:
+            current_axis = section.group(1)
+            continue
+        if current_axis is None:
+            continue
+        if not line.strip():
+            current_axis = None
+            continue
+        if line.startswith("Band"):
+            continue
+        row_match = REPORT_TRUSTED_ROW_PATTERN.match(line)
+        if row_match is None:
+            continue
+        rows.append({
+            "axis": current_axis,
+            "band": row_match.group("band").strip(),
+            "freq_hz": float(row_match.group("freq")),
+            "support_n": int(row_match.group("support_n")),
+            "support_total": int(row_match.group("support_total")),
+            "med_freq_hz": float(row_match.group("med")),
+            "med_prom_db": float(row_match.group("prom")),
+            "med_contrast_db": float(row_match.group("contr")),
+            "band_contrast_db": float(row_match.group("band_contr")),
+            "weight": float(row_match.group("weight")),
+            "range_min_hz": float(row_match.group("range_min")),
+            "range_max_hz": float(row_match.group("range_max")),
+        })
+    return header, rows
+
+
+def load_report(
+    report_path: Path,
+    first_id: int,
+    link_tolerance_hz: float | None,
+) -> tuple[Window, list[Observation]]:
+    """Build one window and its trusted observations from a .txt report.
+
+    Reports without raw data cannot be replayed, but their trusted regions
+    are still independent physical captures. They enter the analysis as
+    one window of layout "<packets/session>x<sessions>" with
+    ``frequency_std_hz`` unknown (NaN) and ``sources`` unknown (0).
+    """
+    header, rows = parse_report(report_path.read_text(encoding="utf-8"))
+    required = ("odr_hz", "packets_per_session", "target_sessions",
+                "packet_count", "duration_seconds")
+    missing = [name for name in required if name not in header]
+    if missing:
+        raise ValueError(
+            f"{report_path}: cannot parse report header fields {missing}"
+        )
+    odr_hz = float(header["odr_hz"])
+    packets_per_session = int(header["packets_per_session"])
+    sessions = int(header["target_sessions"])
+    tolerance = header.get("frequency_tolerance_hz")
+    if tolerance is None:
+        tolerance = (
+            link_tolerance_hz
+            if link_tolerance_hz is not None
+            else default_frequency_tolerance_hz(odr_hz)
+        )
+    capture = report_path.stem
+    mode = f"{packets_per_session}x{sessions}"
+    window = Window(
+        capture=capture,
+        mode=mode,
+        virtual_run=1,
+        packets_per_session=packets_per_session,
+        sessions_per_run=sessions,
+        packet_start=1,
+        packet_end=int(header["packet_count"]),
+        packet_count=int(header["packet_count"]),
+        duration_seconds=float(header["duration_seconds"]),
+    )
+    observations = []
+    for offset, row in enumerate(rows):
+        observations.append(Observation(
+            observation_id=first_id + offset,
+            capture=capture,
+            source=str(report_path.resolve()),
+            odr_hz=odr_hz,
+            frequency_tolerance_hz=float(tolerance),
+            mode=mode,
+            packets_per_session=packets_per_session,
+            sessions_per_run=sessions,
+            virtual_run=1,
+            packet_start=window.packet_start,
+            packet_end=window.packet_end,
+            duration_seconds=window.duration_seconds,
+            axis=row["axis"],
+            band=row["band"],
+            freq_hz=row["freq_hz"],
+            med_freq_hz=row["med_freq_hz"],
+            support_n=row["support_n"],
+            support_total=row["support_total"],
+            support_fraction=row["support_n"] / row["support_total"],
+            range_min_hz=row["range_min_hz"],
+            range_max_hz=row["range_max_hz"],
+            frequency_std_hz=math.nan,
+            med_prom_db=row["med_prom_db"],
+            med_contrast_db=row["med_contrast_db"],
+            band_contrast_db=row["band_contrast_db"],
+            sources=0,
+            weight=row["weight"],
+        ))
+    return window, observations
+
+
 # ==========================================================
 # Family construction
 # ==========================================================
@@ -375,19 +556,26 @@ def build_families(
 # ==========================================================
 
 
+def finite_values(values: list[float]) -> list[float]:
+    return [float(v) for v in values if v is not None and math.isfinite(v)]
+
+
 def median_or_none(values: list[float]) -> float | None:
+    values = finite_values(values)
     if not values:
         return None
     return float(np.median(values))
 
 
 def std_or_none(values: list[float]) -> float | None:
+    values = finite_values(values)
     if not values:
         return None
     return float(np.std(values))
 
 
 def mean_or_none(values: list[float]) -> float | None:
+    values = finite_values(values)
     if not values:
         return None
     return float(np.mean(values))
@@ -990,7 +1178,8 @@ def write_metadata(
             "  capture_recurrence counts independent raw captures,\n"
             "  windows_present_all_layouts is a descriptive pooled count.\n"
             "  frequency_std_hz of consolidated regions is the maximum\n"
-            "  source-cluster sigma_f (inherited from replay).\n"
+            "  source-cluster sigma_f (inherited from replay); it is NaN\n"
+            "  for observations taken from .txt reports (sources = 0).\n"
             "\nLayouts:\n"
         )
         for mode in layouts:
@@ -1038,15 +1227,28 @@ def run_family_analysis(
 ) -> Path:
     windows: list[Window] = []
     observations: list[Observation] = []
-    for directory in replay_directories:
-        if not (directory / "replay_regions.csv").exists():
-            raise FileNotFoundError(
-                f"{directory} does not contain replay_regions.csv"
+    for source in replay_directories:
+        if source.is_dir():
+            if not (source / "replay_regions.csv").exists():
+                raise FileNotFoundError(
+                    f"{source} does not contain replay_regions.csv"
+                )
+            windows.extend(load_windows(source))
+            observations.extend(
+                load_observations(source, len(observations))
             )
-        windows.extend(load_windows(directory))
-        observations.extend(load_observations(directory, len(observations)))
+        elif source.suffix.lower() == ".txt":
+            window, report_observations = load_report(
+                source, len(observations), link_tolerance_hz,
+            )
+            windows.append(window)
+            observations.extend(report_observations)
+        else:
+            raise FileNotFoundError(
+                f"{source} is neither a replay directory nor a .txt report"
+            )
     if not windows:
-        raise ValueError("No virtual runs found in replay_runs.csv")
+        raise ValueError("No virtual runs found in the inputs")
 
     tolerances = sorted({o.frequency_tolerance_hz for o in observations})
     odrs = sorted({o.odr_hz for o in observations})
@@ -1199,8 +1401,10 @@ def parse_cli_arguments(
         "replay_directories",
         nargs="+",
         type=Path,
-        help="replay result directories containing replay_runs.csv "
-             "and replay_regions.csv",
+        help="replay result directories (containing replay_runs.csv and "
+             "replay_regions.csv) and/or measurement .txt reports; a "
+             "report without raw data enters as one window of its own "
+             "layout",
     )
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument(

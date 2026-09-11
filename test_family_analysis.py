@@ -148,5 +148,74 @@ class FamilyClusteringTests(unittest.TestCase):
         self.assertAlmostEqual(families[0].observations[0].freq_hz, 4.7)
 
 
+SAMPLE_REPORT = """Run started: 2026-08-31 14:36:29
+Run: 1/3
+ODR: 250 Hz
+Packets/session: 8
+Target sessions: 8
+Welch nperseg: 1024
+Welch noverlap: 512
+
+Packets:   64   Duration:  262.6 s   Fs=249.53
+
+Session frequency clusters — X
+Band            Freq Hz  Support  Support %   σf Hz       Range Hz  Med.Freq  Med.Prom  Med.Contr  Band.Contr  Med.Pass  Sessions
+Low frequency      3.66    6/8         75.0    0.11      3.41–3.66      3.66      3.25       1.52        2.45      PASS  1,4,5,6,7,8
+
+Trusted frequency regions — X
+Band           Freq Hz  Support  Med.Freq  Med.Prom  Med.Contr  Band.Contr  Weight       Range Hz
+Low frequency     3.66    6/8        3.66      3.25       1.52        2.45    1.00  3.41–3.66
+
+Trusted frequency regions — Y
+Band           Freq Hz  Support  Med.Freq  Med.Prom  Med.Contr  Band.Contr  Weight       Range Hz
+Low frequency     3.17    8/8        3.17      8.20       6.22        7.51    1.00  2.92–3.41
+High frequency   13.16    4/8       13.16      1.64       0.89        0.88    0.70  12.92–13.40
+
+Trusted frequency regions — Z
+Band           Freq Hz  Support  Med.Freq  Med.Prom  Med.Contr  Band.Contr  Weight       Range Hz
+"""
+
+
+class ReportParsingTests(unittest.TestCase):
+    def test_parse_report_header_and_trusted_rows(self) -> None:
+        from family_analysis import parse_report
+
+        header, rows = parse_report(SAMPLE_REPORT)
+        self.assertEqual(header["odr_hz"], 250.0)
+        self.assertEqual(header["packets_per_session"], 8)
+        self.assertEqual(header["target_sessions"], 8)
+        self.assertEqual(header["packet_count"], 64)
+        self.assertAlmostEqual(header["duration_seconds"], 262.6)
+        self.assertNotIn("frequency_tolerance_hz", header)
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(rows[0]["axis"], "X")
+        self.assertEqual(rows[0]["band"], "Low frequency")
+        self.assertAlmostEqual(rows[0]["freq_hz"], 3.66)
+        self.assertEqual((rows[0]["support_n"], rows[0]["support_total"]),
+                         (6, 8))
+        self.assertAlmostEqual(rows[0]["range_max_hz"], 3.66)
+        self.assertEqual(rows[2]["axis"], "Y")
+        self.assertEqual(rows[2]["band"], "High frequency")
+        self.assertAlmostEqual(rows[2]["weight"], 0.70)
+
+    def test_load_report_builds_window_and_observations(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from family_analysis import load_report
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "20260831_143629_ODR250_run01.txt"
+            path.write_text(SAMPLE_REPORT, encoding="utf-8")
+            window, observations = load_report(path, 10, 0.40)
+        self.assertEqual(window.mode, "8x8")
+        self.assertEqual(window.capture, "20260831_143629_ODR250_run01")
+        self.assertEqual((window.packet_start, window.packet_end), (1, 64))
+        self.assertEqual([o.observation_id for o in observations],
+                         [10, 11, 12])
+        self.assertAlmostEqual(observations[0].support_fraction, 0.75)
+        self.assertAlmostEqual(observations[0].frequency_tolerance_hz, 0.40)
+        self.assertTrue(observations[0].frequency_std_hz != observations[0].frequency_std_hz)
+
+
 if __name__ == "__main__":
     unittest.main()
