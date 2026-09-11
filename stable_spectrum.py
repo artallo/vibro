@@ -570,6 +570,13 @@ def format_capture_report(result: CaptureResult) -> str:
         f"Duration: {result.duration_seconds:.1f} s   "
         f"Fs: {result.sampling_rate_hz:.2f} Hz",
         f"Bins tested: {result.bins_tested} (3 axes)",
+        (
+            f"Support windows: {result.window_count} x "
+            f"{result.window_packets} packets "
+            f"(about {result.expected_support:.1f} expected by chance)"
+            if result.window_count
+            else "Support windows: none, record too short to split"
+        ),
         f"Significance threshold: z >= {result.z_threshold:.2f}",
         "Detection limit (prominence needed to be significant):",
     ]
@@ -754,11 +761,16 @@ def save_overview_figure(
             f"{max(result.detection_limit_db.values()):.2f} dB "
             "would have been needed"
         )
+    support_note = (
+        f"support counted over {result.window_count} independent windows "
+        f"of {result.window_packets} packets"
+        if result.window_count
+        else "too short to split into independent windows, no support counted"
+    )
     figure.suptitle(
         f"Dominant frequencies: {result.capture}\n"
         f"{result.packet_count} packets, {result.duration_seconds:.0f} s; "
-        f"support counted over {result.window_count} independent windows "
-        f"of {result.window_packets} packets\n"
+        f"{support_note}\n"
         f"{verdict}",
         fontsize=11,
     )
