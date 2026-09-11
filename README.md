@@ -1,1 +1,74 @@
-"# vibro" 
+# vibro
+
+Weak-vibration analysis of building structures with an ADXL355
+accelerometer (ESP32 firmware, binary `VIB2` packets over UART, Python
+analysis).
+
+## Measurement and replay
+
+```bash
+# physical capture (serial), saves .txt report, figures and raw .npz
+python main.py --odr 250 --packets-per-session 8 --min-recommended-sessions 32
+
+# offline multi-scale replay of a raw capture (no serial access)
+python main.py --replay "results/<raw_file>.npz" --virtual-mode all
+```
+
+Replay writes `replay_results/<raw_stem>/` with one directory per virtual
+layout (`4x4 ... 4x64`, `8x4 ... 8x32`) and per virtual run, plus
+`replay_runs.csv`, `replay_regions.csv` and `replay_metadata.txt`.
+
+On Windows, when stdout is redirected to a file, run with `PYTHONUTF8=1`
+(the report contains `σ`).
+
+## Frequency-family analysis (research layer)
+
+`family_analysis.py` reads one or more replay result directories and groups
+trusted regions from all temporal windows into recurring frequency
+families. It is fully data-driven (no hard-coded building frequencies), it
+does not modify the detector and it does not add a trusted gate.
+
+```bash
+# one capture
+python family_analysis.py replay_results/<raw_stem>
+
+# several independent physical captures (same ODR)
+python family_analysis.py replay_results/<capture_1> replay_results/<capture_2> \
+    --output family_results/<name>
+
+python -m unittest test_family_analysis
+```
+
+Method:
+
+* observation = one trusted region in one virtual run;
+* families are built per `(axis, band)`;
+* distance `d = 0.5 * (|ΔFreq| + |ΔMed.Freq|)`, where `Freq` is the
+  session-recurrence centre and `Med.Freq` the Median PSD maximum;
+* two observations are incompatible when their session-peak ranges are
+  separated by more than 1.5 Welch bins, or when `|ΔFreq|` or
+  `|ΔMed.Freq|` exceeds `--max-family-span-hz` (default 2 × link tolerance);
+* average-linkage clustering cut at `--link-tolerance-hz` (default: the
+  effective ODR tolerance recorded by replay, 0.40 Hz at ODR 250);
+  `--linkage complete` is stricter;
+* one representative observation per family per virtual run (highest
+  support fraction, then Median prominence, then closest `Freq`).
+
+Outputs in `family_results/<name>/`:
+
+| File | Content |
+| --- | --- |
+| `family_observations.csv` | every trusted region with its family id and representative flag |
+| `family_summary.csv` | per family: Freq / Med.Freq centre and spread, range envelope, capture recurrence, median support / prominence / contrast, occupancy per layout |
+| `family_scale_profile.csv` | per family × layout: windows, occupancy, centres, spreads |
+| `family_capture_matrix.csv` | per family × physical capture: presence and per-layout occupancy |
+| `family_pair_comparison.csv` | controlled same-packet pairs `4x8/8x4`, `4x16/8x8`, `4x32/8x16`, `4x64/8x32`: both / only-4 / only-8 counts and mean shifts of Freq, Med.Freq, support, prominence, contrast |
+| `family_metadata.txt` | parameters, method, independence notes |
+| `figure_family_time_<capture>.png` | frequency × time matrix per layout and axis |
+| `figure_family_occupancy.png` | family × layout occupancy heat map |
+| `figure_family_freq_vs_med.png` | Freq vs Med.Freq per observation |
+
+Statistical caveat: nested layouts of one capture share packets and are not
+independent samples. Occupancy is therefore reported separately per layout,
+capture recurrence counts independent raw captures, and cross-scale
+consistency is a separate profile rather than a pooled count.
