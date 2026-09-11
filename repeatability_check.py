@@ -69,8 +69,11 @@ def analyse_subset(
 def agreement(first: set, second: set) -> float:
     """Share of the larger answer that the other answer also contains.
 
-    Two empty answers agree completely: "nothing rose above the noise" is
-    a result, and repeating it is exactly what repeatability means.
+    Two empty answers score 1.0, but that agreement is trivial: repeating
+    "nothing rose above the noise" costs the estimator nothing. Such
+    comparisons are counted separately from the ones that carry a
+    frequency, because averaging them together hides how often the
+    non-empty answers actually match.
     """
     if not first and not second:
         return 1.0
@@ -183,22 +186,35 @@ def print_table(rows: list[dict]) -> None:
             f"{row['split']:<13}{baseline:>9}{row['agreement']:>8.2f}   "
             f"{row['first']} | {row['second']}"
         )
-    stable = [row["agreement"] for row in rows]
+    empty = [
+        row for row in rows
+        if row["first"] == "none" and row["second"] == "none"
+    ]
+    substantive = [row for row in rows if row not in empty]
     baselines = [
         row["baseline_agreement"] for row in rows
         if row["baseline_agreement"] is not None
     ]
     print("-" * (len(header) + 24))
-    if baselines:
+    print(
+        f"{len(rows)} comparisons: {len(empty)} where both halves found "
+        f"nothing (agreement is trivial), {len(substantive)} carrying a "
+        "frequency"
+    )
+    if substantive:
         print(
-            f"mean agreement between independent halves: "
-            f"existing detector {np.mean(baselines):.2f}, "
-            f"stable spectrum {np.mean(stable):.2f}"
+            "agreement where at least one half found something: "
+            f"{np.mean([row['agreement'] for row in substantive]):.2f}"
         )
     else:
         print(
-            f"mean agreement between independent halves: "
-            f"{np.mean(stable):.2f}"
+            "no comparison produced a frequency, so repeatability of a "
+            "detection is untested here"
+        )
+    if baselines:
+        print(
+            f"existing detector, all comparisons substantive because it "
+            f"never returns an empty answer: {np.mean(baselines):.2f}"
         )
 
 

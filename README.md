@@ -174,6 +174,17 @@ see the same excitation, and a disagreement there is the estimator's own
 instability. With `--replay-root` the same comparison runs for the existing
 trusted-region detector as a baseline.
 
-On the six evening captures in `real_results/`, mean agreement between
-independent halves is 0.20 for the existing detector and 0.83 for the stable
-spectrum.
+Comparisons where both halves found nothing are counted separately, because
+repeating an empty answer costs the estimator nothing and averaging those in
+inflates the score.
+
+On the six evening captures in `real_results/`, 9 of 12 comparisons have both
+halves empty. Of the 3 that carry a frequency, agreement is 0.33: one match
+(13.65 Hz on the interleaved split), one genuine intermittency (the same
+structure confined to the first half of that record), and one false peak at
+32 packets, below the calibrated length. The existing detector scores 0.20,
+but every one of its comparisons is substantive because it never returns an
+empty answer, so the two numbers are not directly comparable.
+
+These captures cannot test repeatability of a detection any further: they
+contain almost nothing to detect.
