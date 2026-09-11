@@ -1004,16 +1004,16 @@ def save_time_figure(
             labels.append(f"{family.family_id} ~{center:.2f} Hz")
     figure.legend(
         handles, labels,
-        loc="lower center",
+        loc="upper center",
         ncol=min(6, max(1, len(labels))),
         fontsize=8,
-        bbox_to_anchor=(0.5, -0.01),
+        bbox_to_anchor=(0.5, 0.0),
     )
     figure.suptitle(
         f"Frequency families over time: {capture}\n"
         "solid = Med.Freq, dotted = Freq, shaded = session-peak range",
     )
-    figure.tight_layout(rect=(0, 0.03, 1, 0.97))
+    figure.tight_layout(rect=(0, 0.0, 1, 0.97))
     figure.savefig(path, dpi=110, bbox_inches="tight")
     plt.close(figure)
 
@@ -1077,7 +1077,7 @@ def save_freq_vs_med_figure(
     import matplotlib.pyplot as plt
 
     axes_names = ("X", "Y", "Z")
-    figure, panels = plt.subplots(1, 3, figsize=(16, 5))
+    figure, panels = plt.subplots(1, 3, figsize=(22, 6))
     for panel, axis_name in zip(panels, axes_names):
         low = math.inf
         high = -math.inf
@@ -1100,7 +1100,10 @@ def save_freq_vs_med_figure(
                 [low - 0.2, high + 0.2], [low - 0.2, high + 0.2],
                 color="0.5", lw=0.8, ls="--",
             )
-            panel.legend(fontsize=7, loc="upper left")
+            panel.legend(
+                fontsize=6, loc="upper left", bbox_to_anchor=(1.01, 1.0),
+                borderaxespad=0.0, ncol=1 if len(panel.collections) <= 24 else 2,
+            )
         panel.set_title(f"Axis {axis_name}: Freq vs Med.Freq")
         panel.set_xlabel("Freq (session recurrence centre), Hz")
         panel.set_ylabel("Med.Freq (Median PSD maximum), Hz")
@@ -1172,6 +1175,8 @@ def write_metadata(
             f"  {linkage_method}-linkage clustering cut at link_tolerance_hz\n"
             "  one representative observation per family per virtual run\n"
             "    (max support fraction, then max Med.Prom, then closest Freq)\n"
+            "\nFamily ids (F-<axis>-<nn>) are ordered by axis and Freq centre\n"
+            "within this run only; they change when inputs change.\n"
             "\nIndependence notes:\n"
             "  nested layouts of one capture share packets and are NOT\n"
             "  independent samples; occupancy is reported per layout,\n"
