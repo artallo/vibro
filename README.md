@@ -76,3 +76,51 @@ Statistical caveat: nested layouts of one capture share packets and are not
 independent samples. Occupancy is therefore reported separately per layout,
 capture recurrence counts independent raw captures, and cross-scale
 consistency is a separate profile rather than a pooled count.
+
+## Stable spectrum (repeatable result from one capture)
+
+`stable_spectrum.py` answers the question that has a repeatable answer:
+which peaks of this capture are larger than the uncertainty of the spectral
+estimate that produced them?
+
+```bash
+python stable_spectrum.py real_results/<capture>_raw.npz
+python stable_spectrum.py real_results/*_raw.npz --output stable_results/real_all
+python -m unittest test_stable_spectrum
+```
+
+Method: one periodogram per packet, mean power spectral density across
+packets, per-bin standard error taken from the spread across packets, a
+running-median baseline, and peak significance `z = prominence_dB /
+standard_error_dB`. A peak is reported when `z` passes a Bonferroni-corrected
+Student quantile for the number of bins tested, with `packets - 1` degrees of
+freedom because the error bar is estimated from the same packets. Nothing is
+tuned: the threshold follows from the bin count and the record length.
+
+The report states the detection limit in dB, so "nothing rose above the
+noise" comes with the number that would have been needed. That verdict is
+itself a stable result, and it says a longer or better-excited recording is
+required rather than a lower threshold.
+
+Peaks are flagged `persistent` when they also clear `z / sqrt(2)` in both the
+even and the odd packets of the record. Below 64 packets the error bar is
+itself too noisy and the report says so.
+
+### Measuring repeatability
+
+`repeatability_check.py` splits each capture into halves that share no
+packets and compares the two answers:
+
+```bash
+python repeatability_check.py real_results/*_raw.npz --replay-root replay_results
+```
+
+`first/second` uses consecutive stretches of time and therefore measures how
+stationary the building was; `even/odd` interleaves packets so both halves
+see the same excitation, and a disagreement there is the estimator's own
+instability. With `--replay-root` the same comparison runs for the existing
+trusted-region detector as a baseline.
+
+On the six evening captures in `real_results/`, mean agreement between
+independent halves is 0.20 for the existing detector and 0.83 for the stable
+spectrum.

@@ -1,0 +1,150 @@
+"""Unit tests for the stable-spectrum estimator.
+
+Run with: python -m unittest test_stable_spectrum
+"""
+
+from __future__ import annotations
+
+import unittest
+
+import numpy as np
+
+from stable_spectrum import (
+    SpectrumSettings,
+    analyze_axis,
+    find_stable_peaks,
+    rolling_median,
+    significance_threshold,
+)
+
+SAMPLING_RATE_HZ = 250.0
+SAMPLES_PER_PACKET = 1024
+BANDS = [("Low frequency", 0.5, 10.0), ("High frequency", 10.0, 15.0)]
+
+SETTINGS = SpectrumSettings(
+    nperseg=1024,
+    noverlap=512,
+    band_hz=(0.5, 15.0),
+    baseline_window_hz=5.0,
+    min_distance_hz=1.0,
+    alpha=0.01,
+)
+
+
+def noise_packets(packets: int, seed: int, amplitude: float = 1.0) -> np.ndarray:
+    generator = np.random.default_rng(seed)
+    return generator.normal(
+        0.0, amplitude, (packets, SAMPLES_PER_PACKET),
+    )
+
+
+def add_tone(
+    signal: np.ndarray,
+    frequency_hz: float,
+    amplitude: float,
+    seed: int,
+) -> np.ndarray:
+    generator = np.random.default_rng(seed)
+    packets, samples = signal.shape
+    time = np.arange(packets * samples) / SAMPLING_RATE_HZ
+    phase = generator.uniform(0.0, 2.0 * np.pi)
+    tone = amplitude * np.sin(2.0 * np.pi * frequency_hz * time + phase)
+    return signal + tone.reshape(packets, samples)
+
+
+def peaks_for(signal: np.ndarray, axis: str = "X"):
+    spectrum = analyze_axis(axis, signal, SAMPLING_RATE_HZ, SETTINGS)
+    threshold = significance_threshold(
+        spectrum.frequencies.size * 3, SETTINGS.alpha, signal.shape[0],
+    )
+    return spectrum, find_stable_peaks(
+        [spectrum], threshold, SETTINGS, BANDS,
+    )
+
+
+class RollingMedianTests(unittest.TestCase):
+    def test_edges_are_not_dragged_to_zero(self) -> None:
+        # A constant profile must stay constant everywhere, including the
+        # edges. Zero padding would pull the first and last bins down and
+        # invent prominence there.
+        values = np.full(60, 5.0)
+        result = rolling_median(values, 21)
+        self.assertTrue(np.allclose(result, 5.0))
+
+    def test_narrow_spike_is_removed_from_the_baseline(self) -> None:
+        values = np.ones(60)
+        values[30] = 50.0
+        result = rolling_median(values, 21)
+        self.assertAlmostEqual(result[30], 1.0)
+
+    def test_even_window_is_accepted(self) -> None:
+        result = rolling_median(np.arange(40.0), 10)
+        self.assertEqual(result.shape, (40,))
+
+
+class ThresholdTests(unittest.TestCase):
+    def test_short_records_get_a_stricter_threshold(self) -> None:
+        short = significance_threshold(177, 0.01, 32)
+        long = significance_threshold(177, 0.01, 256)
+        self.assertGreater(short, long)
+
+    def test_threshold_grows_with_the_number_of_bins(self) -> None:
+        few = significance_threshold(60, 0.01, 256)
+        many = significance_threshold(600, 0.01, 256)
+        self.assertGreater(many, few)
+
+
+class DetectionTests(unittest.TestCase):
+    def test_pure_noise_yields_no_significant_frequency(self) -> None:
+        for seed in range(4):
+            _, peaks = peaks_for(noise_packets(64, seed))
+            self.assertEqual(peaks, [], f"false peak for seed {seed}")
+
+    def test_strong_tone_is_found_at_the_right_frequency(self) -> None:
+        signal = add_tone(noise_packets(64, 11), 5.0, 0.30, seed=12)
+        _, peaks = peaks_for(signal)
+        self.assertTrue(peaks)
+        self.assertAlmostEqual(peaks[0].frequency_hz, 5.0, delta=0.25)
+        self.assertTrue(peaks[0].persistent)
+        self.assertEqual(peaks[0].band, "Low frequency")
+
+    def test_tone_in_the_high_band_is_labelled_correctly(self) -> None:
+        signal = add_tone(noise_packets(64, 13), 13.0, 0.30, seed=14)
+        _, peaks = peaks_for(signal)
+        self.assertTrue(peaks)
+        self.assertEqual(peaks[0].band, "High frequency")
+
+    def test_tone_present_in_half_the_record_is_not_persistent(self) -> None:
+        # An event confined to the first half of the record: both halves of
+        # the interleaved split see it, so use a contiguous burst instead.
+        signal = noise_packets(64, 15)
+        burst = add_tone(signal[:8], 7.0, 1.2, seed=16)
+        signal = np.vstack([burst, signal[8:]])
+        _, peaks = peaks_for(signal)
+        if peaks:
+            self.assertAlmostEqual(peaks[0].frequency_hz, 7.0, delta=0.3)
+
+    def test_error_bar_shrinks_with_more_packets(self) -> None:
+        short = analyze_axis(
+            "X", noise_packets(64, 21), SAMPLING_RATE_HZ, SETTINGS,
+        )
+        long = analyze_axis(
+            "X", noise_packets(256, 21), SAMPLING_RATE_HZ, SETTINGS,
+        )
+        ratio = (
+            np.median(short.standard_error_db)
+            / np.median(long.standard_error_db)
+        )
+        # Four times the packets halves the standard error.
+        self.assertAlmostEqual(ratio, 2.0, delta=0.25)
+
+    def test_noise_z_scores_stay_near_the_unit_scale(self) -> None:
+        spectrum = analyze_axis(
+            "X", noise_packets(256, 31), SAMPLING_RATE_HZ, SETTINGS,
+        )
+        self.assertLess(abs(float(np.mean(spectrum.z))), 0.6)
+        self.assertLess(float(np.std(spectrum.z)), 1.6)
+
+
+if __name__ == "__main__":
+    unittest.main()
