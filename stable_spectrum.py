@@ -43,10 +43,24 @@ What makes the output repeatable is that "nothing rises above the noise"
 is itself a stable, reportable answer, and that the detection limit is
 stated explicitly instead of being hidden inside a fixed dB threshold.
 
+Spectral resolution
+-------------------
+Each capture is analysed at several segment lengths (``--nperseg``,
+default 1024, 2048 and 4096 samples), each written to its own
+``nperseg_<n>/`` directory. A segment of one packet gives one periodogram
+per packet, as above. A longer segment is cut from the packets joined into
+one continuous series, with 50% overlap; the error bar then comes from the
+spread across those segments, corrected for the overlap. A finer bin makes
+a narrow line (a lightly damped mode) up to ``4096 / 1024`` times taller
+against the noise in its bin, at the price of fewer segments and a larger
+error bar. A structure wider than the bin gains nothing. Comparing the
+three directories shows which kind a peak is.
+
 Usage::
 
     python stable_spectrum.py real_results/<capture>_raw.npz
     python stable_spectrum.py real_results/*_raw.npz --output stable_results/all
+    python stable_spectrum.py real_results/<capture>_raw.npz --nperseg 1024 4096
 """
 
 from __future__ import annotations
@@ -55,19 +69,24 @@ import argparse
 import csv
 import sys
 import tomllib
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-from scipy.signal import find_peaks, welch
+from scipy.signal import find_peaks, get_window, welch
 from scipy.stats import t
 
 STABLE_RESULTS_DIRECTORY = Path("stable_results")
 CONFIG_PATH = Path(__file__).with_name("config.toml")
 
 DEFAULT_NPERSEG = 1024
+# Segment lengths analysed side by side, each into its own directory.
+DEFAULT_NPERSEG_SWEEP = (1024, 2048, 4096)
+# A spectral estimate needs at least this many segments to have an error
+# bar at all; below it the analysis at that resolution is skipped.
+MINIMUM_SEGMENTS = 4
 DEFAULT_NOVERLAP = 512
 DEFAULT_BAND_HZ = (0.5, 15.0)
 DEFAULT_BASELINE_WINDOW_HZ = 5.0
@@ -113,6 +132,13 @@ class AxisSpectrum:
     z: np.ndarray
     half_z: tuple[np.ndarray, np.ndarray]
     packet_band_power: np.ndarray
+    # Number of periodograms averaged, and the number of independent ones
+    # they are worth once the overlap between segments is accounted for.
+    row_count: int = 0
+    effective_rows: float = 0.0
+    # z of a half-record relative to z of the full record, for a peak of
+    # unchanged height: 1/sqrt(2) when each half holds half the rows.
+    half_scale: float = float(1.0 / np.sqrt(2.0))
 
 
 @dataclass(frozen=True)
@@ -143,10 +169,26 @@ class QualityReport:
     loud_packets: dict[str, int]
     quiet_axes: list[str]
     transients: dict[str, list[tuple[int, float]]]
+    joint_steps: dict[str, list[tuple[int, float]]] = field(
+        default_factory=dict,
+    )
 
     @property
     def warnings(self) -> list[str]:
         messages = []
+        for axis, items in self.joint_steps.items():
+            if not items:
+                continue
+            shown = ", ".join(
+                f"{packet}/{packet + 1} ({sigma:.0f} sigma)"
+                for packet, sigma in items[:5]
+            )
+            more = f" and {len(items) - 5} more" if len(items) > 5 else ""
+            messages.append(
+                f"{axis}: step at the join of packets {shown}{more} — lost "
+                "samples or a knock right at the join; segments longer than "
+                "one packet straddle it"
+            )
         for axis, items in self.transients.items():
             if not items:
                 continue
@@ -208,6 +250,15 @@ class CaptureResult:
     window_count: int
     window_packets: int
     expected_support: float
+    nperseg: int = DEFAULT_NPERSEG
+    bin_width_hz: float = 0.0
+    row_count: int = 0
+    effective_rows: float = 0.0
+    window_rows: int = 0
+
+    @property
+    def segmented(self) -> bool:
+        return self.nperseg > self.samples_per_packet
 
 
 # ==========================================================
@@ -311,13 +362,74 @@ def packet_periodograms(
     return frequencies, psd
 
 
+def overlap_variance_factor(nperseg: int, hop: int) -> float:
+    """Variance of a mean of overlapping periodograms, relative to disjoint ones.
+
+    Two Hann segments that overlap by half share part of their data, so
+    their periodograms are correlated by ``rho``. Averaging many of them
+    leaves ``1 + 2 * rho`` times the variance that the spread between
+    them suggests (neighbours only; at 50% overlap nothing further apart
+    overlaps). For Hann at 50% this is about 1.06.
+    """
+    window = get_window("hann", nperseg)
+    shared = float(np.sum(window[hop:] * window[:-hop])) if hop < nperseg else 0.0
+    rho = (shared / float(np.sum(window ** 2))) ** 2
+    return 1.0 + 2.0 * rho
+
+
+def segment_periodograms(
+    signal: np.ndarray,
+    sampling_rate_hz: float,
+    settings: SpectrumSettings,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """Periodograms at the configured resolution: (frequencies, rows, stride).
+
+    Up to one packet long, a segment stays inside its packet and there is
+    one row per packet. Longer segments are cut from the packets joined in
+    order, which assumes the packets follow each other without a gap, with
+    50% overlap. ``stride`` is how many rows apart two segments stop
+    overlapping: 1 for packets, 2 for half-overlapping segments. The input
+    must be contiguous packets of one record when it is longer than one
+    packet.
+    """
+    samples_per_packet = signal.shape[-1]
+    if settings.nperseg <= samples_per_packet:
+        frequencies, psd = packet_periodograms(
+            signal, sampling_rate_hz, settings,
+        )
+        return frequencies, psd, 1
+    nperseg = settings.nperseg
+    hop = nperseg // 2
+    series = np.asarray(signal).reshape(-1)
+    count = (series.size - nperseg) // hop + 1 if series.size >= nperseg else 0
+    if count < MINIMUM_SEGMENTS:
+        raise ValueError(
+            f"{series.size} samples give {count} segments of {nperseg}; "
+            f"at least {MINIMUM_SEGMENTS} are needed"
+        )
+    starts = hop * np.arange(count)
+    segments = series[starts[:, None] + np.arange(nperseg)[None, :]]
+    frequencies, psd = welch(
+        segments,
+        fs=sampling_rate_hz,
+        window="hann",
+        nperseg=nperseg,
+        noverlap=0,
+        scaling="density",
+        axis=-1,
+    )
+    return frequencies, psd, 2
+
+
 def analyze_axis(
     axis: str,
     signal: np.ndarray,
     sampling_rate_hz: float,
     settings: SpectrumSettings,
 ) -> AxisSpectrum:
-    frequencies, psd = packet_periodograms(signal, sampling_rate_hz, settings)
+    frequencies, psd, stride = segment_periodograms(
+        signal, sampling_rate_hz, settings,
+    )
     selected = (
         (frequencies >= settings.band_hz[0])
         & (frequencies <= settings.band_hz[1])
@@ -328,17 +440,33 @@ def analyze_axis(
     bin_width_hz = float(frequencies[1] - frequencies[0])
     baseline_window = max(3, int(round(settings.baseline_window_hz / bin_width_hz)))
 
-    def profile(rows: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    variance_factor = (
+        overlap_variance_factor(settings.nperseg, settings.nperseg // 2)
+        if stride > 1 else 1.0
+    )
+
+    def profile(
+        rows: np.ndarray,
+        factor: float,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         mean_psd = rows.mean(axis=0)
         baseline_psd = rolling_median(mean_psd, baseline_window)
         prominence_db = 10.0 * np.log10(mean_psd / baseline_psd)
-        standard_error = rows.std(axis=0, ddof=1) / np.sqrt(rows.shape[0])
+        standard_error = (
+            rows.std(axis=0, ddof=1) * np.sqrt(factor / rows.shape[0])
+        )
         standard_error_db = 10.0 * np.log10(1.0 + standard_error / mean_psd)
         return prominence_db, standard_error_db, baseline_psd
 
-    prominence_db, standard_error_db, baseline_psd = profile(psd)
-    low_half = profile(psd[0:packet_count:2])
-    high_half = profile(psd[1:packet_count:2])
+    prominence_db, standard_error_db, baseline_psd = profile(psd, variance_factor)
+    # The halves take every other non-overlapping segment, so they share no
+    # samples with each other and both span the whole record.
+    low_rows = psd[0:packet_count:2 * stride]
+    high_rows = psd[stride:packet_count:2 * stride]
+    low_half = profile(low_rows, 1.0)
+    high_half = profile(high_rows, 1.0)
+    effective_rows = packet_count / variance_factor
+    half_rows = min(low_rows.shape[0], high_rows.shape[0])
     return AxisSpectrum(
         axis=axis,
         frequencies=frequencies,
@@ -349,6 +477,9 @@ def analyze_axis(
         z=prominence_db / standard_error_db,
         half_z=(low_half[0] / low_half[1], high_half[0] / high_half[1]),
         packet_band_power=psd.sum(axis=1) * bin_width_hz,
+        row_count=int(packet_count),
+        effective_rows=float(effective_rows),
+        half_scale=float(np.sqrt(half_rows / effective_rows)),
     )
 
 
@@ -376,8 +507,8 @@ def find_stable_peaks(
     bands: list[tuple[str, float, float]],
 ) -> list[StablePeak]:
     peaks: list[StablePeak] = []
-    half_threshold = z_threshold / np.sqrt(2.0)
     for spectrum in spectra:
+        half_threshold = z_threshold * spectrum.half_scale
         bin_width_hz = float(
             spectrum.frequencies[1] - spectrum.frequencies[0]
         )
@@ -436,6 +567,33 @@ def transient_packets(
     ]
 
 
+def joint_steps(
+    signal: np.ndarray,
+    sigma_threshold: float = TRANSIENT_SIGMA,
+) -> list[tuple[int, float]]:
+    """Packet joins where the signal steps more than neighbouring samples do.
+
+    Returns (packet, sigma) pairs, 1-based, for the join between ``packet``
+    and ``packet + 1``. The step is compared with the sample-to-sample
+    differences inside packets. This catches a glitch or a lost stretch
+    when the signal carries slow content; in a record dominated by white
+    sensor noise a lost stretch leaves no step and cannot be seen here.
+    """
+    if signal.ndim != 2 or signal.shape[0] < 2 or signal.shape[1] < 2:
+        return []
+    inner = np.diff(signal, axis=1)
+    centre = float(np.median(inner))
+    robust_std = float(np.median(np.abs(inner - centre)) * 1.4826)
+    if robust_std <= 0.0:
+        return []
+    joins = signal[1:, 0] - signal[:-1, -1]
+    sigma = np.abs(joins - centre) / robust_std
+    return [
+        (int(index) + 1, float(sigma[index]))
+        for index in np.flatnonzero(sigma > sigma_threshold)
+    ]
+
+
 def assess_quality(
     spectra: list[AxisSpectrum],
     packet_fs_hz: np.ndarray,
@@ -473,12 +631,18 @@ def assess_quality(
         for axis, key in AXIS_KEYS
         if key in axes
     }
+    steps = {
+        axis: joint_steps(axes[key])
+        for axis, key in AXIS_KEYS
+        if key in axes
+    }
     return QualityReport(
         sampling_rate_spread_ppm=spread_ppm,
         axis_rms_g=axis_rms_g,
         loud_packets=loud_packets,
         quiet_axes=quiet_axes,
         transients=transients,
+        joint_steps=steps,
     )
 
 
@@ -574,17 +738,15 @@ def analyze_capture(
         for axis, key in AXIS_KEYS
     ]
     bins_tested = sum(spectrum.frequencies.size for spectrum in spectra)
+    effective_rows = spectra[0].effective_rows
     z_threshold = significance_threshold(
-        bins_tested, settings.alpha, packet_count,
+        bins_tested, settings.alpha, int(round(effective_rows)),
     )
     peaks = find_stable_peaks(spectra, z_threshold, settings, bands)
 
     windows = split_into_windows(packet_count)
     window_packets = int(windows[0].size) if windows else 0
-    support_threshold = (
-        float(t.isf(SUPPORT_ALPHA, max(1, window_packets - 1)))
-        if windows else 0.0
-    )
+    window_rows = 0
     if windows and peaks:
         window_spectra = {
             axis: [
@@ -595,6 +757,12 @@ def analyze_capture(
             ]
             for axis, key in AXIS_KEYS
         }
+        first_window = window_spectra["X"][0]
+        window_rows = first_window.row_count
+        support_threshold = float(t.isf(
+            SUPPORT_ALPHA,
+            max(1, int(round(first_window.effective_rows)) - 1),
+        ))
         peaks = [
             replace(
                 peak,
@@ -613,6 +781,19 @@ def analyze_capture(
         )
         for spectrum in spectra
     }
+    # The recording check looks at packets, whatever the segment length.
+    if settings.nperseg == samples_per_packet:
+        packet_spectra = spectra
+    else:
+        packet_settings = replace(
+            settings,
+            nperseg=samples_per_packet,
+            noverlap=samples_per_packet // 2,
+        )
+        packet_spectra = [
+            analyze_axis(axis, axes[key], sampling_rate_hz, packet_settings)
+            for axis, key in AXIS_KEYS
+        ]
     return CaptureResult(
         capture=raw_path.stem,
         source=raw_path,
@@ -631,10 +812,17 @@ def analyze_capture(
             z_threshold,
             settings.min_distance_hz / 2.0,
         ),
-        quality=assess_quality(spectra, packet_fs_hz, axes),
+        quality=assess_quality(packet_spectra, packet_fs_hz, axes),
         window_count=len(windows),
         window_packets=window_packets,
         expected_support=SUPPORT_ALPHA * len(windows),
+        nperseg=settings.nperseg,
+        bin_width_hz=float(
+            spectra[0].frequencies[1] - spectra[0].frequencies[0]
+        ),
+        row_count=spectra[0].row_count,
+        effective_rows=effective_rows,
+        window_rows=window_rows,
     )
 
 
@@ -644,7 +832,7 @@ def analyze_capture(
 
 
 PEAK_FIELDS = [
-    "capture", "packet_count", "duration_seconds", "sampling_rate_hz",
+    "capture", "nperseg", "bin_width_hz", "packet_count", "duration_seconds", "sampling_rate_hz",
     "z_threshold", "axis", "band", "frequency_hz", "prominence_db",
     "standard_error_db", "z", "half_z_low", "half_z_high", "persistent",
     "support_windows", "support_total",
@@ -655,6 +843,8 @@ def peak_rows(result: CaptureResult) -> list[dict[str, Any]]:
     return [
         {
             "capture": result.capture,
+            "nperseg": result.nperseg,
+            "bin_width_hz": round(result.bin_width_hz, 4),
             "packet_count": result.packet_count,
             "duration_seconds": round(result.duration_seconds, 1),
             "sampling_rate_hz": round(result.sampling_rate_hz, 3),
@@ -689,11 +879,22 @@ def format_capture_report(result: CaptureResult) -> str:
         f"Packets: {result.packet_count}   "
         f"Duration: {result.duration_seconds:.1f} s   "
         f"Fs: {result.sampling_rate_hz:.2f} Hz",
+        f"Resolution: nperseg {result.nperseg}, bin "
+        f"{result.bin_width_hz:.3f} Hz, {result.row_count} "
+        + (
+            "segments at 50% overlap across packet joins "
+            f"(worth {result.effective_rows:.0f} independent)"
+            if result.segmented else "periodograms, one per packet"
+        ),
         f"Bins tested: {result.bins_tested} (3 axes)",
         (
             f"Support windows: {result.window_count} x "
-            f"{result.window_packets} packets "
-            f"(about {result.expected_support:.1f} expected by chance)"
+            f"{result.window_packets} packets"
+            + (
+                f" = {result.window_rows} segments each"
+                if result.segmented and result.window_rows else ""
+            )
+            + f" (about {result.expected_support:.1f} expected by chance)"
             if result.window_count
             else "Support windows: none, record too short to split"
         ),
@@ -715,12 +916,18 @@ def format_capture_report(result: CaptureResult) -> str:
         lines.append(f"  ! {message}")
     if not result.quality.warnings:
         lines.append("  no anomaly found in the recording itself")
+    if result.segmented:
+        lines.append(
+            "  segments join consecutive packets; the file carries no packet "
+            "sequence numbers, so a silently lost packet cannot be ruled out"
+        )
     lines.append("")
     lines.append("Detection limit (prominence needed to be significant):")
-    if result.packet_count < MINIMUM_RELIABLE_PACKETS:
+    if result.effective_rows < MINIMUM_RELIABLE_PACKETS:
+        unit = "independent segments" if result.segmented else "packets"
         lines.insert(
             3,
-            f"WARNING: {result.packet_count} packets is below the "
+            f"WARNING: {result.effective_rows:.0f} {unit} is below the "
             f"{MINIMUM_RELIABLE_PACKETS} needed for a calibrated error bar; "
             "isolated peaks here may be false.",
         )
@@ -905,7 +1112,8 @@ def save_overview_figure(
         else "too short to split into independent windows, no support counted"
     )
     figure.suptitle(
-        f"Dominant frequencies: {result.capture}\n"
+        f"Dominant frequencies: {result.capture}  "
+        f"[nperseg {result.nperseg}, bin {result.bin_width_hz:.3f} Hz]\n"
         f"{result.packet_count} packets, {result.duration_seconds:.0f} s; "
         f"{support_note}\n"
         f"{verdict}",
@@ -965,7 +1173,8 @@ def save_figure(path: Path, result: CaptureResult) -> None:
         if result.peaks else "no frequency above the noise of the estimate"
     )
     figure.suptitle(
-        f"Stable spectrum: {result.capture}\n"
+        f"Stable spectrum: {result.capture}  "
+        f"[nperseg {result.nperseg}, bin {result.bin_width_hz:.3f} Hz]\n"
         f"{result.packet_count} packets, {result.duration_seconds:.0f} s — "
         f"{verdict}"
     )
@@ -988,15 +1197,17 @@ def resolve_output_directory(output: Path | None, raw_paths: list[Path]) -> Path
     return STABLE_RESULTS_DIRECTORY / f"multi_{stamp}"
 
 
-def run_stable_spectrum(
+def run_single_resolution(
     raw_paths: list[Path],
     output_directory: Path,
     settings: SpectrumSettings,
     probe_hz: list[float] | None = None,
-) -> Path:
+) -> list[CaptureResult]:
+    """Analyse every capture at one segment length into one directory."""
     bands = load_band_names()
     output_directory.mkdir(parents=True, exist_ok=True)
     all_rows: list[dict[str, Any]] = []
+    results: list[CaptureResult] = []
     report_parts = [
         "Stable spectrum report",
         f"Created: {datetime.now().isoformat(timespec='seconds')}",
@@ -1007,12 +1218,23 @@ def run_stable_spectrum(
         "",
         "A peak is reported when its prominence over the local baseline",
         "exceeds the standard error of the spectral estimate by the",
-        "corrected threshold. Half z is the same statistic on the even and",
-        "odd packets of the same record.",
+        "corrected threshold. Half z is the same statistic on two",
+        "interleaved halves of the same record that share no samples.",
         "",
     ]
     for raw_path in raw_paths:
-        result = analyze_capture(raw_path, settings, bands, probe_hz)
+        try:
+            result = analyze_capture(raw_path, settings, bands, probe_hz)
+        except ValueError as error:
+            message = (
+                f"{raw_path.stem}: skipped at nperseg {settings.nperseg}: "
+                f"{error}"
+            )
+            print(message)
+            report_parts.append("=" * 72)
+            report_parts.append(message + "\n")
+            continue
+        results.append(result)
         all_rows.extend(peak_rows(result))
         report_parts.append("=" * 72)
         report_parts.append(format_capture_report(result))
@@ -1024,21 +1246,171 @@ def run_stable_spectrum(
             output_directory / f"figure_dominant_{result.capture}.png",
             result,
         )
-        verdict = (
-            ", ".join(
-                f"{peak.axis} {peak.frequency_hz:.2f} Hz (z={peak.z:.1f})"
-                for peak in result.peaks
-            )
-            if result.peaks else "nothing above the noise"
-        )
         print(
-            f"{result.capture}: {result.packet_count} packets, "
-            f"z>={result.z_threshold:.2f} -> {verdict}"
+            f"{result.capture} [nperseg {result.nperseg}]: "
+            f"{result.row_count} rows, z>={result.z_threshold:.2f} -> "
+            f"{peak_summary(result)}"
         )
     write_csv_rows(output_directory / "stable_frequencies.csv", all_rows)
     (output_directory / "stable_report.txt").write_text(
         "\n".join(report_parts), encoding="utf-8", newline="\n",
     )
+    return results
+
+
+def peak_summary(result: CaptureResult) -> str:
+    if not result.peaks:
+        return "nothing above the noise"
+    return ", ".join(
+        f"{peak.axis} {peak.frequency_hz:.2f} Hz (z={peak.z:.1f})"
+        for peak in result.peaks
+    )
+
+
+def resolution_directory_name(nperseg: int) -> str:
+    return f"nperseg_{nperseg}"
+
+
+def format_comparison(
+    results_by_nperseg: dict[int, list[CaptureResult]],
+) -> str:
+    """One table per capture: what each resolution found."""
+    captures: dict[str, dict[int, CaptureResult]] = {}
+    for nperseg, results in results_by_nperseg.items():
+        for result in results:
+            captures.setdefault(result.capture, {})[nperseg] = result
+    lines = [
+        "Resolution comparison",
+        f"Created: {datetime.now().isoformat(timespec='seconds')}",
+        "",
+        "A narrow line (a lightly damped mode) grows taller as the bin",
+        "narrows, until the bin is narrower than the line. A structure wider",
+        "than the bin keeps its height, while the error bar grows because",
+        "fewer segments are averaged. Detection limits are in dB of",
+        "prominence at that resolution.",
+        "",
+    ]
+    for capture, by_nperseg in captures.items():
+        lines.append("=" * 72)
+        lines.append(f"Capture: {capture}")
+        lines.append(
+            "nperseg   bin Hz  segments  z thr   limit X/Y/Z dB     "
+            "significant frequencies"
+        )
+        for nperseg in sorted(by_nperseg):
+            result = by_nperseg[nperseg]
+            limits = "/".join(
+                f"{result.detection_limit_db[axis]:.2f}"
+                for axis, _ in AXIS_KEYS
+            )
+            lines.append(
+                f"{nperseg:7d}  {result.bin_width_hz:7.3f}  "
+                f"{result.row_count:8d}  {result.z_threshold:5.2f}   "
+                f"{limits:<17}  {peak_summary(result)}"
+            )
+        lines.append("")
+    return "\n".join(lines) + "\n"
+
+
+def save_comparison_figure(
+    path: Path,
+    by_nperseg: dict[int, CaptureResult],
+) -> None:
+    """Measured PSD of one capture at every resolution, overlaid per axis.
+
+    The density is in g/sqrt(Hz), which does not depend on the bin width,
+    so a broad structure and the sensor floor lie on top of each other at
+    every resolution; only narrow lines rise with finer bins.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    ordered = sorted(by_nperseg)
+    shades = plt.cm.viridis(np.linspace(0.0, 0.8, len(ordered)))
+    figure, panels = plt.subplots(3, 1, figsize=(13, 10), sharex=True)
+    for axis_index, (panel, (axis, _)) in enumerate(zip(panels, AXIS_KEYS)):
+        for shade, nperseg in zip(shades, ordered):
+            result = by_nperseg[nperseg]
+            spectrum = result.spectra[axis_index]
+            panel.plot(
+                spectrum.frequencies,
+                np.sqrt(spectrum.mean_psd) * 1.0e6,
+                color=shade, lw=1.1 if nperseg == ordered[0] else 0.9,
+                label=(
+                    f"nperseg {nperseg}, bin {result.bin_width_hz:.3f} Hz, "
+                    f"limit {result.detection_limit_db[axis]:.2f} dB"
+                ),
+            )
+            for peak in result.peaks:
+                if peak.axis != axis:
+                    continue
+                index = int(np.argmin(
+                    np.abs(spectrum.frequencies - peak.frequency_hz)
+                ))
+                panel.plot(
+                    [peak.frequency_hz],
+                    [np.sqrt(spectrum.mean_psd[index]) * 1.0e6],
+                    marker="x", color=shade, markersize=9,
+                    markeredgewidth=2, lw=0,
+                )
+        panel.set_ylabel(f"{axis} axis\nASD [µg/√Hz]")
+        panel.grid(True, alpha=0.3)
+        panel.legend(fontsize=8, loc="upper right", framealpha=0.9)
+    panels[-1].set_xlabel("Frequency, Hz")
+    capture = by_nperseg[ordered[0]].capture
+    figure.suptitle(
+        f"Resolution comparison: {capture}\n"
+        "crosses mark frequencies significant at that resolution; "
+        "only narrow lines rise with finer bins",
+        fontsize=11,
+    )
+    figure.tight_layout(rect=(0, 0, 1, 0.95))
+    figure.savefig(path, dpi=110)
+    plt.close(figure)
+
+
+def run_stable_spectrum(
+    raw_paths: list[Path],
+    output_directory: Path,
+    settings: SpectrumSettings,
+    probe_hz: list[float] | None = None,
+    nperseg_values: list[int] | None = None,
+) -> Path:
+    """Analyse captures, once per segment length.
+
+    Without ``nperseg_values`` the configured segment length is written
+    straight into ``output_directory``. With them, each length gets its own
+    ``nperseg_<n>/`` directory, and ``comparison.txt`` plus one overlay
+    figure per capture are written next to them.
+    """
+    if not nperseg_values:
+        run_single_resolution(raw_paths, output_directory, settings, probe_hz)
+        print(f"Saved stable spectrum analysis: {output_directory}")
+        return output_directory
+    output_directory.mkdir(parents=True, exist_ok=True)
+    results_by_nperseg: dict[int, list[CaptureResult]] = {}
+    for nperseg in dict.fromkeys(nperseg_values):
+        resolution_settings = replace(
+            settings, nperseg=int(nperseg), noverlap=int(nperseg) // 2,
+        )
+        results_by_nperseg[int(nperseg)] = run_single_resolution(
+            raw_paths,
+            output_directory / resolution_directory_name(int(nperseg)),
+            resolution_settings,
+            probe_hz,
+        )
+    (output_directory / "comparison.txt").write_text(
+        format_comparison(results_by_nperseg), encoding="utf-8", newline="\n",
+    )
+    per_capture: dict[str, dict[int, CaptureResult]] = {}
+    for nperseg, results in results_by_nperseg.items():
+        for result in results:
+            per_capture.setdefault(result.capture, {})[nperseg] = result
+    for capture, by_nperseg in per_capture.items():
+        save_comparison_figure(
+            output_directory / f"figure_compare_{capture}.png", by_nperseg,
+        )
     print(f"Saved stable spectrum analysis: {output_directory}")
     return output_directory
 
@@ -1059,6 +1431,12 @@ def parse_cli_arguments(arguments: list[str] | None = None) -> argparse.Namespac
         help="override the analysis band (default: from config.toml)",
     )
     parser.add_argument(
+        "--nperseg", type=int, nargs="+",
+        default=list(DEFAULT_NPERSEG_SWEEP), metavar="SAMPLES",
+        help="segment lengths to analyse, each into its own nperseg_<n> "
+             "directory (default: 1024 2048 4096)",
+    )
+    parser.add_argument(
         "--probe", type=float, nargs="+", default=None, metavar="HZ",
         help="report what sits at these frequencies on every axis, "
              "including the 95%% upper bound when nothing is detected",
@@ -1075,6 +1453,7 @@ def main(arguments: list[str] | None = None) -> int:
         resolve_output_directory(cli.output, cli.raw_paths),
         settings,
         cli.probe,
+        cli.nperseg,
     )
     return 0
 
