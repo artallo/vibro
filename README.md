@@ -25,8 +25,9 @@ The analysis figures of `main.py` are a different, older view of the same
 data and can be skipped: its peak lists use fixed dB thresholds, which is
 what made the picture change from run to run. Its raw `.npz` is what
 matters. The recording checks that used to require looking at those figures
-(sampling rate held, every axis alive, no knock dominating the record) are
-now printed by `stable_spectrum.py` under "Recording check".
+(sampling rate held, every axis alive, no knock dominating the record, no
+sharp transient inside a packet) are now printed by `stable_spectrum.py`
+under "Recording check".
 
 Replay and the family analysis below stay useful for a different question:
 when in time a structure was present, and whether it returns across separate

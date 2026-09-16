@@ -147,54 +147,86 @@ class DetectionTests(unittest.TestCase):
 
 
 class QualityTests(unittest.TestCase):
-    def spectra_for(self, signals: dict[str, np.ndarray]):
-        return [
+    def inputs_for(self, signals: dict[str, np.ndarray]):
+        spectra = [
             analyze_axis(axis, signal, SAMPLING_RATE_HZ, SETTINGS)
             for axis, signal in signals.items()
         ]
+        axes = {axis.lower(): signal for axis, signal in signals.items()}
+        return spectra, axes
 
     def test_clean_recording_raises_no_warning(self) -> None:
         from stable_spectrum import assess_quality
 
-        spectra = self.spectra_for({
+        spectra, axes = self.inputs_for({
             "X": noise_packets(64, 61),
             "Y": noise_packets(64, 62),
             "Z": noise_packets(64, 63),
         })
         rates = np.full(64, 250.0)
-        self.assertEqual(assess_quality(spectra, rates).warnings, [])
+        self.assertEqual(assess_quality(spectra, rates, axes).warnings, [])
 
-    def test_a_knock_is_reported(self) -> None:
+    def test_a_loud_stretch_is_reported(self) -> None:
         from stable_spectrum import assess_quality
 
         loud = noise_packets(64, 64)
         loud[10] *= 12.0
-        spectra = self.spectra_for({
+        spectra, axes = self.inputs_for({
             "X": loud,
             "Y": noise_packets(64, 65),
             "Z": noise_packets(64, 66),
         })
-        report = assess_quality(spectra, np.full(64, 250.0))
+        report = assess_quality(spectra, np.full(64, 250.0), axes)
         self.assertEqual(report.loud_packets["X"], 1)
         self.assertTrue(any("louder" in text for text in report.warnings))
+
+    def test_a_short_knock_is_reported_by_its_peak(self) -> None:
+        from stable_spectrum import assess_quality
+
+        # A sharp broadband impulse: huge in the time domain, but its energy
+        # sits mostly above 15 Hz, so the in-band power of the four-second
+        # packet barely moves and only the time-domain check can see it.
+        knocked = noise_packets(64, 71)
+        knocked[42, 400:406] += 30.0 * np.array([1, -1, 1, -1, 1, -1])
+        spectra, axes = self.inputs_for({
+            "X": noise_packets(64, 72),
+            "Y": noise_packets(64, 73),
+            "Z": knocked,
+        })
+        report = assess_quality(spectra, np.full(64, 250.0), axes)
+        self.assertEqual(report.loud_packets["Z"], 0)
+        self.assertEqual([packet for packet, _ in report.transients["Z"]], [43])
+        self.assertEqual(report.transients["X"], [])
+        self.assertTrue(any("transient" in text for text in report.warnings))
+
+    def test_start_up_zero_is_reported_as_packet_one(self) -> None:
+        from stable_spectrum import assess_quality
+
+        # Z axis at rest reads 1 g with sub-milli-g noise; a zero first sample
+        # from the sensor start-up is thousands of sigmas away from it.
+        started = noise_packets(64, 74, amplitude=0.001) + 1.0
+        started[0, 0] = 0.0
+        spectra, axes = self.inputs_for({"Z": started})
+        report = assess_quality(spectra, np.full(64, 250.0), axes)
+        self.assertEqual([packet for packet, _ in report.transients["Z"]], [1])
 
     def test_a_dead_axis_is_reported(self) -> None:
         from stable_spectrum import assess_quality
 
-        spectra = self.spectra_for({
+        spectra, axes = self.inputs_for({
             "X": noise_packets(64, 67),
             "Y": noise_packets(64, 68),
             "Z": noise_packets(64, 69, amplitude=0.001),
         })
-        report = assess_quality(spectra, np.full(64, 250.0))
+        report = assess_quality(spectra, np.full(64, 250.0), axes)
         self.assertEqual(report.quiet_axes, ["Z"])
 
     def test_drifting_sampling_rate_is_reported(self) -> None:
         from stable_spectrum import assess_quality
 
-        spectra = self.spectra_for({"X": noise_packets(64, 70)})
+        spectra, axes = self.inputs_for({"X": noise_packets(64, 70)})
         rates = np.linspace(249.0, 251.0, 64)
-        report = assess_quality(spectra, rates)
+        report = assess_quality(spectra, rates, axes)
         self.assertGreater(report.sampling_rate_spread_ppm, 1000.0)
         self.assertTrue(any("sampling rate" in text for text in report.warnings))
 

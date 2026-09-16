@@ -142,10 +142,23 @@ class QualityReport:
     axis_rms_g: dict[str, float]
     loud_packets: dict[str, int]
     quiet_axes: list[str]
+    transients: dict[str, list[tuple[int, float]]]
 
     @property
     def warnings(self) -> list[str]:
         messages = []
+        for axis, items in self.transients.items():
+            if not items:
+                continue
+            shown = ", ".join(
+                f"{packet} ({sigma:.0f} sigma)" for packet, sigma in items[:5]
+            )
+            more = f" and {len(items) - 5} more" if len(items) > 5 else ""
+            messages.append(
+                f"{axis}: sharp transient in packet(s) {shown}{more} — "
+                "a knock, or the sensor start-up when it is packet 1; it "
+                "widens the error bar of that stretch but is not a frequency"
+            )
         if self.sampling_rate_spread_ppm > 1000.0:
             messages.append(
                 f"sampling rate varies by {self.sampling_rate_spread_ppm:.0f} "
@@ -396,17 +409,44 @@ def find_stable_peaks(
 
 LOUD_PACKET_RATIO = 8.0
 QUIET_AXIS_RATIO = 0.05
+# Peak excursion, in robust sigmas of the whole axis, that marks a packet as
+# carrying a sharp transient. Gaussian noise over a quarter million samples
+# tops out near 5 sigma; a knock reaches 40 and the start-up sample thousands.
+TRANSIENT_SIGMA = 12.0
+
+
+def transient_packets(
+    signal: np.ndarray,
+    sigma_threshold: float = TRANSIENT_SIGMA,
+) -> list[tuple[int, float]]:
+    """1-based packet numbers whose peak excursion exceeds the threshold.
+
+    Band power misses these: a knock lasting half a second barely moves the
+    in-band power of a four-second packet, yet it is exactly what a reader
+    of the old time-series figure would have spotted.
+    """
+    median = float(np.median(signal))
+    robust_std = float(np.median(np.abs(signal - median)) * 1.4826)
+    if robust_std <= 0.0:
+        return []
+    peak_sigma = np.max(np.abs(signal - median), axis=1) / robust_std
+    return [
+        (int(index) + 1, float(peak_sigma[index]))
+        for index in np.flatnonzero(peak_sigma > sigma_threshold)
+    ]
 
 
 def assess_quality(
     spectra: list[AxisSpectrum],
     packet_fs_hz: np.ndarray,
+    axes: dict[str, np.ndarray],
 ) -> QualityReport:
     """Facts about the recording itself, not about its spectrum.
 
     Covers what the measurement figures of main.py would otherwise be
     consulted for: did the sampling rate hold, was every axis alive, did a
-    knock or a footstep dominate part of the record.
+    knock or a footstep dominate part of the record, did a sharp transient
+    hit a packet.
     """
     mean_rate = float(np.mean(packet_fs_hz))
     spread_ppm = (
@@ -428,11 +468,17 @@ def assess_quality(
         axis for axis, rms in axis_rms_g.items()
         if loudest > 0.0 and rms < QUIET_AXIS_RATIO * loudest
     ]
+    transients = {
+        axis: transient_packets(axes[key])
+        for axis, key in AXIS_KEYS
+        if key in axes
+    }
     return QualityReport(
         sampling_rate_spread_ppm=spread_ppm,
         axis_rms_g=axis_rms_g,
         loud_packets=loud_packets,
         quiet_axes=quiet_axes,
+        transients=transients,
     )
 
 
@@ -585,7 +631,7 @@ def analyze_capture(
             z_threshold,
             settings.min_distance_hz / 2.0,
         ),
-        quality=assess_quality(spectra, packet_fs_hz),
+        quality=assess_quality(spectra, packet_fs_hz, axes),
         window_count=len(windows),
         window_packets=window_packets,
         expected_support=SUPPORT_ALPHA * len(windows),
