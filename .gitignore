@@ -4,3 +4,4 @@ family_results/
 __pycache__/
 *.pyc
 real_results/
+stable_results/
