@@ -17,9 +17,25 @@ python stable_spectrum.py results/<capture>_raw.npz
 ```
 
 The first records about 17 minutes and writes `results/<capture>_raw.npz`.
-The second reads that file and writes `stable_results/<capture>/` with the
-report, the peak table and the figures. `figure_dominant_<capture>.png` is
-the one to show.
+The second reads that file and writes `stable_results/<capture>/` with one
+directory per spectral resolution (`nperseg_1024/`, `nperseg_2048/`,
+`nperseg_4096/`), each holding the report, the peak table and the figures.
+`figure_dominant_<capture>.png` is the one to show. `comparison.txt` and
+`figure_compare_<capture>.png` next to them put the three resolutions side
+by side.
+
+To see a whole folder of captures at once:
+
+```bash
+python overview_figure.py "C:/path/to/folder with npz"
+```
+
+It writes `stable_results/<folder>/figure_overview.png` with two panels.
+The top panel overlays the spectrum of every capture from 0 Hz to Nyquist
+and labels what stands out there, including machinery above the analysis
+band. The bottom panel pools all captures and shows the analysis band
+against the noise of the pooled estimate. The captures must share one ODR.
+`--band` changes the bottom panel's band and `--output` the file name.
 
 The analysis figures of `main.py` are a different, older view of the same
 data and can be skipped: its peak lists use fixed dB thresholds, which is
@@ -131,9 +147,49 @@ noise" comes with the number that would have been needed. That verdict is
 itself a stable result, and it says a longer or better-excited recording is
 required rather than a lower threshold.
 
-Peaks are flagged `persistent` when they also clear `z / sqrt(2)` in both the
-even and the odd packets of the record. Below 64 packets the error bar is
-itself too noisy and the report says so.
+Peaks are flagged `persistent` when they also clear the scaled threshold in
+both of two interleaved halves of the record that share no samples. Below
+64 packets (or 64 independent segments) the error bar is itself too noisy
+and the report says so.
+
+### Spectral resolution
+
+Every capture is analysed at three segment lengths by default:
+
+```bash
+python stable_spectrum.py results/<capture>_raw.npz                  # 1024 2048 4096
+python stable_spectrum.py results/<capture>_raw.npz --nperseg 1024 8192
+```
+
+| nperseg | Bin at ODR 250 | Segments from 256 packets |
+| --- | --- | --- |
+| 1024 | 0.25 Hz | 256, one per packet |
+| 2048 | 0.12 Hz | 255, 50% overlap |
+| 4096 | 0.06 Hz | 127, 50% overlap |
+
+Up to one packet, a segment stays inside its packet. Longer segments are
+cut from the packets joined into one continuous series. Their error bar is
+corrected for the overlap, and the two halves used for `persistent` take
+alternate non-overlapping segments. The support windows stay 16 packets
+long at every resolution, so support counts are comparable.
+
+What to look for when comparing the directories:
+
+* a narrow line, such as a lightly damped mode, gets taller with finer bins,
+  up to four times (6 dB) from 1024 to 4096, and its frequency is read to
+  0.06 Hz instead of 0.25 Hz;
+* a structure wider than the bin keeps its height, so finer bins only cost
+  it error bar;
+* the detection limit in dB rises with finer bins, from about 1.0 to 1.6 dB
+  on a 256-packet record, because fewer segments are averaged and four
+  times more bins are tested. A narrow line still wins because it grows
+  faster than the limit.
+
+Joining packets assumes none were lost. The recording check reports a step
+at a packet join, which catches glitches, but the raw file stores no packet
+sequence numbers, so a silently lost packet in a noise-dominated record
+cannot be ruled out. Measured on pure noise, the share of analyses with a
+false peak stays at the nominal 1% at every resolution.
 
 Two figures are written per capture. `figure_dominant_<capture>.png` is the
 one to show a reader: measured PSD per axis in g²/Hz, with everything the

@@ -307,5 +307,177 @@ class ProbeTests(unittest.TestCase):
         self.assertLess(probe.upper_bound_db, 2.0 * probe.detection_limit_db)
 
 
+
+def settings_at(nperseg: int) -> SpectrumSettings:
+    from dataclasses import replace
+
+    return replace(SETTINGS, nperseg=nperseg, noverlap=nperseg // 2)
+
+
+def resonance(packets: int, frequency_hz: float, damping: float, seed: int) -> np.ndarray:
+    """Continuous noise through a damped resonator: a broad bump."""
+    from scipy.signal import lfilter
+
+    generator = np.random.default_rng(seed)
+    drive = generator.normal(0.0, 1.0, packets * SAMPLES_PER_PACKET)
+    omega = 2.0 * np.pi * frequency_hz / SAMPLING_RATE_HZ
+    radius = np.exp(-damping * omega)
+    response = lfilter(
+        [1.0], [1.0, -2.0 * radius * np.cos(omega), radius * radius], drive,
+    )
+    return (response / response.std()).reshape(packets, SAMPLES_PER_PACKET)
+
+
+# A frequency that sits exactly on a bin at 1024 and at 4096 samples, so the
+# comparison is not blurred by where the line falls inside a bin.
+ON_BIN_HZ = 20 * SAMPLING_RATE_HZ / 1024
+
+
+class ResolutionTests(unittest.TestCase):
+    def test_overlap_factor_matches_hann_at_half_overlap(self) -> None:
+        from stable_spectrum import overlap_variance_factor
+
+        self.assertAlmostEqual(
+            overlap_variance_factor(4096, 2048), 1.056, delta=0.01,
+        )
+        self.assertEqual(overlap_variance_factor(1024, 1024), 1.0)
+
+    def test_segments_span_packet_joins(self) -> None:
+        spectrum = analyze_axis(
+            "X", noise_packets(64, 81), SAMPLING_RATE_HZ, settings_at(4096),
+        )
+        # 64 x 1024 samples cut into 4096 with a 2048 hop.
+        self.assertEqual(spectrum.row_count, 31)
+        self.assertAlmostEqual(
+            spectrum.frequencies[1] - spectrum.frequencies[0],
+            SAMPLING_RATE_HZ / 4096,
+        )
+        self.assertLess(spectrum.effective_rows, spectrum.row_count)
+
+    def test_per_packet_halves_keep_the_old_scale(self) -> None:
+        spectrum = analyze_axis(
+            "X", noise_packets(64, 82), SAMPLING_RATE_HZ, SETTINGS,
+        )
+        self.assertEqual(spectrum.row_count, 64)
+        self.assertAlmostEqual(spectrum.half_scale, 1.0 / np.sqrt(2.0))
+
+    def test_too_short_a_record_is_refused(self) -> None:
+        with self.assertRaises(ValueError):
+            analyze_axis(
+                "X", noise_packets(8, 83), SAMPLING_RATE_HZ, settings_at(4096),
+            )
+
+    def test_noise_stays_quiet_at_fine_resolution(self) -> None:
+        for nperseg in (2048, 4096):
+            settings = settings_at(nperseg)
+            for seed in range(4):
+                spectrum = analyze_axis(
+                    "X", noise_packets(128, 90 + seed), SAMPLING_RATE_HZ,
+                    settings,
+                )
+                threshold = significance_threshold(
+                    spectrum.frequencies.size * 3, SETTINGS.alpha,
+                    int(round(spectrum.effective_rows)),
+                )
+                peaks = find_stable_peaks([spectrum], threshold, settings, BANDS)
+                self.assertEqual(
+                    peaks, [], f"false peak at {nperseg}, seed {seed}",
+                )
+                self.assertLess(abs(float(np.mean(spectrum.z))), 0.6)
+                self.assertLess(float(np.std(spectrum.z)), 1.6)
+
+    def test_a_narrow_line_grows_with_finer_bins(self) -> None:
+        signal = add_tone(noise_packets(256, 84), ON_BIN_HZ, 0.08, seed=85)
+        coarse = analyze_axis("X", signal, SAMPLING_RATE_HZ, SETTINGS)
+        fine = analyze_axis("X", signal, SAMPLING_RATE_HZ, settings_at(4096))
+
+        def at_line(spectrum):
+            index = int(np.argmin(np.abs(spectrum.frequencies - ON_BIN_HZ)))
+            return float(spectrum.prominence_db[index]), float(spectrum.z[index])
+
+        coarse_db, _ = at_line(coarse)
+        fine_db, fine_z = at_line(fine)
+        self.assertGreater(fine_db - coarse_db, 3.0)
+        self.assertGreater(fine_z, 5.0)
+
+    def test_a_broad_bump_keeps_its_height(self) -> None:
+        signal = noise_packets(256, 86) + 2.0 * resonance(256, 6.0, 0.10, seed=87)
+        heights = []
+        for settings in (SETTINGS, settings_at(4096)):
+            spectrum = analyze_axis("X", signal, SAMPLING_RATE_HZ, settings)
+            window = np.abs(spectrum.frequencies - 6.0) <= 0.3
+            heights.append(float(np.max(spectrum.prominence_db[window])))
+        self.assertGreater(heights[0], 3.0)
+        self.assertLess(abs(heights[1] - heights[0]), 1.0)
+
+    def test_a_steady_line_is_persistent_at_fine_resolution(self) -> None:
+        settings = settings_at(4096)
+        signal = add_tone(noise_packets(256, 88), ON_BIN_HZ, 0.08, seed=89)
+        spectrum = analyze_axis("X", signal, SAMPLING_RATE_HZ, settings)
+        threshold = significance_threshold(
+            spectrum.frequencies.size * 3, SETTINGS.alpha,
+            int(round(spectrum.effective_rows)),
+        )
+        peaks = find_stable_peaks([spectrum], threshold, settings, BANDS)
+        self.assertTrue(peaks)
+        self.assertAlmostEqual(peaks[0].frequency_hz, ON_BIN_HZ, delta=0.07)
+        self.assertTrue(peaks[0].persistent)
+        self.assertLess(spectrum.half_scale, 0.6)
+
+
+class JointTests(unittest.TestCase):
+    def test_continuous_noise_has_no_step(self) -> None:
+        from stable_spectrum import joint_steps
+
+        self.assertEqual(joint_steps(noise_packets(64, 91)), [])
+
+    def test_a_step_between_packets_is_found(self) -> None:
+        from stable_spectrum import joint_steps
+
+        signal = noise_packets(64, 92)
+        signal[10:] += 40.0
+        self.assertEqual([packet for packet, _ in joint_steps(signal)], [10])
+
+
+class DriverTests(unittest.TestCase):
+    def test_each_resolution_gets_its_own_directory(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from stable_spectrum import load_settings, run_stable_spectrum
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw = root / "synthetic_raw.npz"
+            np.savez(
+                raw,
+                x=add_tone(noise_packets(64, 93), ON_BIN_HZ, 0.3, seed=94),
+                y=noise_packets(64, 95),
+                z=noise_packets(64, 96),
+                packet_fs_hz=np.full(64, SAMPLING_RATE_HZ),
+            )
+            output = root / "out"
+            run_stable_spectrum(
+                [raw], output, load_settings(0.01, None),
+                nperseg_values=[1024, 4096],
+            )
+            for nperseg in (1024, 4096):
+                folder = output / f"nperseg_{nperseg}"
+                self.assertTrue((folder / "stable_frequencies.csv").exists())
+                self.assertTrue(
+                    (folder / "figure_dominant_synthetic_raw.png").exists()
+                )
+                report = (folder / "stable_report.txt").read_text(
+                    encoding="utf-8",
+                )
+                self.assertIn(f"nperseg {nperseg}", report)
+            comparison = (output / "comparison.txt").read_text(encoding="utf-8")
+            self.assertIn("synthetic_raw", comparison)
+            self.assertIn("   1024", comparison)
+            self.assertIn("   4096", comparison)
+            self.assertTrue(
+                (output / "figure_compare_synthetic_raw.png").exists()
+            )
+
 if __name__ == "__main__":
     unittest.main()
