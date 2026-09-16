@@ -24,6 +24,19 @@ directory per spectral resolution (`nperseg_1024/`, `nperseg_2048/`,
 `figure_compare_<capture>.png` next to them put the three resolutions side
 by side.
 
+To see a whole folder of captures at once:
+
+```bash
+python overview_figure.py "C:/path/to/folder with npz"
+```
+
+It writes `stable_results/<folder>/figure_overview.png` with two panels.
+The top panel overlays the spectrum of every capture from 0 Hz to Nyquist
+and labels what stands out there, including machinery above the analysis
+band. The bottom panel pools all captures and shows the analysis band
+against the noise of the pooled estimate. The captures must share one ODR.
+`--band` changes the bottom panel's band and `--output` the file name.
+
 The analysis figures of `main.py` are a different, older view of the same
 data and can be skipped: its peak lists use fixed dB thresholds, which is
 what made the picture change from run to run. Its raw `.npz` is what
