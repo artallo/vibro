@@ -1,0 +1,12 @@
+# Line endings are fixed here so that editors on Windows, Obsidian among
+# them, cannot turn a saved file into a diff that changes nothing.
+# Text files are stored and checked out with LF; git no longer converts
+# anything on the way in or out, whatever core.autocrlf says locally.
+
+* text=auto eol=lf
+
+# Captures and figures must never be touched by any conversion.
+*.npz binary
+*.png binary
+*.jpg binary
+*.pdf binary
