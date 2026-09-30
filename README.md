@@ -152,6 +152,13 @@ both of two interleaved halves of the record that share no samples. Below
 64 packets (or 64 independent segments) the error bar is itself too noisy
 and the report says so.
 
+The spectrum is computed a little past both band edges, so a peak in the
+edge bin of the band is judged against its real neighbour; a significant
+structure just outside the band, or in the lowest bin the spectrum has, is
+reported under "Band edges". Packet 1 is left out of the spectra when it
+holds a sharp transient, normally the sensor start-up step from 0 to 1 g,
+which would otherwise fake a structure in the lowest bin.
+
 ### Spectral resolution
 
 Every capture is analysed at three segment lengths by default:

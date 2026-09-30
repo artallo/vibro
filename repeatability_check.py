@@ -38,6 +38,7 @@ from stable_spectrum import (
     AXIS_KEYS,
     find_stable_peaks,
     analyze_axis,
+    drop_startup_packet,
     load_band_names,
     load_settings,
     significance_threshold,
@@ -131,6 +132,7 @@ def check_capture(
     with np.load(raw_path, allow_pickle=False) as archive:
         axes = {key: np.asarray(archive[key]) for _, key in AXIS_KEYS}
         packet_fs_hz = np.asarray(archive["packet_fs_hz"])
+    axes, packet_fs_hz, _ = drop_startup_packet(axes, packet_fs_hz)
     sampling_rate_hz = float(np.mean(packet_fs_hz))
     packet_count = axes["x"].shape[0]
     splits = {
