@@ -617,5 +617,52 @@ def format_report(result) -> str:
 
     return format_capture_report(result)
 
+
+class PeakRefinementTests(unittest.TestCase):
+    STEP_HZ = SAMPLING_RATE_HZ / 1024
+
+    def peaks_of(self, frequency_hz: float, seed: int):
+        signal = add_tone(noise_packets(128, seed), frequency_hz, 0.3, seed=seed + 1)
+        _, peaks = peaks_for(signal)
+        self.assertTrue(peaks)
+        return peaks[0]
+
+    def test_a_tone_between_bins_is_placed_between_them(self) -> None:
+        # A quarter of a bin above a bin centre: the bin is off by 0.061 Hz.
+        true_hz = 20.25 * self.STEP_HZ
+        peak = self.peaks_of(true_hz, 131)
+        self.assertAlmostEqual(peak.bin_frequency_hz, 20 * self.STEP_HZ)
+        self.assertLess(abs(peak.frequency_hz - true_hz), 0.02)
+        self.assertLess(
+            abs(peak.frequency_hz - true_hz),
+            abs(peak.bin_frequency_hz - true_hz),
+        )
+
+    def test_a_tone_halfway_between_bins_gives_a_stable_answer(self) -> None:
+        # Halfway between two bins the maximum flips from one to the other
+        # with the noise; the parabola top must not.
+        true_hz = 20.5 * self.STEP_HZ
+        refined = [self.peaks_of(true_hz, 140 + 2 * seed).frequency_hz
+                   for seed in range(4)]
+        self.assertLess(max(abs(value - true_hz) for value in refined), 0.03)
+
+    def test_the_refinement_stays_within_half_a_bin(self) -> None:
+        from stable_spectrum import refine_peak
+
+        frequencies = np.arange(10) * self.STEP_HZ
+        mean_psd = np.ones(10)
+        mean_psd[4] = 2.0
+        mean_psd[5] = 1.999
+        refined_hz = refine_peak(frequencies, mean_psd, 4)
+        self.assertGreater(refined_hz, frequencies[4])
+        self.assertLessEqual(refined_hz, frequencies[4] + 0.5 * self.STEP_HZ)
+
+    def test_a_peak_without_two_neighbours_is_left_alone(self) -> None:
+        from stable_spectrum import refine_peak
+
+        frequencies = np.arange(5) * self.STEP_HZ
+        mean_psd = np.array([3.0, 2.0, 1.0, 1.0, 1.0])
+        self.assertEqual(refine_peak(frequencies, mean_psd, 0), 0.0)
+
 if __name__ == "__main__":
     unittest.main()

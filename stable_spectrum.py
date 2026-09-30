@@ -145,6 +145,7 @@ class AxisSpectrum:
     # is judged against its real neighbour instead of a wall.
     context_frequencies: np.ndarray | None = None
     context_z: np.ndarray | None = None
+    context_mean_psd: np.ndarray | None = None
     band_offset: int = 0
 
 
@@ -161,6 +162,9 @@ class StablePeak:
     band: str
     support_windows: int = 0
     support_total: int = 0
+    # frequency_hz is the top of the peak found between bins; this keeps the
+    # centre of the bin that held the maximum.
+    bin_frequency_hz: float = 0.0
 
     @property
     def support_fraction(self) -> float:
@@ -507,6 +511,7 @@ def analyze_axis(
         half_scale=float(np.sqrt(half_rows / effective_rows)),
         context_frequencies=context_frequencies,
         context_z=context_z,
+        context_mean_psd=psd.mean(axis=0),
         band_offset=band_offset,
     )
 
@@ -526,6 +531,35 @@ def significance_threshold(
     """
     degrees_of_freedom = max(1, packet_count - 1)
     return float(t.isf(alpha / max(1, bins_tested), degrees_of_freedom))
+
+
+def refine_peak(
+    frequencies: np.ndarray,
+    mean_psd: np.ndarray,
+    index: int,
+) -> float:
+    """Frequency of a peak between bins.
+
+    A parabola through the log PSD of the peak bin and its two neighbours
+    puts the top of a Hann-windowed peak to a small fraction of a bin.
+    The reported bin centre can be off by up to half a bin, 0.12 Hz at
+    nperseg 1024, and a line lying between two bins flips from one to the
+    other between runs; the parabola top does neither. The shift is kept
+    within half a bin, and a peak without two neighbours is left as it is.
+    """
+    frequency = float(frequencies[index])
+    if index <= 0 or index >= mean_psd.size - 1:
+        return frequency
+    tiny = np.finfo(float).tiny
+    left, centre, right = 10.0 * np.log10(
+        np.maximum(mean_psd[index - 1:index + 2], tiny)
+    )
+    curvature = left - 2.0 * centre + right
+    if not curvature < 0.0:
+        return frequency
+    offset = float(np.clip(0.5 * (left - right) / curvature, -0.5, 0.5))
+    step = float(frequencies[1] - frequencies[0])
+    return frequency + offset * step
 
 
 def find_stable_peaks(
@@ -554,9 +588,20 @@ def find_stable_peaks(
         for index in indices:
             half_low = float(spectrum.half_z[0][index])
             half_high = float(spectrum.half_z[1][index])
+            if spectrum.context_mean_psd is not None:
+                refined_hz = refine_peak(
+                    spectrum.context_frequencies,
+                    spectrum.context_mean_psd,
+                    int(index) + offset,
+                )
+            else:
+                refined_hz = refine_peak(
+                    spectrum.frequencies, spectrum.mean_psd, int(index),
+                )
             peaks.append(StablePeak(
                 axis=spectrum.axis,
-                frequency_hz=float(spectrum.frequencies[index]),
+                frequency_hz=refined_hz,
+                bin_frequency_hz=float(spectrum.frequencies[index]),
                 prominence_db=float(spectrum.prominence_db[index]),
                 standard_error_db=float(spectrum.standard_error_db[index]),
                 z=float(spectrum.z[index]),
@@ -565,9 +610,7 @@ def find_stable_peaks(
                 persistent=bool(
                     half_low >= half_threshold and half_high >= half_threshold
                 ),
-                band=band_name_for(
-                    float(spectrum.frequencies[index]), bands,
-                ),
+                band=band_name_for(refined_hz, bands),
             ))
     peaks.sort(key=lambda peak: -peak.z)
     return peaks
@@ -955,7 +998,8 @@ def analyze_capture(
 
 PEAK_FIELDS = [
     "capture", "nperseg", "bin_width_hz", "packet_count", "duration_seconds", "sampling_rate_hz",
-    "z_threshold", "axis", "band", "frequency_hz", "prominence_db",
+    "z_threshold", "axis", "band", "frequency_hz", "bin_frequency_hz",
+    "prominence_db",
     "standard_error_db", "z", "half_z_low", "half_z_high", "persistent",
     "support_windows", "support_total",
 ]
@@ -974,6 +1018,7 @@ def peak_rows(result: CaptureResult) -> list[dict[str, Any]]:
             "axis": peak.axis,
             "band": peak.band,
             "frequency_hz": round(peak.frequency_hz, 3),
+            "bin_frequency_hz": round(peak.bin_frequency_hz, 3),
             "prominence_db": round(peak.prominence_db, 2),
             "standard_error_db": round(peak.standard_error_db, 3),
             "z": round(peak.z, 2),
@@ -1171,10 +1216,10 @@ def save_overview_figure(
             peak for peak in result.peaks if peak.axis == spectrum.axis
         ]
         for peak in axis_peaks:
-            index = int(np.argmin(
-                np.abs(spectrum.frequencies - peak.frequency_hz)
+            # On the drawn curve, at the refined frequency.
+            height = float(np.interp(
+                peak.frequency_hz, spectrum.frequencies, spectrum.mean_psd,
             ))
-            height = float(spectrum.mean_psd[index])
             panel.plot(
                 [peak.frequency_hz], [height],
                 marker="x", color="crimson", markersize=9,
@@ -1280,14 +1325,17 @@ def save_figure(path: Path, result: CaptureResult) -> None:
         for peak in result.peaks:
             if peak.axis != spectrum.axis:
                 continue
+            on_curve_db = float(np.interp(
+                peak.frequency_hz, spectrum.frequencies, spectrum.prominence_db,
+            ))
             panel.plot(
-                [peak.frequency_hz], [peak.prominence_db],
+                [peak.frequency_hz], [on_curve_db],
                 marker="v", color="crimson", markersize=8, lw=0,
             )
             panel.annotate(
                 f"{peak.frequency_hz:.2f} Hz\nz={peak.z:.1f}"
                 + ("" if peak.persistent else "\n(one half only)"),
-                xy=(peak.frequency_hz, peak.prominence_db),
+                xy=(peak.frequency_hz, on_curve_db),
                 xytext=(0, 12), textcoords="offset points",
                 ha="center", fontsize=8, color="crimson",
             )
@@ -1482,12 +1530,12 @@ def save_comparison_figure(
             for peak in result.peaks:
                 if peak.axis != axis:
                     continue
-                index = int(np.argmin(
-                    np.abs(spectrum.frequencies - peak.frequency_hz)
+                height = float(np.interp(
+                    peak.frequency_hz, spectrum.frequencies, spectrum.mean_psd,
                 ))
                 panel.plot(
                     [peak.frequency_hz],
-                    [np.sqrt(spectrum.mean_psd[index]) * 1.0e6],
+                    [np.sqrt(height) * 1.0e6],
                     marker="x", color=shade, markersize=9,
                     markeredgewidth=2, lw=0,
                 )
