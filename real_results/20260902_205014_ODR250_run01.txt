@@ -1,0 +1,140 @@
+Run started: 2026-09-02 20:50:14
+Run: 1/1
+ODR: 250 Hz
+Packets/session: 8
+Target sessions: 8
+Frequency tolerance: 0.40 Hz
+Welch nperseg: 1024
+Welch noverlap: 512
+
+Packets:   64   Duration:  262.6 s   Fs=249.54
+Raw data: 20260902_205014_ODR250_run01_raw.npz
+Raw packets: 64
+Samples/packet: 1024
+
+Peak candidates — X
+Band           Freq Hz  Prom dB  Win.Stab  Min.Stab   SNR dB   σf Hz  σf Max       Range Hz  Freq.Stab  Result
+Low frequency     3.66     2.23      5.46      4.10     1.32    0.15    0.20      3.41–3.90       PASS  ACCEPT
+
+Peak candidates — Y
+Band           Freq Hz  Prom dB  Win.Stab  Min.Stab   SNR dB   σf Hz  σf Max       Range Hz  Freq.Stab  Result
+Low frequency     3.17     3.69      3.74      4.10     2.64    0.15    0.20      2.92–3.41       PASS  REJECT stability
+
+Peak candidates — Z
+Band           Freq Hz  Prom dB  Win.Stab  Min.Stab   SNR dB   σf Hz  σf Max       Range Hz  Freq.Stab  Result
+Low frequency     6.34     2.15      4.38      4.10     1.25    0.17    0.20      6.09–6.58       PASS  ACCEPT
+
+Session frequency clusters — X
+Band            Freq Hz  Support  Support %   σf Hz       Range Hz  Med.Freq  Med.Prom  Med.Contr  Band.Contr  Med.Pass  Sessions
+Low frequency      1.22    1/8         12.5    0.00      1.22–1.22      1.22      0.37       0.90        0.18      FAIL  4
+Low frequency      1.71    1/8         12.5    0.00      1.71–1.71       N/A       N/A        N/A         N/A       N/A  2
+Low frequency      2.19    3/8         37.5    0.00      2.19–2.19      2.19      0.84       0.17        0.01      FAIL  1,5,8
+Low frequency      3.17    4/8         50.0    0.17      2.92–3.41      3.66      2.23       1.32        1.27      PASS  2,3,5,6
+Low frequency      3.66    3/8         37.5    0.11      3.66–3.90      3.66      2.23       1.32        1.27      PASS  4,7,8
+Low frequency      4.87    3/8         37.5    0.20      4.63–5.12      4.63      0.34       0.03        0.33      FAIL  2,4,5
+Low frequency      5.85    5/8         62.5    0.25      5.36–6.09      6.34      0.92       0.53        0.64      FAIL  1,3,5,7,8
+Low frequency      6.82    3/8         37.5    0.20      6.58–7.07      6.34      0.92       0.53        0.64      FAIL  4,6,7
+Low frequency      8.16    6/8         75.0    0.12      8.04–8.29      8.04      1.25       0.65        0.56      FAIL  1,2,3,4,5,8
+Low frequency      8.77    3/8         37.5    0.11      8.77–9.02      8.77      0.13       0.84        0.41      FAIL  3,6,7
+Low frequency      9.50    1/8         12.5    0.00      9.50–9.50      9.75      0.04      -0.77       -0.43      FAIL  8
+High frequency    11.33    2/8         25.0    0.12    11.21–11.45     11.45      0.82       0.44        0.46      FAIL  2,7
+High frequency    12.43    4/8         50.0    0.17    12.19–12.67     12.92      0.32       0.55        0.30      FAIL  1,3,5,8
+High frequency    12.92    2/8         25.0    0.00    12.92–12.92     12.92      0.32       0.55        0.30      FAIL  6,7
+High frequency    13.53    2/8         25.0    0.12    13.40–13.65     13.40      1.10       0.54        0.56      FAIL  2,8
+
+Session frequency clusters — Y
+Band            Freq Hz  Support  Support %   σf Hz       Range Hz  Med.Freq  Med.Prom  Med.Contr  Band.Contr  Med.Pass  Sessions
+Low frequency      1.46    1/8         12.5    0.00      1.46–1.46      1.71      0.29       0.10        0.43      FAIL  5
+Low frequency      1.95    1/8         12.5    0.00      1.95–1.95      1.71      0.29       0.10        0.43      FAIL  3
+Low frequency      3.17    5/8         62.5    0.10      2.92–3.17      3.17      3.69       2.64        3.05      PASS  2,4,5,6,7
+Low frequency      3.66    3/8         37.5    0.11      3.66–3.90       N/A       N/A        N/A         N/A       N/A  1,3,8
+Low frequency      4.63    1/8         12.5    0.00      4.63–4.63      4.63      0.66      -0.40        0.13      FAIL  4
+Low frequency      5.61    6/8         75.0    0.26      5.12–5.85      5.85      1.20       0.88        0.43      FAIL  2,3,5,6,7,8
+Low frequency      6.58    4/8         50.0    0.17      6.34–6.82      6.82      0.75       0.18        0.06      FAIL  1,3,4,8
+Low frequency      8.04    3/8         37.5    0.20      7.80–8.29      8.29      1.03       0.54        0.33      FAIL  1,2,6
+Low frequency      8.53    1/8         12.5    0.00      8.53–8.53      8.29      1.03       0.54        0.33      FAIL  4
+Low frequency      9.02    1/8         12.5    0.00      9.02–9.02       N/A       N/A        N/A         N/A       N/A  5
+High frequency    10.97    3/8         37.5    0.20    10.72–11.21     10.72      0.38       0.20        0.40      FAIL  1,2,8
+High frequency    11.70    3/8         37.5    0.00    11.70–11.70     11.70      1.10       0.78        0.76      FAIL  3,5,6
+High frequency    12.19    1/8         12.5    0.00    12.19–12.19       N/A       N/A        N/A         N/A       N/A  1
+High frequency    12.67    3/8         37.5    0.11    12.67–12.92     12.67      0.57       0.71        0.52      FAIL  2,4,6
+High frequency    13.40    1/8         12.5    0.00    13.40–13.40     13.65      0.54      -0.01       -0.04      FAIL  7
+High frequency    13.89    1/8         12.5    0.00    13.89–13.89     13.65      0.54      -0.01       -0.04      FAIL  8
+
+Session frequency clusters — Z
+Band            Freq Hz  Support  Support %   σf Hz       Range Hz  Med.Freq  Med.Prom  Med.Contr  Band.Contr  Med.Pass  Sessions
+Low frequency      1.22    3/8         37.5    0.20      0.97–1.46      1.22      0.63       0.74        0.37      FAIL  2,4,8
+Low frequency      2.92    4/8         50.0    0.17      2.68–3.17      3.17      0.58       0.62        0.36      FAIL  2,3,6,7
+Low frequency      3.41    3/8         37.5    0.11      3.41–3.66      3.17      0.58       0.62        0.36      FAIL  1,4,5
+Low frequency      4.14    4/8         50.0    0.00      4.14–4.14      4.14      1.57       0.77        0.80      FAIL  3,6,7,8
+Low frequency      5.12    1/8         12.5    0.00      5.12–5.12      5.36      0.87      -0.05        0.35      FAIL  4
+Low frequency      6.09    6/8         75.0    0.17      5.85–6.34      6.34      2.15       1.25        1.18      PASS  1,3,5,6,7,8
+Low frequency      6.58    1/8         12.5    0.00      6.58–6.58      6.34      2.15       1.25        1.18      PASS  4
+Low frequency      7.92    6/8         75.0    0.18      7.55–8.04      8.29      0.53       0.37        0.27      FAIL  2,3,4,5,6,8
+Low frequency      8.53    1/8         12.5    0.00      8.53–8.53      8.29      0.53       0.37        0.27      FAIL  1
+Low frequency      9.26    1/8         12.5    0.00      9.26–9.26      9.26      1.56       1.02        1.04      FAIL  6
+High frequency    11.09    2/8         25.0    0.12    10.97–11.21     10.97      0.19      -0.04        0.06      FAIL  2,8
+High frequency    11.70    1/8         12.5    0.00    11.70–11.70     11.70      0.80       0.12        0.15      FAIL  7
+High frequency    12.67    3/8         37.5    0.20    12.43–12.92     12.43      0.64       0.51        0.10      FAIL  1,4,6
+High frequency    13.16    3/8         37.5    0.11    13.16–13.40     13.16      0.62       0.15        0.10      FAIL  3,5,8
+High frequency    14.13    2/8         25.0    0.00    14.13–14.13     14.13      0.18       0.49        0.24      FAIL  2,8
+
+Consolidated frequency regions — X
+Band            Freq Hz  Support  Med.Freq  Med.Prom  Med.Contr  Band.Contr       Range Hz  Sources
+Low frequency      1.22    1/8        1.22      0.37       0.90        0.18      1.22–1.22        1
+Low frequency      2.19    3/8        2.19      0.84       0.17        0.01      2.19–2.19        1
+Low frequency      3.41    7/8        3.66      2.23       1.32        1.27      2.92–3.90        2
+Low frequency      4.87    3/8        4.63      0.34       0.03        0.33      4.63–5.12        1
+Low frequency      5.85    5/8        6.34      0.92       0.53        0.64      5.36–6.09        1
+Low frequency      6.82    3/8        6.34      0.92       0.53        0.64      6.58–7.07        1
+Low frequency      8.16    6/8        8.04      1.25       0.65        0.56      8.04–8.29        1
+Low frequency      8.77    3/8        8.77      0.13       0.84        0.41      8.77–9.02        1
+Low frequency      9.50    1/8        9.75      0.04      -0.77       -0.43      9.50–9.50        1
+Low frequency      1.71    1/8         N/A       N/A        N/A         N/A      1.71–1.71        1
+High frequency    11.33    2/8       11.45      0.82       0.44        0.46    11.21–11.45        1
+High frequency    12.67    6/8       12.92      0.32       0.55        0.30    12.19–12.92        2
+High frequency    13.53    2/8       13.40      1.10       0.54        0.56    13.40–13.65        1
+
+Consolidated frequency regions — Y
+Band            Freq Hz  Support  Med.Freq  Med.Prom  Med.Contr  Band.Contr       Range Hz  Sources
+Low frequency      1.71    2/8        1.71      0.29       0.10        0.43      1.46–1.95        2
+Low frequency      3.17    5/8        3.17      3.69       2.64        3.05      2.92–3.17        1
+Low frequency      4.63    1/8        4.63      0.66      -0.40        0.13      4.63–4.63        1
+Low frequency      5.61    6/8        5.85      1.20       0.88        0.43      5.12–5.85        1
+Low frequency      6.58    4/8        6.82      0.75       0.18        0.06      6.34–6.82        1
+Low frequency      8.29    4/8        8.29      1.03       0.54        0.33      7.80–8.53        2
+Low frequency      3.66    3/8         N/A       N/A        N/A         N/A      3.66–3.90        1
+Low frequency      9.02    1/8         N/A       N/A        N/A         N/A      9.02–9.02        1
+High frequency    10.97    3/8       10.72      0.38       0.20        0.40    10.72–11.21        1
+High frequency    11.70    3/8       11.70      1.10       0.78        0.76    11.70–11.70        1
+High frequency    12.67    3/8       12.67      0.57       0.71        0.52    12.67–12.92        1
+High frequency    13.65    2/8       13.65      0.54      -0.01       -0.04    13.40–13.89        2
+High frequency    12.19    1/8         N/A       N/A        N/A         N/A    12.19–12.19        1
+
+Consolidated frequency regions — Z
+Band            Freq Hz  Support  Med.Freq  Med.Prom  Med.Contr  Band.Contr       Range Hz  Sources
+Low frequency      1.22    3/8        1.22      0.63       0.74        0.37      0.97–1.46        1
+Low frequency      3.17    7/8        3.17      0.58       0.62        0.36      2.68–3.66        2
+Low frequency      4.14    4/8        4.14      1.57       0.77        0.80      4.14–4.14        1
+Low frequency      5.12    1/8        5.36      0.87      -0.05        0.35      5.12–5.12        1
+Low frequency      6.34    7/8        6.34      2.15       1.25        1.18      5.85–6.58        2
+Low frequency      8.22    7/8        8.29      0.53       0.37        0.27      7.55–8.53        2
+Low frequency      9.26    1/8        9.26      1.56       1.02        1.04      9.26–9.26        1
+High frequency    11.09    2/8       10.97      0.19      -0.04        0.06    10.97–11.21        1
+High frequency    11.70    1/8       11.70      0.80       0.12        0.15    11.70–11.70        1
+High frequency    12.67    3/8       12.43      0.64       0.51        0.10    12.43–12.92        1
+High frequency    13.16    3/8       13.16      0.62       0.15        0.10    13.16–13.40        1
+High frequency    14.13    2/8       14.13      0.18       0.49        0.24    14.13–14.13        1
+
+Trusted frequency regions — X
+Band           Freq Hz  Support  Med.Freq  Med.Prom  Med.Contr  Band.Contr  Weight       Range Hz
+Low frequency     3.41    7/8        3.66      2.23       1.32        1.27    1.00  2.92–3.90
+
+Trusted frequency regions — Y
+Band           Freq Hz  Support  Med.Freq  Med.Prom  Med.Contr  Band.Contr  Weight       Range Hz
+Low frequency     3.17    5/8        3.17      3.69       2.64        3.05    1.00  2.92–3.17
+
+Trusted frequency regions — Z
+Band           Freq Hz  Support  Med.Freq  Med.Prom  Med.Contr  Band.Contr  Weight       Range Hz
+Low frequency     4.14    4/8        4.14      1.57       0.77        0.80    0.70  4.14–4.14
+Low frequency     6.34    7/8        6.34      2.15       1.25        1.18    1.00  5.85–6.58
