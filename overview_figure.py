@@ -6,7 +6,7 @@ Joins every ``*.npz`` capture in a folder and draws two panels:
    captures overlaid, one colour per axis, with the frequencies that stand
    out of the pooled record labelled. Structures outside the analysis band
    (machinery, mains-related lines) show up here.
-2. the analysis band (from ``config.toml``, 0.5-15 Hz by default) for all
+2. the analysis band (from ``config.toml``, 0.2-15 Hz by default) for all
    captures pooled: prominence over the local baseline against the band
    that the pooled record cannot tell apart from sensor noise.
 
@@ -47,9 +47,9 @@ from stable_spectrum import (
 # Captures whose mean sampling rates differ by more than this cannot share
 # one frequency grid without smearing lines.
 MAX_RATE_MISMATCH = 0.005
-# The first bins sit on the DC removal and the last on the anti-alias
-# roll-off; neither says anything about the structure.
-FULL_BAND_START_HZ = 0.5
+# The full-band panel starts where the analysis band of config.toml starts,
+# so both panels and every other script share one lower edge. The last bins
+# sit on the anti-alias roll-off and are left out.
 FULL_BAND_NYQUIST_MARGIN = 0.02
 MAX_LABELS = 8
 LABEL_MERGE_HZ = 1.0
@@ -143,10 +143,11 @@ def build_overview(
         noverlap=samples_per_packet // 2,
     )
     nyquist = sampling_rate_hz / 2.0
+    configured_start_hz = load_settings(alpha, None).band_hz[0]
     full_settings = replace(
         settings,
         band_hz=(
-            FULL_BAND_START_HZ,
+            configured_start_hz,
             nyquist * (1.0 - FULL_BAND_NYQUIST_MARGIN),
         ),
     )
