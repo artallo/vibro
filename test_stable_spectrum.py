@@ -479,5 +479,143 @@ class DriverTests(unittest.TestCase):
                 (output / "figure_compare_synthetic_raw.png").exists()
             )
 
+
+class BandEdgeTests(unittest.TestCase):
+    # Bins at 250 Hz and 1024 samples are 0.244 Hz apart. With the band
+    # starting at 0.5 Hz, 0.732 Hz is the first bin inside it and 0.488 Hz
+    # the last bin below it.
+    FIRST_IN_BAND_HZ = 3 * SAMPLING_RATE_HZ / 1024
+    LAST_BELOW_BAND_HZ = 2 * SAMPLING_RATE_HZ / 1024
+
+    def spectrum_and_peaks(self, signal, settings=SETTINGS):
+        spectrum = analyze_axis("X", signal, SAMPLING_RATE_HZ, settings)
+        threshold = significance_threshold(
+            spectrum.frequencies.size * 3, settings.alpha, signal.shape[0],
+        )
+        peaks = find_stable_peaks([spectrum], threshold, settings, BANDS)
+        return spectrum, threshold, peaks
+
+    def test_the_band_itself_is_unchanged(self) -> None:
+        spectrum, _, _ = self.spectrum_and_peaks(noise_packets(64, 101))
+        self.assertGreaterEqual(spectrum.frequencies[0], SETTINGS.band_hz[0])
+        self.assertLessEqual(spectrum.frequencies[-1], SETTINGS.band_hz[1])
+        self.assertAlmostEqual(spectrum.frequencies[0], self.FIRST_IN_BAND_HZ)
+        self.assertGreater(spectrum.context_z.size, spectrum.z.size)
+
+    def test_a_tone_in_the_first_bin_of_the_band_is_found(self) -> None:
+        signal = add_tone(
+            noise_packets(128, 102), self.FIRST_IN_BAND_HZ, 0.3, seed=103,
+        )
+        _, _, peaks = self.spectrum_and_peaks(signal)
+        self.assertTrue(peaks)
+        self.assertAlmostEqual(
+            peaks[0].frequency_hz, self.FIRST_IN_BAND_HZ, delta=0.01,
+        )
+
+    def test_a_tone_just_below_the_band_is_warned_about(self) -> None:
+        from stable_spectrum import band_edge_warnings
+
+        signal = add_tone(
+            noise_packets(128, 104), self.LAST_BELOW_BAND_HZ, 0.3, seed=105,
+        )
+        spectrum, threshold, peaks = self.spectrum_and_peaks(signal)
+        self.assertEqual(
+            [peak for peak in peaks if peak.frequency_hz < 0.6], [],
+        )
+        warnings = band_edge_warnings([spectrum], threshold)
+        self.assertTrue(any("below the band" in text for text in warnings))
+
+    def test_a_tone_in_the_lowest_available_bin_is_warned_about(self) -> None:
+        from dataclasses import replace
+
+        from stable_spectrum import band_edge_warnings
+
+        settings = replace(SETTINGS, band_hz=(0.2, 15.0))
+        lowest_hz = SAMPLING_RATE_HZ / 1024
+        signal = add_tone(noise_packets(128, 106), lowest_hz, 0.3, seed=107)
+        spectrum, threshold, _ = self.spectrum_and_peaks(signal, settings)
+        self.assertEqual(spectrum.band_offset, 0)
+        warnings = band_edge_warnings([spectrum], threshold)
+        self.assertTrue(any("lowest bin" in text for text in warnings))
+
+    def test_noise_raises_neither_peaks_nor_edge_warnings(self) -> None:
+        from dataclasses import replace
+
+        from stable_spectrum import band_edge_warnings
+
+        for band in ((0.5, 15.0), (0.2, 15.0)):
+            settings = replace(SETTINGS, band_hz=band)
+            for seed in range(6):
+                spectrum, threshold, peaks = self.spectrum_and_peaks(
+                    noise_packets(128, 110 + seed), settings,
+                )
+                self.assertEqual(peaks, [], f"false peak, {band}, seed {seed}")
+                self.assertEqual(
+                    band_edge_warnings([spectrum], threshold), [],
+                    f"false edge warning, {band}, seed {seed}",
+                )
+
+
+class StartupPacketTests(unittest.TestCase):
+    @staticmethod
+    def started(packets: int, seed: int) -> np.ndarray:
+        # The sensor starts from zero: the first sample of the record is 0,
+        # every later one sits near 1 g like the Z axis does.
+        signal = noise_packets(packets, seed, amplitude=0.001) + 1.0
+        signal[0, 0] = 0.0
+        return signal
+
+    def test_the_start_up_packet_is_dropped(self) -> None:
+        from stable_spectrum import drop_startup_packet
+
+        axes = {
+            "x": noise_packets(64, 121),
+            "y": noise_packets(64, 122),
+            "z": self.started(64, 123),
+        }
+        rates = np.full(64, SAMPLING_RATE_HZ)
+        kept, kept_rates, dropped = drop_startup_packet(axes, rates)
+        self.assertTrue(dropped)
+        self.assertEqual(kept["z"].shape[0], 63)
+        self.assertEqual(kept["x"].shape[0], 63)
+        self.assertEqual(kept_rates.size, 63)
+
+    def test_a_clean_record_is_left_whole(self) -> None:
+        from stable_spectrum import drop_startup_packet
+
+        axes = {key: noise_packets(64, 124 + index)
+                for index, key in enumerate("xyz")}
+        kept, _, dropped = drop_startup_packet(axes, np.full(64, 250.0))
+        self.assertFalse(dropped)
+        self.assertEqual(kept["z"].shape[0], 64)
+
+    def test_the_start_up_step_no_longer_fakes_a_low_structure(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from stable_spectrum import analyze_capture, load_band_names, load_settings
+
+        with tempfile.TemporaryDirectory() as directory:
+            raw = Path(directory) / "started_raw.npz"
+            np.savez(
+                raw,
+                x=noise_packets(128, 125, amplitude=0.001),
+                y=noise_packets(128, 126, amplitude=0.001),
+                z=self.started(128, 127),
+                packet_fs_hz=np.full(128, SAMPLING_RATE_HZ),
+            )
+            result = analyze_capture(raw, load_settings(0.01, None), load_band_names())
+        self.assertTrue(result.startup_dropped)
+        self.assertEqual(result.packet_count, 127)
+        self.assertEqual(result.peaks, [])
+        self.assertEqual(result.edge_warnings, [])
+        self.assertIn("start-up", format_report(result))
+
+
+def format_report(result) -> str:
+    from stable_spectrum import format_capture_report
+
+    return format_capture_report(result)
+
 if __name__ == "__main__":
     unittest.main()

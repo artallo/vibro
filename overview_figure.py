@@ -38,6 +38,7 @@ from stable_spectrum import (
     AxisSpectrum,
     StablePeak,
     analyze_axis,
+    drop_startup_packet,
     find_stable_peaks,
     load_band_names,
     load_settings,
@@ -88,10 +89,14 @@ def load_folder(folder: Path) -> list[Capture]:
             if missing:
                 print(f"skipped {path.name}: no {', '.join(missing)}")
                 continue
+            axes, packet_fs_hz, _ = drop_startup_packet(
+                {key: np.asarray(archive[key]) for _, key in AXIS_KEYS},
+                np.asarray(archive["packet_fs_hz"]),
+            )
             captures.append(Capture(
                 name=path.stem,
-                axes={key: np.asarray(archive[key]) for _, key in AXIS_KEYS},
-                sampling_rate_hz=float(np.mean(archive["packet_fs_hz"])),
+                axes=axes,
+                sampling_rate_hz=float(np.mean(packet_fs_hz)),
             ))
     if not captures:
         raise ValueError(f"no raw captures (*.npz) in {folder}")

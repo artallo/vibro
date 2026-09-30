@@ -139,6 +139,13 @@ class AxisSpectrum:
     # z of a half-record relative to z of the full record, for a peak of
     # unchanged height: 1/sqrt(2) when each half holds half the rows.
     half_scale: float = float(1.0 / np.sqrt(2.0))
+    # The same z profile extended past both band edges where the spectrum
+    # has bins, and the index of the first in-band bin inside it. Peaks are
+    # searched on this wider profile so a line in the edge bin of the band
+    # is judged against its real neighbour instead of a wall.
+    context_frequencies: np.ndarray | None = None
+    context_z: np.ndarray | None = None
+    band_offset: int = 0
 
 
 @dataclass(frozen=True)
@@ -255,6 +262,8 @@ class CaptureResult:
     row_count: int = 0
     effective_rows: float = 0.0
     window_rows: int = 0
+    edge_warnings: list[str] = field(default_factory=list)
+    startup_dropped: bool = False
 
     @property
     def segmented(self) -> bool:
@@ -427,18 +436,30 @@ def analyze_axis(
     sampling_rate_hz: float,
     settings: SpectrumSettings,
 ) -> AxisSpectrum:
-    frequencies, psd, stride = segment_periodograms(
+    all_frequencies, all_psd, stride = segment_periodograms(
         signal, sampling_rate_hz, settings,
     )
-    selected = (
-        (frequencies >= settings.band_hz[0])
-        & (frequencies <= settings.band_hz[1])
-    )
-    frequencies = frequencies[selected]
-    psd = psd[:, selected]
-    packet_count = psd.shape[0]
-    bin_width_hz = float(frequencies[1] - frequencies[0])
+    bin_width_hz = float(all_frequencies[1] - all_frequencies[0])
     baseline_window = max(3, int(round(settings.baseline_window_hz / bin_width_hz)))
+    band_indices = np.flatnonzero(
+        (all_frequencies >= settings.band_hz[0])
+        & (all_frequencies <= settings.band_hz[1])
+    )
+    # Context: half a baseline window of real bins past each band edge, so
+    # that the baseline and the peak search near the edges rest on data
+    # rather than on a mirror image. The DC bin carries only what the
+    # detrending left and is never used as a neighbour.
+    margin = baseline_window // 2
+    context_start = min(
+        int(band_indices[0]),
+        max(1, int(band_indices[0]) - margin),
+    )
+    context_stop = min(all_frequencies.size, int(band_indices[-1]) + 1 + margin)
+    band_offset = int(band_indices[0]) - context_start
+    band_slice = slice(band_offset, band_offset + band_indices.size)
+    context_frequencies = all_frequencies[context_start:context_stop]
+    psd = all_psd[:, context_start:context_stop]
+    packet_count = psd.shape[0]
 
     variance_factor = (
         overlap_variance_factor(settings.nperseg, settings.nperseg // 2)
@@ -467,19 +488,26 @@ def analyze_axis(
     high_half = profile(high_rows, 1.0)
     effective_rows = packet_count / variance_factor
     half_rows = min(low_rows.shape[0], high_rows.shape[0])
+    context_z = prominence_db / standard_error_db
     return AxisSpectrum(
         axis=axis,
-        frequencies=frequencies,
-        mean_psd=psd.mean(axis=0),
-        baseline_psd=baseline_psd,
-        prominence_db=prominence_db,
-        standard_error_db=standard_error_db,
-        z=prominence_db / standard_error_db,
-        half_z=(low_half[0] / low_half[1], high_half[0] / high_half[1]),
-        packet_band_power=psd.sum(axis=1) * bin_width_hz,
+        frequencies=context_frequencies[band_slice],
+        mean_psd=psd.mean(axis=0)[band_slice],
+        baseline_psd=baseline_psd[band_slice],
+        prominence_db=prominence_db[band_slice],
+        standard_error_db=standard_error_db[band_slice],
+        z=context_z[band_slice],
+        half_z=(
+            (low_half[0] / low_half[1])[band_slice],
+            (high_half[0] / high_half[1])[band_slice],
+        ),
+        packet_band_power=psd[:, band_slice].sum(axis=1) * bin_width_hz,
         row_count=int(packet_count),
         effective_rows=float(effective_rows),
         half_scale=float(np.sqrt(half_rows / effective_rows)),
+        context_frequencies=context_frequencies,
+        context_z=context_z,
+        band_offset=band_offset,
     )
 
 
@@ -513,9 +541,16 @@ def find_stable_peaks(
             spectrum.frequencies[1] - spectrum.frequencies[0]
         )
         distance = max(1, int(round(settings.min_distance_hz / bin_width_hz)))
-        indices, _ = find_peaks(
-            spectrum.z, height=z_threshold, distance=distance,
-        )
+        # Search the profile that reaches past the band edges, then keep the
+        # peaks whose top lies inside the band. A peak in the edge bin is
+        # then compared with the real bin beyond the edge.
+        if spectrum.context_z is not None:
+            search_z, offset = spectrum.context_z, spectrum.band_offset
+        else:
+            search_z, offset = spectrum.z, 0
+        found, _ = find_peaks(search_z, height=z_threshold, distance=distance)
+        indices = found - offset
+        indices = indices[(indices >= 0) & (indices < spectrum.z.size)]
         for index in indices:
             half_low = float(spectrum.half_z[0][index])
             half_high = float(spectrum.half_z[1][index])
@@ -536,6 +571,59 @@ def find_stable_peaks(
             ))
     peaks.sort(key=lambda peak: -peak.z)
     return peaks
+
+
+def band_edge_warnings(
+    spectra: list[AxisSpectrum],
+    z_threshold: float,
+) -> list[str]:
+    """Significant structure the band cannot report as a peak.
+
+    Two cases. The edge bin of the band may be the last bin the spectrum
+    has on that side, so there is no neighbour to show whether the top lies
+    at the edge or beyond it. Or a peak may stand just outside the band, in
+    the context bins. Either way the reader is told to move the band edge
+    instead of being left with silence.
+    """
+    messages = []
+    for spectrum in spectra:
+        if spectrum.context_z is None or spectrum.context_frequencies is None:
+            continue
+        context_z = spectrum.context_z
+        context_frequencies = spectrum.context_frequencies
+        first = spectrum.band_offset
+        last = first + spectrum.z.size - 1
+        if (
+            first == 0
+            and context_z[0] >= z_threshold
+            and (context_z.size < 2 or context_z[0] > context_z[1])
+        ):
+            messages.append(
+                f"{spectrum.axis}: {context_frequencies[0]:.2f} Hz, the lowest "
+                f"bin available, stands at z={context_z[0]:.1f}; nothing below "
+                "it shows whether the top lies there or lower down"
+            )
+        if (
+            last == context_z.size - 1
+            and context_z[-1] >= z_threshold
+            and (context_z.size < 2 or context_z[-1] > context_z[-2])
+        ):
+            messages.append(
+                f"{spectrum.axis}: {context_frequencies[-1]:.2f} Hz, the highest "
+                f"bin available, stands at z={context_z[-1]:.1f}; nothing above "
+                "it shows whether the top lies there or higher up"
+            )
+        outside, _ = find_peaks(context_z, height=z_threshold)
+        for index in outside:
+            if first <= index <= last:
+                continue
+            side = "below" if index < first else "above"
+            messages.append(
+                f"{spectrum.axis}: a peak at {context_frequencies[index]:.2f} Hz "
+                f"(z={context_z[index]:.1f}) lies just {side} the band; widen "
+                "--band to include it"
+            )
+    return messages
 
 
 LOUD_PACKET_RATIO = 8.0
@@ -592,6 +680,35 @@ def joint_steps(
         (int(index) + 1, float(sigma[index]))
         for index in np.flatnonzero(sigma > sigma_threshold)
     ]
+
+
+def drop_startup_packet(
+    axes: dict[str, np.ndarray],
+    packet_fs_hz: np.ndarray,
+) -> tuple[dict[str, np.ndarray], np.ndarray, bool]:
+    """Leave out packet 1 when it carries a sharp transient.
+
+    The sensor starts every recording from zero, so packet 1 holds a step
+    of a whole g on Z. Averaged into the spectrum it lifts the lowest bin
+    by 12-21 dB and fakes a structure there. The recording check still
+    reports the transient; only the spectra are computed without it. A
+    knock that happens to fall into packet 1 is left out the same way,
+    which costs one packet out of hundreds.
+    """
+    if axes["x"].shape[0] < 2:
+        return axes, packet_fs_hz, False
+    started = any(
+        any(packet == 1 for packet, _ in transient_packets(axes[key]))
+        for _, key in AXIS_KEYS
+        if key in axes
+    )
+    if not started:
+        return axes, packet_fs_hz, False
+    return (
+        {key: signal[1:] for key, signal in axes.items()},
+        packet_fs_hz[1:],
+        True,
+    )
 
 
 def assess_quality(
@@ -727,8 +844,11 @@ def analyze_capture(
     probe_hz: list[float] | None = None,
 ) -> CaptureResult:
     with np.load(raw_path, allow_pickle=False) as archive:
-        axes = {key: np.asarray(archive[key]) for _, key in AXIS_KEYS}
-        packet_fs_hz = np.asarray(archive["packet_fs_hz"])
+        recorded_axes = {key: np.asarray(archive[key]) for _, key in AXIS_KEYS}
+        recorded_fs_hz = np.asarray(archive["packet_fs_hz"])
+    axes, packet_fs_hz, startup_dropped = drop_startup_packet(
+        recorded_axes, recorded_fs_hz,
+    )
     sampling_rate_hz = float(np.mean(packet_fs_hz))
     packet_count, samples_per_packet = axes["x"].shape
     duration_seconds = float(np.sum(samples_per_packet / packet_fs_hz))
@@ -812,7 +932,7 @@ def analyze_capture(
             z_threshold,
             settings.min_distance_hz / 2.0,
         ),
-        quality=assess_quality(packet_spectra, packet_fs_hz, axes),
+        quality=assess_quality(packet_spectra, recorded_fs_hz, recorded_axes),
         window_count=len(windows),
         window_packets=window_packets,
         expected_support=SUPPORT_ALPHA * len(windows),
@@ -823,6 +943,8 @@ def analyze_capture(
         row_count=spectra[0].row_count,
         effective_rows=effective_rows,
         window_rows=window_rows,
+        edge_warnings=band_edge_warnings(spectra, z_threshold),
+        startup_dropped=startup_dropped,
     )
 
 
@@ -916,6 +1038,11 @@ def format_capture_report(result: CaptureResult) -> str:
         lines.append(f"  ! {message}")
     if not result.quality.warnings:
         lines.append("  no anomaly found in the recording itself")
+    if result.startup_dropped:
+        lines.append(
+            "  packet 1 holds a sharp transient (normally the sensor start-up) "
+            "and is left out of the spectra"
+        )
     if result.segmented:
         lines.append(
             "  segments join consecutive packets; the file carries no packet "
@@ -934,6 +1061,11 @@ def format_capture_report(result: CaptureResult) -> str:
     for axis, limit in result.detection_limit_db.items():
         lines.append(f"  {axis}: {limit:.2f} dB")
     lines.append("")
+    if result.edge_warnings:
+        lines.append("Band edges:")
+        for message in result.edge_warnings:
+            lines.append(f"  ! {message}")
+        lines.append("")
     if not result.peaks:
         strongest = max(
             (
@@ -1250,6 +1382,11 @@ def run_single_resolution(
             f"{result.capture} [nperseg {result.nperseg}]: "
             f"{result.row_count} rows, z>={result.z_threshold:.2f} -> "
             f"{peak_summary(result)}"
+            + (
+                f"  [band edge: {len(result.edge_warnings)} warning(s), "
+                "see report]"
+                if result.edge_warnings else ""
+            )
         )
     write_csv_rows(output_directory / "stable_frequencies.csv", all_rows)
     (output_directory / "stable_report.txt").write_text(
