@@ -31,7 +31,7 @@ frequency_tolerance_hz_62p5 = 0.25
 
 [[analysis.bands]]
 name = "Low frequency"
-min_frequency = 0.5
+min_frequency = 0.2
 max_frequency = 10.0
 prominence_db = 1.8
 min_distance_hz = 1.0
