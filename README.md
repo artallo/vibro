@@ -159,6 +159,10 @@ reported under "Band edges". Packet 1 is left out of the spectra when it
 holds a sharp transient, normally the sensor start-up step from 0 to 1 g,
 which would otherwise fake a structure in the lowest bin.
 
+The frequency reported for a peak is the top of a parabola through the log
+PSD of the peak bin and its two neighbours, so it is not limited to the
+bin grid; the bin centre is kept in the CSV as `bin_frequency_hz`.
+
 ### Spectral resolution
 
 Every capture is analysed at three segment lengths by default:

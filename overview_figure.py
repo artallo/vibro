@@ -302,14 +302,19 @@ def save_overview(path: Path, overview: Overview) -> None:
             float(np.max(np.abs(spectrum.prominence_db))),
             float(np.max(limit)),
         )
+    pooled_by_axis = {spectrum.axis: spectrum for spectrum in overview.pooled}
     for peak in overview.pooled_peaks:
+        pooled = pooled_by_axis[peak.axis]
+        on_curve_db = float(np.interp(
+            peak.frequency_hz, pooled.frequencies, pooled.prominence_db,
+        ))
         band_panel.plot(
-            [peak.frequency_hz], [peak.prominence_db],
+            [peak.frequency_hz], [on_curve_db],
             marker="x", color="crimson", markersize=9, markeredgewidth=2, lw=0,
         )
         band_panel.annotate(
             f"{peak.axis} {peak.frequency_hz:.2f} Гц\nz={peak.z:.1f}",
-            xy=(peak.frequency_hz, peak.prominence_db),
+            xy=(peak.frequency_hz, on_curve_db),
             xytext=(0, 10), textcoords="offset points",
             ha="center", fontsize=8, color="crimson",
         )
