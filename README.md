@@ -43,14 +43,24 @@ To look for broad humps that the narrow-peak search misses:
 python band_power.py --point "floor 5" "path/to/captures" --noise "tumen_results/20260916_*_raw.npz"
 ```
 
-`stable_spectrum.py` compares each bin with a 5 Hz running median, so a
-structure wider than about 2.5 Hz becomes its own baseline. `band_power.py`
+`stable_spectrum.py` compares each bin with a 10 Hz running median, so a
+structure wider than about 5 Hz becomes its own baseline. `band_power.py`
 compares the power in a band, packet by packet, with captures that hold
 only sensor noise (`--noise`) or with another measuring point
 (`--reference`, e.g. the basement). Bands are named (`--bands 9.5-13`) or
 scanned (`--scan 2`); the threshold is Bonferroni over bands and axes. It
 writes a report, a CSV and `figure_band_power.png` to
 `stable_results/band_power_<time>/` or `--output`.
+
+To check how often the peak search finds something in pure noise (it should
+be about `alpha`, 1 %), after any change to the method:
+
+```bash
+python false_alarm_check.py --runs 300 --baseline-window 5 10
+```
+
+`--noise-shape` colours the generated noise like real noise-only captures,
+which keeps the 1/f rise of Z at the low end of the band.
 
 The analysis figures of `main.py` are a different, older view of the same
 data and can be skipped: its peak lists use fixed dB thresholds, which is
@@ -151,7 +161,10 @@ python -m unittest test_stable_spectrum
 
 Method: one periodogram per packet, mean power spectral density across
 packets, per-bin standard error taken from the spread across packets, a
-running-median baseline, and peak significance `z = prominence_dB /
+running-median baseline 10 Hz wide (`[stable_spectrum] baseline_window_hz`
+in `config.toml`, `--baseline-window` to override; it was 5 Hz until
+2026-10-01, which let the top of a 3-4 Hz wide hump flicker between runs),
+and peak significance `z = prominence_dB /
 standard_error_dB`. A peak is reported when `z` passes a Bonferroni-corrected
 Student quantile for the number of bins tested, with `packets - 1` degrees of
 freedom because the error bar is estimated from the same packets. Nothing is

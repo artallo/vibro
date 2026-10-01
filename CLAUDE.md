@@ -41,7 +41,7 @@ ADXL355 на ESP32. Цель — находить собственные час�
   иначе падает на символе `σ`.
 - Порт датчика задаётся в `config.toml`, на каждой машине он свой.
 - Тесты: `python -m unittest test_stable_spectrum test_overview_figure
-  test_family_analysis test_band_power`.
+  test_family_analysis test_band_power test_false_alarm_check`.
 
 ## Данные
 

@@ -25,7 +25,8 @@ Method
    intermittent structure inflates its own error bar and is reported
    conservatively.
 4. Smooth baseline: running median over frequency (reflect-padded), the
-   local broadband floor.
+   local broadband floor. Its width (10 Hz, ``[stable_spectrum]`` in
+   config.toml) is the widest structure whose top still stands above it.
 5. Peak significance ``z = prominence_dB / standard_error_dB``. This is
    the peak height measured in units of the estimate's own noise, so it
    is comparable between captures of different length.
@@ -89,7 +90,12 @@ DEFAULT_NPERSEG_SWEEP = (1024, 2048, 4096)
 MINIMUM_SEGMENTS = 4
 DEFAULT_NOVERLAP = 512
 DEFAULT_BAND_HZ = (0.2, 15.0)
-DEFAULT_BASELINE_WINDOW_HZ = 5.0
+# Width of the running-median baseline. A structure wider than about half
+# of it lifts its own baseline. At 5 Hz the top of a 3-4 Hz wide hump lost
+# about a dB and flickered across runs and resolutions; 10 Hz keeps it and
+# still follows the broadband floor. Overridden by [stable_spectrum] in
+# config.toml or --baseline-window.
+DEFAULT_BASELINE_WINDOW_HZ = 10.0
 DEFAULT_ALPHA = 0.01
 DEFAULT_MIN_DISTANCE_HZ = 1.0
 # Below this many packets the error bar is itself too noisy: the periodogram
@@ -279,12 +285,17 @@ class CaptureResult:
 # ==========================================================
 
 
-def load_settings(alpha: float, band_hz: tuple[float, float] | None) -> SpectrumSettings:
-    """Read Welch and band settings from config.toml when it is available."""
+def load_settings(
+    alpha: float,
+    band_hz: tuple[float, float] | None,
+    baseline_window_hz: float | None = None,
+) -> SpectrumSettings:
+    """Read Welch, band and baseline settings from config.toml when it is available."""
     nperseg = DEFAULT_NPERSEG
     noverlap = DEFAULT_NOVERLAP
     minimum, maximum = DEFAULT_BAND_HZ
     min_distance_hz = DEFAULT_MIN_DISTANCE_HZ
+    configured_window_hz = DEFAULT_BASELINE_WINDOW_HZ
     if CONFIG_PATH.exists():
         with CONFIG_PATH.open("rb") as config_file:
             config = tomllib.load(config_file)
@@ -299,13 +310,22 @@ def load_settings(alpha: float, band_hz: tuple[float, float] | None) -> Spectrum
                 float(band.get("min_distance_hz", min_distance_hz))
                 for band in bands
             )
+        configured_window_hz = float(
+            config.get("stable_spectrum", {}).get(
+                "baseline_window_hz", configured_window_hz,
+            )
+        )
     if band_hz is not None:
         minimum, maximum = band_hz
+    if baseline_window_hz is not None:
+        configured_window_hz = baseline_window_hz
+    if configured_window_hz <= 0.0:
+        raise ValueError("the baseline window must be positive")
     return SpectrumSettings(
         nperseg=nperseg,
         noverlap=noverlap,
         band_hz=(minimum, maximum),
-        baseline_window_hz=DEFAULT_BASELINE_WINDOW_HZ,
+        baseline_window_hz=configured_window_hz,
         min_distance_hz=min_distance_hz,
         alpha=alpha,
     )
@@ -1626,13 +1646,18 @@ def parse_cli_arguments(arguments: list[str] | None = None) -> argparse.Namespac
         help="report what sits at these frequencies on every axis, "
              "including the 95%% upper bound when nothing is detected",
     )
+    parser.add_argument(
+        "--baseline-window", type=float, default=None, metavar="HZ",
+        help="width of the running-median baseline (default: from "
+             f"config.toml, {DEFAULT_BASELINE_WINDOW_HZ:g} Hz without it)",
+    )
     return parser.parse_args(arguments)
 
 
 def main(arguments: list[str] | None = None) -> int:
     cli = parse_cli_arguments(arguments)
     band = tuple(cli.band) if cli.band is not None else None
-    settings = load_settings(cli.alpha, band)
+    settings = load_settings(cli.alpha, band, cli.baseline_window)
     run_stable_spectrum(
         cli.raw_paths,
         resolve_output_directory(cli.output, cli.raw_paths),

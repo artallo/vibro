@@ -2,11 +2,11 @@
 
 Motivation
 ----------
-``stable_spectrum.py`` looks for narrow peaks: each bin is compared with a
-running median of its neighbours (5 Hz wide). A structure wider than about
-half that window becomes its own baseline and is not reported, and a weak
-hump that sits under the sensor noise rises only a fraction of a dB above
-it. This script asks the complementary question:
+``stable_spectrum.py`` looks for peaks: each bin is compared with a
+running median of its neighbours (10 Hz wide, 5 Hz until 2026-10-01). A
+structure wider than about half that window becomes its own baseline, and
+a weak hump that sits under the sensor noise rises only a fraction of a dB
+above it. This script asks the complementary question:
 
     how much more power is there in a band than the sensor itself makes?
 
@@ -70,7 +70,6 @@ import numpy as np
 
 from stable_spectrum import (
     AXIS_KEYS,
-    DEFAULT_BASELINE_WINDOW_HZ,
     STABLE_RESULTS_DIRECTORY,
     drop_startup_packet,
     load_settings,
@@ -639,12 +638,10 @@ def parse_cli_arguments(arguments: list[str] | None = None) -> argparse.Namespac
         help="segment length, at most one packet (default 1024)",
     )
     parser.add_argument(
-        "--baseline-windows", type=float, nargs="+",
-        default=[DEFAULT_BASELINE_WINDOW_HZ, 3.0 * DEFAULT_BASELINE_WINDOW_HZ],
-        metavar="HZ",
+        "--baseline-windows", type=float, nargs="+", default=None, metavar="HZ",
         help="running-median windows to draw and to report for named bands "
-             f"(default {DEFAULT_BASELINE_WINDOW_HZ:g} and "
-             f"{3.0 * DEFAULT_BASELINE_WINDOW_HZ:g} Hz)",
+             "(default: the window of stable_spectrum.py from config.toml); "
+             "pass several to compare, e.g. 5 10 15",
     )
     parser.add_argument(
         "--noise-sys-db", type=float, default=0.0,
@@ -671,6 +668,8 @@ def parse_cli_arguments(arguments: list[str] | None = None) -> argparse.Namespac
         parser.error(f"--reference {cli.reference!r} is not one of the --point labels")
     if cli.scan is None and not cli.bands:
         cli.scan = DEFAULT_SCAN_WIDTH_HZ
+    if cli.baseline_windows is None:
+        cli.baseline_windows = [load_settings(cli.alpha, None).baseline_window_hz]
     return cli
 
 
