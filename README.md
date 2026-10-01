@@ -30,12 +30,17 @@ To see a whole folder of captures at once:
 python overview_figure.py "C:/path/to/folder with npz"
 ```
 
-It writes `stable_results/<folder>/figure_overview.png` with two panels.
-The top panel overlays the spectrum of every capture from 0 Hz to Nyquist
-and labels what stands out there, including machinery above the analysis
-band. The bottom panel pools all captures and shows the analysis band
-against the noise of the pooled estimate. The captures must share one ODR.
-`--band` changes the bottom panel's band and `--output` the file name.
+It writes `stable_results/<folder>/nperseg_<n>/figure_overview.png` with
+two panels, one figure per segment length (1024, 2048 and 4096 by
+default, `--nperseg` to choose), plus `overview.txt` with the console
+summary. The top panel overlays the spectrum of every capture from 0 Hz
+to Nyquist and labels what stands out there, including machinery above
+the analysis band. The bottom panel pools all captures and shows the
+analysis band against the noise of the pooled estimate. The captures must
+share one ODR and one sensor position. `--band` changes the bottom
+panel's band and `--output` the directory. `--alpha 0.05` is a search
+mode: the shading stays at the 0.01 threshold and the peaks that pass
+only the looser one are drawn hollow.
 
 To look for broad humps that the narrow-peak search misses:
 
