@@ -14,6 +14,13 @@ odr_hz = 250
 nperseg = 1024
 noverlap = 512
 
+[stable_spectrum]
+# Width of the running-median baseline of stable_spectrum.py and
+# overview_figure.py. A structure wider than about half of it lifts its own
+# baseline; 10 Hz keeps the top of a 3-4 Hz wide hump. Was 5 Hz until
+# 2026-10-01.
+baseline_window_hz = 10.0
+
 [visualization.trusted_frequency]
 min_support_fraction = 0.50
 min_median_prominence_db = 1.55

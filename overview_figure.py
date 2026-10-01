@@ -136,11 +136,12 @@ def build_overview(
     captures: list[Capture],
     band_hz: tuple[float, float] | None = None,
     alpha: float = 0.01,
+    baseline_window_hz: float | None = None,
 ) -> Overview:
     sampling_rate_hz = float(np.mean(
         [capture.sampling_rate_hz for capture in captures]
     ))
-    settings = load_settings(alpha, band_hz)
+    settings = load_settings(alpha, band_hz, baseline_window_hz)
     samples_per_packet = captures[0].axes["x"].shape[1]
     settings = replace(
         settings,
@@ -363,6 +364,10 @@ def parse_cli_arguments(arguments: list[str] | None = None) -> argparse.Namespac
         "--alpha", type=float, default=0.01,
         help="family-wise false-positive rate across all bins and axes",
     )
+    parser.add_argument(
+        "--baseline-window", type=float, default=None, metavar="HZ",
+        help="width of the running-median baseline (default: from config.toml)",
+    )
     return parser.parse_args(arguments)
 
 
@@ -377,6 +382,7 @@ def main(arguments: list[str] | None = None) -> int:
         captures,
         tuple(cli.band) if cli.band is not None else None,
         cli.alpha,
+        cli.baseline_window,
     )
     output = cli.output or (
         STABLE_RESULTS_DIRECTORY / cli.folder.resolve().name / "figure_overview.png"

@@ -425,6 +425,120 @@ class ResolutionTests(unittest.TestCase):
         self.assertLess(spectrum.half_scale, 0.6)
 
 
+def wide_hump(packets: int, seed: int, low_hz: float, high_hz: float) -> np.ndarray:
+    """Band-limited noise: a hump as wide as the band, unit variance."""
+    from scipy.signal import butter, sosfiltfilt
+
+    generator = np.random.default_rng(seed)
+    sos = butter(2, (low_hz, high_hz), btype="bandpass", fs=SAMPLING_RATE_HZ, output="sos")
+    hump = sosfiltfilt(sos, generator.normal(0.0, 1.0, packets * SAMPLES_PER_PACKET))
+    return (hump / hump.std()).reshape(packets, SAMPLES_PER_PACKET)
+
+
+class BaselineWindowTests(unittest.TestCase):
+    HUMP_HZ = (9.0, 13.0)
+
+    def hump_top(self, signal: np.ndarray, window_hz: float):
+        from dataclasses import replace
+
+        settings = replace(SETTINGS, baseline_window_hz=window_hz)
+        spectrum = analyze_axis("X", signal, SAMPLING_RATE_HZ, settings)
+        threshold = significance_threshold(
+            spectrum.frequencies.size * 3, settings.alpha, signal.shape[0],
+        )
+        inside = (spectrum.frequencies >= self.HUMP_HZ[0]) & (
+            spectrum.frequencies <= self.HUMP_HZ[1]
+        )
+        peaks = [
+            peak for peak in find_stable_peaks([spectrum], threshold, settings, BANDS)
+            if self.HUMP_HZ[0] <= peak.frequency_hz <= self.HUMP_HZ[1]
+        ]
+        return float(np.max(spectrum.prominence_db[inside])), peaks
+
+    def test_the_top_of_a_wide_hump_keeps_its_prominence(self) -> None:
+        # A 4 Hz wide hump lifts a 5 Hz running median almost to its own
+        # level, and its top loses most of its prominence. A 10 Hz median
+        # stays on the floor beside it.
+        for seed in (1, 3):
+            signal = noise_packets(256, 500 + seed) + 0.15 * wide_hump(
+                256, 600 + seed, *self.HUMP_HZ,
+            )
+            narrow_db, _ = self.hump_top(signal, 5.0)
+            wide_db, peaks = self.hump_top(signal, 10.0)
+            self.assertGreater(wide_db - narrow_db, 1.0, f"seed {seed}")
+            self.assertTrue(peaks, f"hump top missed at 10 Hz, seed {seed}")
+
+    def test_a_narrow_line_does_not_care_about_the_window(self) -> None:
+        signal = add_tone(noise_packets(256, 84), ON_BIN_HZ, 0.08, seed=85)
+        heights = []
+        for window_hz in (5.0, 10.0):
+            from dataclasses import replace
+
+            spectrum = analyze_axis(
+                "X", signal, SAMPLING_RATE_HZ,
+                replace(SETTINGS, baseline_window_hz=window_hz),
+            )
+            index = int(np.argmin(np.abs(spectrum.frequencies - ON_BIN_HZ)))
+            heights.append(float(spectrum.prominence_db[index]))
+        self.assertLess(abs(heights[1] - heights[0]), 0.3)
+
+    def test_noise_stays_quiet_with_the_wide_window(self) -> None:
+        from dataclasses import replace
+
+        for nperseg in (1024, 4096):
+            settings = replace(
+                settings_at(nperseg), baseline_window_hz=10.0,
+            )
+            for seed in range(4):
+                spectrum = analyze_axis(
+                    "X", noise_packets(128, 700 + seed), SAMPLING_RATE_HZ, settings,
+                )
+                threshold = significance_threshold(
+                    spectrum.frequencies.size * 3, settings.alpha,
+                    int(round(spectrum.effective_rows)),
+                )
+                self.assertEqual(
+                    find_stable_peaks([spectrum], threshold, settings, BANDS), [],
+                    f"false peak at {nperseg}, seed {seed}",
+                )
+
+    def test_the_window_comes_from_config_and_can_be_overridden(self) -> None:
+        import tomllib
+
+        from stable_spectrum import CONFIG_PATH, load_settings
+
+        with CONFIG_PATH.open("rb") as handle:
+            configured = float(tomllib.load(handle)["stable_spectrum"]["baseline_window_hz"])
+        self.assertEqual(load_settings(0.01, None).baseline_window_hz, configured)
+        self.assertEqual(load_settings(0.01, None, 7.5).baseline_window_hz, 7.5)
+        with self.assertRaises(ValueError):
+            load_settings(0.01, None, 0.0)
+
+    def test_the_command_line_key_reaches_the_report(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from stable_spectrum import main
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw = root / "synthetic_raw.npz"
+            np.savez(
+                raw,
+                x=noise_packets(64, 710), y=noise_packets(64, 711),
+                z=noise_packets(64, 712),
+                packet_fs_hz=np.full(64, SAMPLING_RATE_HZ),
+            )
+            main([
+                str(raw), "--nperseg", "1024", "--baseline-window", "15",
+                "--output", str(root / "out"),
+            ])
+            report = (root / "out" / "nperseg_1024" / "stable_report.txt").read_text(
+                encoding="utf-8",
+            )
+            self.assertIn("Baseline window: 15 Hz", report)
+
+
 class JointTests(unittest.TestCase):
     def test_continuous_noise_has_no_step(self) -> None:
         from stable_spectrum import joint_steps

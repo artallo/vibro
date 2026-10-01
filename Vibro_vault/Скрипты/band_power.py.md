@@ -51,7 +51,7 @@ tags: [vibro, скрипт]
 | `--band MIN MAX` | из конфига, 0.2 15 | где сканировать |
 | `--plot-band MIN MAX` | 0.5 30, расширяется под полосы | что показать на рисунке |
 | `--nperseg N` | 1024 | длина отрезка, не больше пакета |
-| `--baseline-windows Гц …` | 5 15 | окна скользящей медианы на рисунке и в таблице заданных полос |
+| `--baseline-windows Гц …` | из конфига, 10 | окна скользящей медианы на рисунке и в таблице заданных полос; для сравнения задать несколько, например `5 10 15` |
 | `--noise-sys-db` | 0 | систематическая погрешность опоры в дБ |
 | `--alpha` | 0.01 | вероятность ложной находки на точку |
 | `--output папка` | `stable_results/band_power_<время>/` | куда писать |
@@ -64,7 +64,7 @@ tags: [vibro, скрипт]
 сканирование:
 
 ```bash
-python band_power.py --point "Лестница 1, 5 этаж" "tumen_results/261001_Ростелеком на Республики 40/20261001_13*_raw.npz" --point "Лестница 2, 5 этаж" "tumen_results/261001_Ростелеком на Республики 40/20261001_15*_raw.npz" --point "Цоколь" "tumen_results/261001_Ростелеком на Республики 40/20261001_14*_raw.npz" --noise "tumen_results/20260912_*_raw.npz" "tumen_results/20260916_*_raw.npz" --bands 9.5-13 9-12 --scan 2 --band 0.5 30 --output stable_results/261001_resp40_band_power
+python band_power.py --point "Лестница 1, 5 этаж" "tumen_results/261001_Ростелеком на Республики 40/20261001_13*_raw.npz" --point "Лестница 2, 5 этаж" "tumen_results/261001_Ростелеком на Республики 40/20261001_15*_raw.npz" --point "Цоколь" "tumen_results/261001_Ростелеком на Республики 40/20261001_14*_raw.npz" --noise "tumen_results/20260912_*_raw.npz" "tumen_results/20260916_*_raw.npz" --bands 9.5-13 9-12 --scan 2 --band 0.5 30 --baseline-windows 5 15 --output stable_results/261001_resp40_band_power
 ```
 
 Пятый этаж против цоколя вместо шума датчика:
