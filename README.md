@@ -37,6 +37,21 @@ band. The bottom panel pools all captures and shows the analysis band
 against the noise of the pooled estimate. The captures must share one ODR.
 `--band` changes the bottom panel's band and `--output` the file name.
 
+To look for broad humps that the narrow-peak search misses:
+
+```bash
+python band_power.py --point "floor 5" "path/to/captures" --noise "tumen_results/20260916_*_raw.npz"
+```
+
+`stable_spectrum.py` compares each bin with a 5 Hz running median, so a
+structure wider than about 2.5 Hz becomes its own baseline. `band_power.py`
+compares the power in a band, packet by packet, with captures that hold
+only sensor noise (`--noise`) or with another measuring point
+(`--reference`, e.g. the basement). Bands are named (`--bands 9.5-13`) or
+scanned (`--scan 2`); the threshold is Bonferroni over bands and axes. It
+writes a report, a CSV and `figure_band_power.png` to
+`stable_results/band_power_<time>/` or `--output`.
+
 The analysis figures of `main.py` are a different, older view of the same
 data and can be skipped: its peak lists use fixed dB thresholds, which is
 what made the picture change from run to run. Its raw `.npz` is what
