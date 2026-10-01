@@ -11,14 +11,27 @@ Joins every ``*.npz`` capture in a folder and draws two panels:
    that the pooled record cannot tell apart from sensor noise.
 
 Captures are pooled packet by packet, so they must share the sampling rate
-and the packet length. The statistics are those of ``stable_spectrum.py``
-at one periodogram per packet.
+and the packet length. The statistics are those of ``stable_spectrum.py``.
+
+One figure is drawn per segment length (``--nperseg``, 1024 2048 4096 by
+default), each into its own ``nperseg_<n>/`` directory as
+``stable_spectrum.py`` lays them out. A segment longer than a packet joins
+neighbouring packets; the packets of all captures are joined in one row,
+so at every join between two captures one segment holds the end of one
+capture and the start of the next. On 16.09 the level steps at those joins
+were no larger than the steps between packets inside a capture, so that
+segment is an ordinary one as long as the sensor stayed in place.
+
+Besides the peaks, the console lists the dips: the same search run on the
+profile turned upside down. A building gives no narrow dips, so their
+number is the false-peak rate measured on the record itself.
 
 Usage::
 
     python overview_figure.py "C:/path/to/folder with npz"
-    python overview_figure.py results --output stable_results/overview.png
-    python overview_figure.py results --band 0.5 30
+    python overview_figure.py results --output stable_results/overview
+    python overview_figure.py results --band 0.5 30 --nperseg 1024
+    python overview_figure.py results --alpha 0.05
 """
 
 from __future__ import annotations
@@ -31,9 +44,14 @@ from pathlib import Path
 
 import numpy as np
 
+from scipy.signal import find_peaks
+
 from stable_spectrum import (
     AXIS_COLORS,
     AXIS_KEYS,
+    DEFAULT_ALPHA,
+    DEFAULT_NPERSEG_SWEEP,
+    MINIMUM_RELIABLE_PACKETS,
     STABLE_RESULTS_DIRECTORY,
     AxisSpectrum,
     StablePeak,
@@ -42,6 +60,7 @@ from stable_spectrum import (
     find_stable_peaks,
     load_band_names,
     load_settings,
+    resolution_directory_name,
     significance_threshold,
 )
 
@@ -54,6 +73,10 @@ MAX_RATE_MISMATCH = 0.005
 FULL_BAND_NYQUIST_MARGIN = 0.02
 MAX_LABELS = 8
 LABEL_MERGE_HZ = 1.0
+# Hann leakage spreads a noise excursion over two or three neighbouring
+# bins; a wider dip is a trough of the baseline beside a broad structure
+# rather than a noise excursion.
+NARROW_DIP_MAX_BINS = 3
 
 
 @dataclass(frozen=True)
@@ -61,6 +84,18 @@ class Capture:
     name: str
     axes: dict[str, np.ndarray]
     sampling_rate_hz: float
+
+
+@dataclass(frozen=True)
+class Dip:
+    axis: str
+    frequency_hz: float
+    z: float
+    width_bins: int
+
+    @property
+    def narrow(self) -> bool:
+        return self.width_bins <= NARROW_DIP_MAX_BINS
 
 
 @dataclass(frozen=True)
@@ -73,6 +108,25 @@ class Overview:
     pooled_peaks: list[StablePeak]
     pooled_threshold: float
     band_hz: tuple[float, float]
+    nperseg: int
+    alpha: float
+    # The threshold at the default alpha, so that peaks passing only a
+    # looser alpha can be told apart.
+    reference_threshold: float
+    pooled_dips: list[Dip]
+
+    @property
+    def bin_width_hz(self) -> float:
+        frequencies = self.pooled[0].frequencies
+        return float(frequencies[1] - frequencies[0])
+
+    @property
+    def segment_count(self) -> int:
+        return self.pooled[0].row_count
+
+    @property
+    def effective_segments(self) -> float:
+        return self.pooled[0].effective_rows
 
 
 def load_folder(folder: Path) -> list[Capture]:
@@ -119,35 +173,82 @@ def load_folder(folder: Path) -> list[Capture]:
     return captures
 
 
+def threshold_for(spectra: list[AxisSpectrum], alpha: float) -> float:
+    """The threshold of ``stable_spectrum.py``: overlapping segments count
+    as the number of independent ones they are worth."""
+    bins_tested = sum(spectrum.frequencies.size for spectrum in spectra)
+    return significance_threshold(
+        bins_tested, alpha, int(round(spectra[0].effective_rows)),
+    )
+
+
 def peaks_in(
     spectra: list[AxisSpectrum],
-    packet_count: int,
     settings,
 ) -> tuple[list[StablePeak], float]:
-    bins_tested = sum(spectrum.frequencies.size for spectrum in spectra)
-    threshold = significance_threshold(
-        bins_tested, settings.alpha, packet_count,
-    )
+    threshold = threshold_for(spectra, settings.alpha)
     peaks = find_stable_peaks(spectra, threshold, settings, load_band_names())
     return peaks, threshold
+
+
+def find_dips(
+    spectra: list[AxisSpectrum],
+    threshold: float,
+    settings,
+) -> list[Dip]:
+    """The peak search run on the profile turned upside down.
+
+    Noise throws the profile below its baseline as often as above it, and
+    a building gives no narrow dips, so the narrow ones count how many
+    false peaks this record lets through.
+    """
+    dips = []
+    for spectrum in spectra:
+        bin_width_hz = float(spectrum.frequencies[1] - spectrum.frequencies[0])
+        distance = max(1, int(round(settings.min_distance_hz / bin_width_hz)))
+        if spectrum.context_z is not None:
+            search_z, offset = spectrum.context_z, spectrum.band_offset
+        else:
+            search_z, offset = spectrum.z, 0
+        found, _ = find_peaks(-search_z, height=threshold, distance=distance)
+        below = search_z < -threshold
+        for index in found:
+            band_index = int(index) - offset
+            if not 0 <= band_index < spectrum.z.size:
+                continue
+            start = int(index)
+            while start > 0 and below[start - 1]:
+                start -= 1
+            stop = int(index)
+            while stop + 1 < below.size and below[stop + 1]:
+                stop += 1
+            dips.append(Dip(
+                axis=spectrum.axis,
+                frequency_hz=float(spectrum.frequencies[band_index]),
+                z=float(spectrum.z[band_index]),
+                width_bins=stop - start + 1,
+            ))
+    dips.sort(key=lambda dip: dip.z)
+    return dips
 
 
 def build_overview(
     captures: list[Capture],
     band_hz: tuple[float, float] | None = None,
-    alpha: float = 0.01,
+    alpha: float = DEFAULT_ALPHA,
     baseline_window_hz: float | None = None,
+    nperseg: int | None = None,
 ) -> Overview:
+    """Both panels at one segment length, one packet long by default.
+
+    Raises ValueError when the captures are too short for the segment.
+    """
     sampling_rate_hz = float(np.mean(
         [capture.sampling_rate_hz for capture in captures]
     ))
     settings = load_settings(alpha, band_hz, baseline_window_hz)
-    samples_per_packet = captures[0].axes["x"].shape[1]
-    settings = replace(
-        settings,
-        nperseg=samples_per_packet,
-        noverlap=samples_per_packet // 2,
-    )
+    segment = nperseg or captures[0].axes["x"].shape[1]
+    settings = replace(settings, nperseg=segment, noverlap=segment // 2)
     nyquist = sampling_rate_hz / 2.0
     configured_start_hz = load_settings(alpha, None).band_hz[0]
     full_settings = replace(
@@ -168,17 +269,16 @@ def build_overview(
         key: np.vstack([capture.axes[key] for capture in captures])
         for _, key in AXIS_KEYS
     }
-    packet_count = stacked["x"].shape[0]
     full_pooled = [
         analyze_axis(axis, stacked[key], sampling_rate_hz, full_settings)
         for axis, key in AXIS_KEYS
     ]
-    full_band_peaks, _ = peaks_in(full_pooled, packet_count, full_settings)
+    full_band_peaks, _ = peaks_in(full_pooled, full_settings)
     pooled = [
         analyze_axis(axis, stacked[key], sampling_rate_hz, settings)
         for axis, key in AXIS_KEYS
     ]
-    pooled_peaks, pooled_threshold = peaks_in(pooled, packet_count, settings)
+    pooled_peaks, pooled_threshold = peaks_in(pooled, settings)
     return Overview(
         captures=captures,
         sampling_rate_hz=sampling_rate_hz,
@@ -188,6 +288,10 @@ def build_overview(
         pooled_peaks=pooled_peaks,
         pooled_threshold=pooled_threshold,
         band_hz=settings.band_hz,
+        nperseg=segment,
+        alpha=alpha,
+        reference_threshold=threshold_for(pooled, DEFAULT_ALPHA),
+        pooled_dips=find_dips(pooled, pooled_threshold, settings),
     )
 
 
@@ -218,6 +322,9 @@ def save_overview(path: Path, overview: Overview) -> None:
     packets = sum(capture.axes["x"].shape[0] for capture in overview.captures)
     samples_per_packet = overview.captures[0].axes["x"].shape[1]
     minutes = packets * samples_per_packet / overview.sampling_rate_hz / 60.0
+    resolution = (
+        f"nperseg {overview.nperseg}, бин {overview.bin_width_hz:.3f} Гц"
+    )
     low, high = overview.band_hz
 
     figure, (spectrum_panel, band_panel) = plt.subplots(
@@ -270,7 +377,7 @@ def save_overview(path: Path, overview: Overview) -> None:
     spectrum_panel.grid(True, which="both", alpha=0.25)
     spectrum_panel.set_title(
         f"Спектр 0–{overview.sampling_rate_hz / 2.0:.0f} Гц, записей: {count} "
-        "(по каждой оси — по кривой на запись)",
+        f"(по каждой оси — по кривой на запись); {resolution}",
         fontsize=11,
     )
     spectrum_panel.legend(
@@ -287,6 +394,13 @@ def save_overview(path: Path, overview: Overview) -> None:
     )
 
     # Panel 2: analysis band, all captures pooled.
+    if overview.nperseg > samples_per_packet:
+        rows_label = (
+            f"{overview.segment_count} отрезков, независимых "
+            f"{overview.effective_segments:.0f}"
+        )
+    else:
+        rows_label = f"{packets} пакетов"
     extent = 0.0
     for spectrum in overview.pooled:
         color = AXIS_COLORS[spectrum.axis]
@@ -296,7 +410,7 @@ def save_overview(path: Path, overview: Overview) -> None:
         )
         band_panel.plot(
             spectrum.frequencies, spectrum.prominence_db,
-            color=color, lw=1.2, label=f"{spectrum.axis} ({packets} пакетов)",
+            color=color, lw=1.2, label=f"{spectrum.axis} ({rows_label})",
         )
         extent = max(
             extent,
@@ -333,11 +447,19 @@ def save_overview(path: Path, overview: Overview) -> None:
         )
     else:
         verdict = "ни одна кривая не выходит"
+    caution = ""
+    if overview.effective_segments < MINIMUM_RELIABLE_PACKETS:
+        caution = (
+            f"\nвнимание: независимых отрезков "
+            f"{overview.effective_segments:.0f}, меньше "
+            f"{MINIMUM_RELIABLE_PACKETS}, погрешность сама шумит"
+        )
     band_panel.set_title(
-        f"{low:g}–{high:g} Гц: все записи вместе, {minutes:.0f} мин; "
-        "закрашено — неотличимо от шума "
-        f"(порог z={overview.pooled_threshold:.1f}); {verdict}",
-        fontsize=11,
+        f"{low:g}–{high:g} Гц: все записи вместе, {minutes:.0f} мин, "
+        f"{resolution}; закрашено — неотличимо от шума "
+        f"(порог z={overview.pooled_threshold:.2f} при alpha "
+        f"{overview.alpha:g})\n{verdict}{caution}",
+        fontsize=10,
     )
 
     figure.tight_layout()
@@ -353,7 +475,13 @@ def parse_cli_arguments(arguments: list[str] | None = None) -> argparse.Namespac
     parser.add_argument("folder", type=Path, help="folder with *.npz captures")
     parser.add_argument(
         "--output", type=Path, default=None,
-        help="PNG path (default: stable_results/<folder>/figure_overview.png)",
+        help="output directory; each segment length goes into its own "
+             "nperseg_<n>/ (default: stable_results/<folder>)",
+    )
+    parser.add_argument(
+        "--nperseg", type=int, nargs="+",
+        default=list(DEFAULT_NPERSEG_SWEEP), metavar="SAMPLES",
+        help="segment lengths, one figure each (default: 1024 2048 4096)",
     )
     parser.add_argument(
         "--band", type=float, nargs=2, default=None,
@@ -361,7 +489,7 @@ def parse_cli_arguments(arguments: list[str] | None = None) -> argparse.Namespac
         help="analysis band of the second panel (default: from config.toml)",
     )
     parser.add_argument(
-        "--alpha", type=float, default=0.01,
+        "--alpha", type=float, default=DEFAULT_ALPHA,
         help="family-wise false-positive rate across all bins and axes",
     )
     parser.add_argument(
@@ -371,6 +499,56 @@ def parse_cli_arguments(arguments: list[str] | None = None) -> argparse.Namespac
     return parser.parse_args(arguments)
 
 
+def format_resolution(overview: Overview) -> str:
+    low, high = overview.band_hz
+    lines = [
+        f"nperseg {overview.nperseg}, bin {overview.bin_width_hz:.3f} Hz: "
+        f"{overview.segment_count} segments "
+        f"({overview.effective_segments:.0f} independent)",
+    ]
+    listed = ", ".join(
+        f"{peak.axis} {peak.frequency_hz:.1f} Hz" for peak in overview.full_band_peaks
+    ) or "none"
+    lines.append(f"  Full band, pooled: {listed}")
+    looser = overview.pooled_threshold < overview.reference_threshold
+    reference = (
+        f" ({overview.reference_threshold:.2f} at alpha {DEFAULT_ALPHA:g})"
+        if looser else ""
+    )
+    lines.append(
+        f"  {low:g}-{high:g} Hz, pooled, z >= {overview.pooled_threshold:.2f} "
+        f"at alpha {overview.alpha:g}{reference}:"
+    )
+    for peak in sorted(overview.pooled_peaks, key=lambda item: item.frequency_hz):
+        mark = (
+            f"  below the alpha {DEFAULT_ALPHA:g} threshold"
+            if looser and peak.z < overview.reference_threshold else ""
+        )
+        lines.append(
+            f"    {peak.axis} {peak.frequency_hz:.2f} Hz  z {peak.z:.2f}  "
+            f"+{peak.prominence_db:.2f} dB{mark}"
+        )
+    if not overview.pooled_peaks:
+        lines.append("    none")
+    narrow = sum(dip.narrow for dip in overview.pooled_dips)
+    lines.append(
+        f"  Dips below -{overview.pooled_threshold:.2f}: {narrow} narrow "
+        f"(up to {NARROW_DIP_MAX_BINS} bins), "
+        f"{len(overview.pooled_dips) - narrow} broad"
+    )
+    for dip in overview.pooled_dips:
+        lines.append(
+            f"    {dip.axis} {dip.frequency_hz:.2f} Hz  z {dip.z:.2f}  "
+            f"{dip.width_bins} bins{'' if dip.narrow else ', broad'}"
+        )
+    if overview.effective_segments < MINIMUM_RELIABLE_PACKETS:
+        lines.append(
+            f"  WARNING: {overview.effective_segments:.0f} independent "
+            f"segments is below {MINIMUM_RELIABLE_PACKETS}"
+        )
+    return "\n".join(lines) + "\n"
+
+
 def main(arguments: list[str] | None = None) -> int:
     cli = parse_cli_arguments(arguments)
     try:
@@ -378,30 +556,30 @@ def main(arguments: list[str] | None = None) -> int:
     except ValueError as error:
         print(f"error: {error}")
         return 1
-    overview = build_overview(
-        captures,
-        tuple(cli.band) if cli.band is not None else None,
-        cli.alpha,
-        cli.baseline_window,
-    )
-    output = cli.output or (
-        STABLE_RESULTS_DIRECTORY / cli.folder.resolve().name / "figure_overview.png"
-    )
-    save_overview(output, overview)
+    output = cli.output or STABLE_RESULTS_DIRECTORY / cli.folder.resolve().name
     for capture in captures:
         print(f"  {capture.name}: {capture.axes['x'].shape[0]} packets")
-    listed = ", ".join(
-        f"{peak.axis} {peak.frequency_hz:.1f} Hz" for peak in overview.full_band_peaks
-    ) or "none"
-    print(f"Full band, pooled: {listed}")
-    listed = ", ".join(
-        f"{peak.axis} {peak.frequency_hz:.2f} Hz" for peak in overview.pooled_peaks
-    ) or "none"
-    print(
-        f"{overview.band_hz[0]:g}-{overview.band_hz[1]:g} Hz, pooled "
-        f"(z >= {overview.pooled_threshold:.2f}): {listed}"
-    )
-    print(f"Saved: {output}")
+    for nperseg in dict.fromkeys(cli.nperseg):
+        try:
+            overview = build_overview(
+                captures,
+                tuple(cli.band) if cli.band is not None else None,
+                cli.alpha,
+                cli.baseline_window,
+                int(nperseg),
+            )
+        except ValueError as error:
+            print(f"nperseg {nperseg}: skipped: {error}")
+            continue
+        directory = output / resolution_directory_name(int(nperseg))
+        figure = directory / "figure_overview.png"
+        save_overview(figure, overview)
+        report = format_resolution(overview)
+        (directory / "overview.txt").write_text(
+            report, encoding="utf-8", newline="\n",
+        )
+        print(report, end="")
+        print(f"  Saved: {figure}")
     return 0
 
 
