@@ -126,6 +126,13 @@ class OverviewTests(unittest.TestCase):
             self.assertAlmostEqual(strict.pooled_threshold, strict.reference_threshold)
             self.assertLess(loose.pooled_threshold, loose.reference_threshold)
             self.assertAlmostEqual(loose.reference_threshold, strict.pooled_threshold)
+            self.assertFalse(strict.searching)
+            self.assertTrue(loose.searching)
+            for peak in strict.pooled_peaks:
+                self.assertTrue(strict.passes_reference(peak))
+            output = folder / "out" / "figure_overview.png"
+            save_overview(output, loose)
+            self.assertTrue(output.exists())
 
     def test_dips_are_the_peak_search_turned_upside_down(self) -> None:
         frequencies = np.arange(40) * 0.25

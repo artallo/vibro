@@ -22,9 +22,15 @@ capture and the start of the next. On 16.09 the level steps at those joins
 were no larger than the steps between packets inside a capture, so that
 segment is an ordinary one as long as the sensor stayed in place.
 
+The default alpha 0.01 gives the result. A looser alpha (``--alpha 0.05``)
+is a search mode: the shading stays at the 0.01 threshold, and the peaks
+that pass only the looser one are drawn hollow and listed apart.
+
 Besides the peaks, the console lists the dips: the same search run on the
-profile turned upside down. A building gives no narrow dips, so their
-number is the false-peak rate measured on the record itself.
+profile turned upside down. They are not a false-peak count: on 02.10.2026
+narrow dips turned up on the records with strong building lines and
+repeated at one frequency across resolutions, while the quiet days had
+none.
 
 Usage::
 
@@ -128,6 +134,14 @@ class Overview:
     def effective_segments(self) -> float:
         return self.pooled[0].effective_rows
 
+    @property
+    def searching(self) -> bool:
+        """A looser alpha than the default: a search, not a result."""
+        return self.pooled_threshold < self.reference_threshold
+
+    def passes_reference(self, peak: StablePeak) -> bool:
+        return peak.z >= self.reference_threshold
+
 
 def load_folder(folder: Path) -> list[Capture]:
     captures = []
@@ -198,9 +212,8 @@ def find_dips(
 ) -> list[Dip]:
     """The peak search run on the profile turned upside down.
 
-    Noise throws the profile below its baseline as often as above it, and
-    a building gives no narrow dips, so the narrow ones count how many
-    false peaks this record lets through.
+    A structure of its own, not a false-peak count: a building does give
+    narrow dips, repeating at one frequency across resolutions.
     """
     dips = []
     for spectrum in spectra:
@@ -401,10 +414,14 @@ def save_overview(path: Path, overview: Overview) -> None:
         )
     else:
         rows_label = f"{packets} пакетов"
+    # The shading stays at the standard threshold; in search mode the peaks
+    # that pass only the looser one are drawn hollow inside it.
+    searching = overview.searching
+    shade_threshold = max(overview.pooled_threshold, overview.reference_threshold)
     extent = 0.0
     for spectrum in overview.pooled:
         color = AXIS_COLORS[spectrum.axis]
-        limit = overview.pooled_threshold * spectrum.standard_error_db
+        limit = shade_threshold * spectrum.standard_error_db
         band_panel.fill_between(
             spectrum.frequencies, -limit, limit, color=color, alpha=0.08, lw=0,
         )
@@ -423,10 +440,17 @@ def save_overview(path: Path, overview: Overview) -> None:
         on_curve_db = float(np.interp(
             peak.frequency_hz, pooled.frequencies, pooled.prominence_db,
         ))
-        band_panel.plot(
-            [peak.frequency_hz], [on_curve_db],
-            marker="x", color="crimson", markersize=9, markeredgewidth=2, lw=0,
-        )
+        if overview.passes_reference(peak):
+            band_panel.plot(
+                [peak.frequency_hz], [on_curve_db],
+                marker="x", color="crimson", markersize=9, markeredgewidth=2, lw=0,
+            )
+        else:
+            band_panel.plot(
+                [peak.frequency_hz], [on_curve_db],
+                marker="o", markerfacecolor="none", markeredgecolor="crimson",
+                markersize=9, markeredgewidth=1.5, lw=0,
+            )
         band_panel.annotate(
             f"{peak.axis} {peak.frequency_hz:.2f} Гц\nz={peak.z:.1f}",
             xy=(peak.frequency_hz, on_curve_db),
@@ -439,14 +463,30 @@ def save_overview(path: Path, overview: Overview) -> None:
     band_panel.set_xlabel("Гц")
     band_panel.set_ylabel("превышение над базой, дБ")
     band_panel.grid(True, alpha=0.25)
-    band_panel.legend(loc="upper right", fontsize=8)
-    if overview.pooled_peaks:
+    handles, labels = band_panel.get_legend_handles_labels()
+    if searching:
+        handles.append(Line2D(
+            [0], [0], marker="o", markerfacecolor="none",
+            markeredgecolor="crimson", markeredgewidth=1.5, lw=0,
+        ))
+        labels.append(
+            f"только поиск: z от {overview.pooled_threshold:.2f} "
+            f"до {overview.reference_threshold:.2f}"
+        )
+    band_panel.legend(handles, labels, loc="upper right", fontsize=8)
+    ordered = sorted(overview.pooled_peaks, key=lambda p: p.frequency_hz)
+    confirmed = [peak for peak in ordered if overview.passes_reference(peak)]
+    searched = [peak for peak in ordered if not overview.passes_reference(peak)]
+    if confirmed:
         verdict = "выходят: " + ", ".join(
-            f"{peak.axis} {peak.frequency_hz:.2f} Гц"
-            for peak in sorted(overview.pooled_peaks, key=lambda p: p.frequency_hz)
+            f"{peak.axis} {peak.frequency_hz:.2f} Гц" for peak in confirmed
         )
     else:
         verdict = "ни одна кривая не выходит"
+    if searched:
+        verdict += "; только поиск: " + ", ".join(
+            f"{peak.axis} {peak.frequency_hz:.2f} Гц" for peak in searched
+        )
     caution = ""
     if overview.effective_segments < MINIMUM_RELIABLE_PACKETS:
         caution = (
@@ -454,11 +494,16 @@ def save_overview(path: Path, overview: Overview) -> None:
             f"{overview.effective_segments:.0f}, меньше "
             f"{MINIMUM_RELIABLE_PACKETS}, погрешность сама шумит"
         )
+    shade_alpha = DEFAULT_ALPHA if searching else overview.alpha
+    search_note = (
+        f"; режим поиска alpha {overview.alpha:g}, z={overview.pooled_threshold:.2f}"
+        if searching else ""
+    )
     band_panel.set_title(
         f"{low:g}–{high:g} Гц: все записи вместе, {minutes:.0f} мин, "
-        f"{resolution}; закрашено — неотличимо от шума "
-        f"(порог z={overview.pooled_threshold:.2f} при alpha "
-        f"{overview.alpha:g})\n{verdict}{caution}",
+        f"{resolution}\nзакрашено — неотличимо от шума "
+        f"(порог z={shade_threshold:.2f} при alpha {shade_alpha:g}"
+        f"{search_note})\n{verdict}{caution}",
         fontsize=10,
     )
 
@@ -490,7 +535,9 @@ def parse_cli_arguments(arguments: list[str] | None = None) -> argparse.Namespac
     )
     parser.add_argument(
         "--alpha", type=float, default=DEFAULT_ALPHA,
-        help="family-wise false-positive rate across all bins and axes",
+        help="family-wise false-positive rate across all bins and axes; "
+             "above 0.01 it is a search mode: peaks passing only this "
+             "threshold are drawn hollow",
     )
     parser.add_argument(
         "--baseline-window", type=float, default=None, metavar="HZ",
@@ -510,10 +557,9 @@ def format_resolution(overview: Overview) -> str:
         f"{peak.axis} {peak.frequency_hz:.1f} Hz" for peak in overview.full_band_peaks
     ) or "none"
     lines.append(f"  Full band, pooled: {listed}")
-    looser = overview.pooled_threshold < overview.reference_threshold
     reference = (
         f" ({overview.reference_threshold:.2f} at alpha {DEFAULT_ALPHA:g})"
-        if looser else ""
+        if overview.searching else ""
     )
     lines.append(
         f"  {low:g}-{high:g} Hz, pooled, z >= {overview.pooled_threshold:.2f} "
@@ -521,8 +567,8 @@ def format_resolution(overview: Overview) -> str:
     )
     for peak in sorted(overview.pooled_peaks, key=lambda item: item.frequency_hz):
         mark = (
-            f"  below the alpha {DEFAULT_ALPHA:g} threshold"
-            if looser and peak.z < overview.reference_threshold else ""
+            "  search only"
+            if not overview.passes_reference(peak) else ""
         )
         lines.append(
             f"    {peak.axis} {peak.frequency_hz:.2f} Hz  z {peak.z:.2f}  "
