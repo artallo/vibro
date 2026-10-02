@@ -964,11 +964,12 @@ class FolderInputTests(unittest.TestCase):
             self.write(point / "20261001_135458_run02_raw.npz", 1110)
             with mock.patch.object(stable_spectrum, "STABLE_RESULTS_DIRECTORY", root / "results"):
                 self.assertEqual(
-                    resolve_output_directory(None, [point]), root / "results" / "лестница 1",
+                    resolve_output_directory(None, [point]),
+                    root / "results" / "лестница 1" / "runs",
                 )
                 self.assertEqual(
                     resolve_output_directory(None, [point], pool=True),
-                    root / "results" / "лестница 1_pool",
+                    root / "results" / "лестница 1" / "pool",
                 )
             with contextlib.redirect_stdout(io.StringIO()):
                 code = main([str(point), "--nperseg", "2048", "--output", str(root / "out")])

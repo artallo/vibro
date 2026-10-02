@@ -2035,9 +2035,10 @@ def resolve_output_directory(
     if output is not None:
         return output
     if len(raw_paths) == 1 and raw_paths[0].is_dir():
-        # The same name overview_figure.py gives the folder.
-        name = raw_paths[0].resolve().name
-        return STABLE_RESULTS_DIRECTORY / (f"{name}_pool" if pool else name)
+        # One directory per point, named as overview_figure.py names it:
+        # the runs one by one in runs/, pooled in pool/ next to it.
+        point = STABLE_RESULTS_DIRECTORY / raw_paths[0].resolve().name
+        return point / ("pool" if pool else "runs")
     if len(raw_paths) == 1:
         return STABLE_RESULTS_DIRECTORY / raw_paths[0].stem
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
