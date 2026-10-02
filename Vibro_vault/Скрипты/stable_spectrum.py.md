@@ -40,7 +40,7 @@ python stable_spectrum.py results/20260916_193930_ODR250_run01_raw.npz
 Три записи в одну папку, полоса до 100 Гц:
 
 ```bash
-python stable_spectrum.py tumen_results/20260916_*_raw.npz --band 0.5 100 --output stable_results/260916_wide
+python stable_spectrum.py "tumen_results/260916 Тюмень, три прогона/"*_raw.npz --band 0.5 100 --output stable_results/260916_wide
 ```
 
 Проверка заданных частот, на всех осях или на одной:

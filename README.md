@@ -45,7 +45,7 @@ only the looser one are drawn hollow.
 To look for broad humps that the narrow-peak search misses:
 
 ```bash
-python band_power.py --point "floor 5" "path/to/captures" --noise "tumen_results/20260916_*_raw.npz"
+python band_power.py --point "floor 5" "path/to/captures" --noise "tumen_results/260916 Тюмень, три прогона/*_raw.npz"
 ```
 
 `stable_spectrum.py` compares each bin with a 10 Hz running median, so a

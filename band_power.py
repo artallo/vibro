@@ -46,10 +46,10 @@ from the scan.
 Usage::
 
     python band_power.py --point "floor 5" "path/to/folder" \\
-        --noise "tumen_results/20260916_*_raw.npz"
+        --noise "tumen_results/260916 Тюмень, три прогона/*_raw.npz"
     python band_power.py --point "stair 1, 5" a_raw.npz b_raw.npz \\
         --point "basement" c_raw.npz d_raw.npz \\
-        --noise "tumen_results/20260912_*_raw.npz" "tumen_results/20260916_*_raw.npz" \\
+        --noise "tumen_results/260912 Тюмень/*_raw.npz" "tumen_results/260916 Тюмень, три прогона/*_raw.npz" \\
         --bands 9.5-13 9-12 --band 0.5 30
     python band_power.py --point "floor 5" a_raw.npz --point "basement" c_raw.npz \\
         --reference "basement"

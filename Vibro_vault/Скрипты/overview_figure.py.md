@@ -103,7 +103,7 @@ tags: [vibro, скрипт]
 python overview_figure.py "C:/Users/artal/Desktop/260916 results 1-10кк"
 python overview_figure.py tumen_results_10k --nperseg 2048
 python overview_figure.py tumen_results_10k --alpha 0.05
-python overview_figure.py tumen_results --band 0.5 30 --output stable_results/tumen_overview
+python overview_figure.py "tumen_results/260916 Тюмень, три прогона" --band 0.5 30 --output stable_results/260916_overview
 ```
 
 ## Ограничения
