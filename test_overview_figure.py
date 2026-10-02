@@ -5,13 +5,28 @@ Run with: python -m unittest test_overview_figure
 
 from __future__ import annotations
 
+import contextlib
+import io
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
-from overview_figure import build_overview, load_folder, save_overview
+from overview_figure import (
+    build_overview,
+    find_dips,
+    load_folder,
+    main as overview_main,
+    save_overview,
+)
+from stable_spectrum import significance_threshold
+
+
+def main(arguments: list[str]) -> int:
+    with contextlib.redirect_stdout(io.StringIO()):
+        return overview_main(arguments)
 
 RATE_HZ = 250.0
 TONE_HZ = 20 * RATE_HZ / 1024
@@ -66,6 +81,97 @@ class OverviewTests(unittest.TestCase):
                 write_capture(folder / f"run{seed}_raw.npz", 10 + seed)
             overview = build_overview(load_folder(folder))
             self.assertEqual(overview.pooled_peaks, [])
+
+    def test_longer_segments_find_the_tone_at_their_own_threshold(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            for seed in range(3):
+                write_capture(folder / f"run{seed}_raw.npz", seed, tone=0.15)
+            captures = load_folder(folder)
+            for nperseg in (2048, 4096):
+                overview = build_overview(captures, nperseg=nperseg)
+                self.assertEqual(overview.nperseg, nperseg)
+                self.assertAlmostEqual(
+                    overview.bin_width_hz, RATE_HZ / nperseg, places=6,
+                )
+                # 192 packets in one row, half-overlapping segments.
+                hop = nperseg // 2
+                self.assertEqual(
+                    overview.segment_count, (192 * 1024 - nperseg) // hop + 1,
+                )
+                self.assertLess(
+                    overview.effective_segments, overview.segment_count,
+                )
+                bins = sum(item.frequencies.size for item in overview.pooled)
+                self.assertAlmostEqual(
+                    overview.pooled_threshold,
+                    significance_threshold(
+                        bins, 0.01, int(round(overview.effective_segments)),
+                    ),
+                )
+                self.assertTrue(overview.pooled_peaks)
+                self.assertEqual(overview.pooled_peaks[0].axis, "X")
+                self.assertAlmostEqual(
+                    overview.pooled_peaks[0].frequency_hz, TONE_HZ,
+                    delta=RATE_HZ / nperseg,
+                )
+
+    def test_looser_alpha_keeps_the_default_threshold_for_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            write_capture(folder / "run0_raw.npz", 3)
+            captures = load_folder(folder)
+            strict = build_overview(captures)
+            loose = build_overview(captures, alpha=0.05)
+            self.assertAlmostEqual(strict.pooled_threshold, strict.reference_threshold)
+            self.assertLess(loose.pooled_threshold, loose.reference_threshold)
+            self.assertAlmostEqual(loose.reference_threshold, strict.pooled_threshold)
+            self.assertFalse(strict.searching)
+            self.assertTrue(loose.searching)
+            for peak in strict.pooled_peaks:
+                self.assertTrue(strict.passes_reference(peak))
+            output = folder / "out" / "figure_overview.png"
+            save_overview(output, loose)
+            self.assertTrue(output.exists())
+
+    def test_dips_are_the_peak_search_turned_upside_down(self) -> None:
+        frequencies = np.arange(40) * 0.25
+        z = np.zeros(40)
+        z[10] = -6.0
+        z[25:31] = -5.0
+        z[28] = -5.5
+        z[35] = 6.0
+        spectrum = SimpleNamespace(
+            axis="Y", frequencies=frequencies, z=z,
+            context_z=None, band_offset=0,
+        )
+        settings = SimpleNamespace(min_distance_hz=1.0)
+        dips = find_dips([spectrum], 4.0, settings)
+        self.assertEqual([dip.frequency_hz for dip in dips], [2.5, 7.0])
+        self.assertTrue(dips[0].narrow)
+        self.assertEqual(dips[1].width_bins, 6)
+        self.assertFalse(dips[1].narrow)
+
+    def test_each_segment_length_gets_its_own_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory) / "captures"
+            folder.mkdir()
+            for seed in range(2):
+                write_capture(folder / f"run{seed}_raw.npz", 20 + seed, packets=16)
+            output = Path(directory) / "out"
+            code = main([
+                str(folder), "--output", str(output),
+                "--nperseg", "1024", "4096", "1048576", "--alpha", "0.05",
+            ])
+            self.assertEqual(code, 0)
+            for nperseg in (1024, 4096):
+                resolution = output / f"nperseg_{nperseg}"
+                self.assertTrue((resolution / "figure_overview.png").exists())
+                report = (resolution / "overview.txt").read_text(encoding="utf-8")
+                self.assertIn(f"nperseg {nperseg}", report)
+                self.assertIn("at alpha 0.01", report)
+                self.assertIn("Dips below", report)
+            self.assertFalse((output / "nperseg_1048576").exists())
 
     def test_mixed_sampling_rates_are_refused(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
