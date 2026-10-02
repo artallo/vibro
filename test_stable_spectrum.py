@@ -708,6 +708,86 @@ class DriverTests(unittest.TestCase):
             )
 
 
+class SeparationTests(unittest.TestCase):
+    def found(self, signal, sigma, nperseg=4096):
+        from dataclasses import replace
+
+        settings = replace(
+            settings_at(nperseg), baseline_window_hz=10.0, separation_sigma=sigma,
+        )
+        spectrum = analyze_axis("X", signal, SAMPLING_RATE_HZ, settings)
+        threshold = significance_threshold(
+            spectrum.frequencies.size * 3, 0.01, int(round(spectrum.effective_rows)),
+        )
+        return [
+            round(peak.frequency_hz, 2)
+            for peak in find_stable_peaks([spectrum], threshold, settings, BANDS)
+        ]
+
+    def test_two_lines_0_6_hz_apart_are_both_found(self) -> None:
+        for seed in (0, 1):
+            signal = add_tone(
+                add_tone(noise_packets(256, 1200 + seed), ON_BIN_HZ, 0.08, seed=1300 + seed),
+                ON_BIN_HZ + 0.6, 0.06, seed=1400 + seed,
+            )
+            self.assertEqual(len(self.found(signal, 0.0)), 1, f"seed {seed}")
+            self.assertEqual(len(self.found(signal, 2.0)), 2, f"seed {seed}")
+
+    def test_a_strong_line_gets_no_neighbour(self) -> None:
+        signal = add_tone(noise_packets(256, 1900), ON_BIN_HZ, 0.5, seed=1950)
+        for nperseg in (1024, 4096):
+            self.assertEqual(self.found(signal, 2.0, nperseg), [round(ON_BIN_HZ, 2)])
+
+    def test_the_flank_of_a_resonance_gets_no_new_peak(self) -> None:
+        for seed in range(3):
+            signal = noise_packets(256, 1700 + seed) + 1.5 * resonance(
+                256, 6.0, 0.04, seed=1800 + seed,
+            )
+            for nperseg in (2048, 4096):
+                self.assertEqual(
+                    sorted(self.found(signal, 2.0, nperseg)),
+                    sorted(self.found(signal, 0.0, nperseg)),
+                    f"seed {seed}, nperseg {nperseg}",
+                )
+
+    def test_peaks_exactly_one_window_apart_need_no_dip(self) -> None:
+        from types import SimpleNamespace
+
+        from stable_spectrum import separate_close_peaks
+
+        flat = np.zeros(40)
+        spectrum = SimpleNamespace(
+            z=flat.copy(), prominence_db=flat.copy(), standard_error_db=flat + 0.3,
+        )
+        spectrum.z[[10, 26]] = [9.0, 6.0]
+        spectrum.prominence_db[[10, 26]] = [3.0, 2.0]
+        spectrum.prominence_db[11:26] = 1.9  # almost no dip in between
+        kept = separate_close_peaks(spectrum, np.array([10, 26]), 16, 2.0)
+        self.assertEqual(list(kept), [10, 26])
+        closer = separate_close_peaks(spectrum, np.array([10, 25]), 16, 2.0)
+        self.assertEqual(list(closer), [10])
+
+    def test_the_settings_carry_the_separation(self) -> None:
+        from stable_spectrum import load_settings
+
+        self.assertEqual(load_settings(0.01, None, None, None, 0.0).separation_sigma, 0.0)
+        self.assertEqual(load_settings(0.01, None, None, 0.5, 2.5).min_distance_hz, 0.5)
+        self.assertEqual(load_settings(0.01, None, None, None, 2.5).separation_sigma, 2.5)
+        with self.assertRaises(ValueError):
+            load_settings(0.01, None, None, None, -1.0)
+
+    def test_the_configured_separation_is_the_default(self) -> None:
+        import tomllib
+
+        from stable_spectrum import CONFIG_PATH, load_settings
+
+        with CONFIG_PATH.open("rb") as handle:
+            own = tomllib.load(handle)["stable_spectrum"]
+        settings = load_settings(0.01, None)
+        self.assertEqual(settings.separation_sigma, float(own["separation_sigma"]))
+        self.assertEqual(settings.min_distance_hz, float(own["min_distance_hz"]))
+
+
 class PoolTests(unittest.TestCase):
     def write(self, path, seed, tone=0.0, rate=SAMPLING_RATE_HZ, offset=0.0, packets=128):
         np.savez(

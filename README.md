@@ -280,6 +280,12 @@ The peaks run A found at the looser alpha are checked on run B with the
 honest threshold; a record is never asked to confirm its own findings.
 `false_alarm_check.py --probes 3` checks that threshold on noise.
 
+Two peaks closer than 1 Hz (`[stable_spectrum] min_distance_hz`) used to
+merge into the one with the higher z. Now the weaker one stays when the
+prominence dips between them by more than 2 standard errors
+(`separation_sigma`, `--separation-sigma`; 0 restores the old merge). The
+old detector in `main.py` keeps its own `min_distance_hz`.
+
 To analyse the runs of one point as one long record:
 
 ```bash
