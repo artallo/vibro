@@ -1605,7 +1605,12 @@ def format_capture_report(result: CaptureResult) -> str:
             if result.window_count
             else "Support windows: none, record too short to split"
         ),
-        f"Significance threshold: z >= {result.z_threshold:.2f}",
+        f"Significance threshold: z >= {result.z_threshold:.2f}"
+        + (
+            f"   Each half (Persistent): z >= "
+            f"{result.z_threshold * result.spectra[0].half_scale:.2f}"
+            if result.spectra else ""
+        ),
     ]
     lines[2] += (
         f"   Rate spread: {result.quality.sampling_rate_spread_ppm:.0f} ppm"
