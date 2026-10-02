@@ -50,7 +50,7 @@ tags: [vibro, скрипт, проверка]
 
 ```bash
 python false_alarm_check.py --runs 300 --baseline-window 5 10 --output stable_results/false_alarm_white
-python false_alarm_check.py --runs 300 --baseline-window 5 10 --noise-shape "tumen_results/20260912_*_raw.npz" "tumen_results/20260916_*_raw.npz" --seed 2027 --output stable_results/false_alarm_coloured
+python false_alarm_check.py --runs 300 --baseline-window 5 10 --noise-shape "tumen_results/260912 Тюмень/*_raw.npz" "tumen_results/260916 Тюмень, три прогона/*_raw.npz" --seed 2027 --output stable_results/false_alarm_coloured
 ```
 
 Около 1,5 с на запись при шести сочетаниях базы и разрешения, 300 записей
@@ -95,7 +95,7 @@ alpha. Зачем: решить, можно ли опустить порог в 
 
 ```bash
 python false_alarm_check.py --runs 300 --alpha 0.05 --output stable_results/false_alarm_white_a05
-python false_alarm_check.py --runs 300 --alpha 0.05 --noise-shape "tumen_results/20260912_*_raw.npz" "tumen_results/20260916_*_raw.npz" --seed 2027 --output stable_results/false_alarm_coloured_a05
+python false_alarm_check.py --runs 300 --alpha 0.05 --noise-shape "tumen_results/260912 Тюмень/*_raw.npz" "tumen_results/260916 Тюмень, три прогона/*_raw.npz" --seed 2027 --output stable_results/false_alarm_coloured_a05
 ```
 
 | Шум | alpha | 1024 | 2048 | 4096 |
@@ -142,7 +142,7 @@ python false_alarm_check.py --runs 300 --alpha 0.05 --noise-shape "tumen_results
 
 ```bash
 python false_alarm_check.py --runs 300 --probes 3 --output stable_results/false_alarm_probe_white
-python false_alarm_check.py --runs 300 --probes 3 --noise-shape "tumen_results/20260912_*_raw.npz" "tumen_results/20260916_*_raw.npz" --seed 2027 --output stable_results/false_alarm_probe_coloured
+python false_alarm_check.py --runs 300 --probes 3 --noise-shape "tumen_results/260912 Тюмень/*_raw.npz" "tumen_results/260916 Тюмень, три прогона/*_raw.npz" --seed 2027 --output stable_results/false_alarm_probe_coloured
 ```
 
 Результат 02.10.2026, три пробы на запись, alpha 1 %:

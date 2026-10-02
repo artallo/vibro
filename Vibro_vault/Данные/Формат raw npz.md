@@ -30,7 +30,7 @@ tags: [vibro, данные, формат]
 
 ```python
 import numpy as np
-d = np.load("tumen_results/20260916_193930_ODR250_run01_raw.npz")
+d = np.load("tumen_results/260916 Тюмень, три прогона/20260916_193930_ODR250_run01_raw.npz")
 print(d.files, d["z"].shape, d["packet_fs_hz"].mean())
 ```
 

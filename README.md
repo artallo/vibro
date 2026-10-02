@@ -45,7 +45,7 @@ only the looser one are drawn hollow.
 To look for broad humps that the narrow-peak search misses:
 
 ```bash
-python band_power.py --point "floor 5" "path/to/captures" --noise "tumen_results/20260916_*_raw.npz"
+python band_power.py --point "floor 5" "path/to/captures" --noise "tumen_results/260916 Тюмень, три прогона/*_raw.npz"
 ```
 
 `stable_spectrum.py` compares each bin with a 10 Hz running median, so a
@@ -279,6 +279,18 @@ python stable_spectrum.py <run B>_raw.npz --nperseg 2048 --confirm-from stable_r
 The peaks run A found at the looser alpha are checked on run B with the
 honest threshold; a record is never asked to confirm its own findings.
 `false_alarm_check.py --probes 3` checks that threshold on noise.
+
+To analyse the runs of one point as one long record:
+
+```bash
+python stable_spectrum.py <run 1>_raw.npz <run 2>_raw.npz --pool
+```
+
+Each run is cut into segments on its own and the segments of all runs go
+into one average, so no segment straddles the pause between runs (where the
+sensor may have been moved). Every peak of the pooled record is marked
+`k/N`: in how many of the N runs the blind search of that run alone finds
+it. `overview_figure.py` pools a folder the same way.
 
 ### Measuring repeatability
 

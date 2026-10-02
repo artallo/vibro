@@ -16,11 +16,11 @@ and the packet length. The statistics are those of ``stable_spectrum.py``.
 One figure is drawn per segment length (``--nperseg``, 1024 2048 4096 by
 default), each into its own ``nperseg_<n>/`` directory as
 ``stable_spectrum.py`` lays them out. A segment longer than a packet joins
-neighbouring packets; the packets of all captures are joined in one row,
-so at every join between two captures one segment holds the end of one
-capture and the start of the next. On 16.09 the level steps at those joins
-were no larger than the steps between packets inside a capture, so that
-segment is an ordinary one as long as the sensor stayed in place.
+neighbouring packets of one capture. Each capture is cut on its own and
+the segments of all captures go into one average, as ``stable_spectrum.py
+--pool`` does, so no segment holds the end of one capture and the start of
+the next. Until 2026-10-02 the captures were joined in one row and one
+segment straddled every join.
 
 The default alpha 0.01 gives the result. A looser alpha (``--alpha 0.05``)
 is a search mode: the shading stays at the 0.01 threshold, and the peaks
@@ -64,6 +64,7 @@ from stable_spectrum import (
     analyze_axis,
     drop_startup_packet,
     find_stable_peaks,
+    level_jump_warnings,
     load_band_names,
     load_settings,
     resolution_directory_name,
@@ -282,13 +283,15 @@ def build_overview(
         key: np.vstack([capture.axes[key] for capture in captures])
         for _, key in AXIS_KEYS
     }
+    # Each capture is cut on its own: no segment crosses a pause between two.
+    groups = [capture.axes["x"].shape[0] for capture in captures]
     full_pooled = [
-        analyze_axis(axis, stacked[key], sampling_rate_hz, full_settings)
+        analyze_axis(axis, stacked[key], sampling_rate_hz, full_settings, groups)
         for axis, key in AXIS_KEYS
     ]
     full_band_peaks, _ = peaks_in(full_pooled, full_settings)
     pooled = [
-        analyze_axis(axis, stacked[key], sampling_rate_hz, settings)
+        analyze_axis(axis, stacked[key], sampling_rate_hz, settings, groups)
         for axis, key in AXIS_KEYS
     ]
     pooled_peaks, pooled_threshold = peaks_in(pooled, settings)
@@ -605,6 +608,12 @@ def main(arguments: list[str] | None = None) -> int:
     output = cli.output or STABLE_RESULTS_DIRECTORY / cli.folder.resolve().name
     for capture in captures:
         print(f"  {capture.name}: {capture.axes['x'].shape[0]} packets")
+    warnings = [
+        f"WARNING: {message}"
+        for message in level_jump_warnings([capture.axes for capture in captures])
+    ]
+    for line in warnings:
+        print(line)
     for nperseg in dict.fromkeys(cli.nperseg):
         try:
             overview = build_overview(
@@ -622,7 +631,8 @@ def main(arguments: list[str] | None = None) -> int:
         save_overview(figure, overview)
         report = format_resolution(overview)
         (directory / "overview.txt").write_text(
-            report, encoding="utf-8", newline="\n",
+            "".join(f"{line}\n" for line in warnings) + report,
+            encoding="utf-8", newline="\n",
         )
         print(report, end="")
         print(f"  Saved: {figure}")

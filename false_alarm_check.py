@@ -32,7 +32,7 @@ Usage::
     python false_alarm_check.py --runs 300
     python false_alarm_check.py --runs 300 --probes 3
     python false_alarm_check.py --runs 300 --baseline-window 5 10 \\
-        --noise-shape "tumen_results/20260912_*_raw.npz" "tumen_results/20260916_*_raw.npz"
+        --noise-shape "tumen_results/260912 Тюмень/*_raw.npz" "tumen_results/260916 Тюмень, три прогона/*_raw.npz"
 """
 
 from __future__ import annotations

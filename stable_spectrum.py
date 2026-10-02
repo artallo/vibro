@@ -183,6 +183,14 @@ class StablePeak:
     # frequency_hz is the top of the peak found between bins; this keeps the
     # centre of the bin that held the maximum.
     bin_frequency_hz: float = 0.0
+    # Pooled records only: in how many of the pooled runs the blind search
+    # of that run alone finds this frequency, on the same axis.
+    runs_found: int = 0
+    runs_total: int = 0
+
+    @property
+    def runs_label(self) -> str:
+        return f"{self.runs_found}/{self.runs_total}" if self.runs_total > 1 else ""
 
     @property
     def support_fraction(self) -> float:
@@ -328,6 +336,15 @@ class CaptureResult:
     confirm_threshold: float = 0.0
     confirm_bins: int = 0
     confirm_skipped: str = ""
+    # Pooled records: the runs, their packet counts and their own checks.
+    members: tuple[str, ...] = ()
+    member_packets: tuple[int, ...] = ()
+    member_quality: tuple[tuple[str, "QualityReport"], ...] = ()
+    pool_warnings: tuple[str, ...] = ()
+
+    @property
+    def pooled(self) -> bool:
+        return len(self.members) > 1
 
     @property
     def segmented(self) -> bool:
@@ -483,6 +500,7 @@ def segment_periodograms(
     signal: np.ndarray,
     sampling_rate_hz: float,
     settings: SpectrumSettings,
+    groups: list[int] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, int]:
     """Periodograms at the configured resolution: (frequencies, rows, stride).
 
@@ -490,9 +508,11 @@ def segment_periodograms(
     one row per packet. Longer segments are cut from the packets joined in
     order, which assumes the packets follow each other without a gap, with
     50% overlap. ``stride`` is how many rows apart two segments stop
-    overlapping: 1 for packets, 2 for half-overlapping segments. The input
-    must be contiguous packets of one record when it is longer than one
-    packet.
+    overlapping: 1 for packets, 2 for half-overlapping segments.
+
+    ``groups`` gives the packet count of each record when several records
+    are stacked: each record is cut on its own and the segments of all of
+    them are pooled, so no segment straddles the pause between two records.
     """
     samples_per_packet = signal.shape[-1]
     if settings.nperseg <= samples_per_packet:
@@ -502,17 +522,29 @@ def segment_periodograms(
         return frequencies, psd, 1
     nperseg = settings.nperseg
     hop = nperseg // 2
-    series = np.asarray(signal).reshape(-1)
-    count = (series.size - nperseg) // hop + 1 if series.size >= nperseg else 0
-    if count < MINIMUM_SEGMENTS:
+    signal = np.asarray(signal)
+    sizes = groups if groups else [signal.shape[0]]
+    if sum(sizes) != signal.shape[0]:
         raise ValueError(
-            f"{series.size} samples give {count} segments of {nperseg}; "
+            f"groups add up to {sum(sizes)} packets, the signal has {signal.shape[0]}"
+        )
+    all_segments = []
+    start_packet = 0
+    for size in sizes:
+        series = signal[start_packet:start_packet + size].reshape(-1)
+        start_packet += size
+        count = (series.size - nperseg) // hop + 1 if series.size >= nperseg else 0
+        if count > 0:
+            starts = hop * np.arange(count)
+            all_segments.append(series[starts[:, None] + np.arange(nperseg)[None, :]])
+    total = sum(block.shape[0] for block in all_segments)
+    if total < MINIMUM_SEGMENTS:
+        raise ValueError(
+            f"{signal.size} samples give {total} segments of {nperseg}; "
             f"at least {MINIMUM_SEGMENTS} are needed"
         )
-    starts = hop * np.arange(count)
-    segments = series[starts[:, None] + np.arange(nperseg)[None, :]]
     frequencies, psd = welch(
-        segments,
+        np.vstack(all_segments),
         fs=sampling_rate_hz,
         window="hann",
         nperseg=nperseg,
@@ -528,9 +560,10 @@ def analyze_axis(
     signal: np.ndarray,
     sampling_rate_hz: float,
     settings: SpectrumSettings,
+    groups: list[int] | None = None,
 ) -> AxisSpectrum:
     all_frequencies, all_psd, stride = segment_periodograms(
-        signal, sampling_rate_hz, settings,
+        signal, sampling_rate_hz, settings, groups,
     )
     bin_width_hz = float(all_frequencies[1] - all_frequencies[0])
     baseline_window = max(3, int(round(settings.baseline_window_hz / bin_width_hz)))
@@ -1093,6 +1126,91 @@ def load_candidates(
     return requests, frozenset(captures), tuple(str(file) for file in files)
 
 
+@dataclass(frozen=True)
+class LoadedCapture:
+    name: str
+    source: Path
+    axes: dict[str, np.ndarray]  # start-up packet left out when it had a transient
+    packet_fs_hz: np.ndarray
+    recorded_axes: dict[str, np.ndarray]
+    recorded_fs_hz: np.ndarray
+    startup_dropped: bool
+
+
+def load_capture(raw_path: Path) -> LoadedCapture:
+    with np.load(raw_path, allow_pickle=False) as archive:
+        recorded_axes = {key: np.asarray(archive[key]) for _, key in AXIS_KEYS}
+        recorded_fs_hz = np.asarray(archive["packet_fs_hz"])
+    axes, packet_fs_hz, startup_dropped = drop_startup_packet(
+        recorded_axes, recorded_fs_hz,
+    )
+    return LoadedCapture(
+        name=raw_path.stem,
+        source=raw_path,
+        axes=axes,
+        packet_fs_hz=packet_fs_hz,
+        recorded_axes=recorded_axes,
+        recorded_fs_hz=recorded_fs_hz,
+        startup_dropped=startup_dropped,
+    )
+
+
+# Records pooled together must share one frequency grid.
+MAX_POOL_RATE_MISMATCH = 0.005
+# Runs of one sensor placement differ in mean level by at most a few times
+# the noise of one sample (up to 7x on all records so far); moving the
+# sensor tilts it and shifts X and Y by 70-170x. A spread above this ratio
+# means the runs are probably not of one point.
+LEVEL_JUMP_NOISE_RATIO = 20.0
+
+
+def level_jump_warnings(axes_list: list[dict[str, np.ndarray]]) -> list[str]:
+    """Axes whose mean level differs between runs far more than their noise.
+
+    Each item holds the (packets, samples) arrays of one run. The noise is
+    the median over runs of the median per-packet standard deviation.
+    """
+    if len(axes_list) < 2:
+        return []
+    messages = []
+    for axis, key in AXIS_KEYS:
+        means = [float(np.mean(axes[key])) for axes in axes_list]
+        noise = float(np.median([
+            np.median(np.std(axes[key], axis=1)) for axes in axes_list
+        ]))
+        spread = max(means) - min(means)
+        if noise > 0.0 and spread > LEVEL_JUMP_NOISE_RATIO * noise:
+            messages.append(
+                f"{axis}: the mean level differs by {spread * 1.0e3:.1f} mg between "
+                f"runs ({spread / noise:.0f}x the noise of one sample): the sensor "
+                "was probably moved, pool only the runs of one point"
+            )
+    return messages
+
+
+def windows_for_groups(groups: list[int]) -> list[np.ndarray]:
+    """Support windows that never straddle the pause between two records."""
+    total = sum(groups)
+    window_packets = max(MINIMUM_WINDOW_PACKETS, total // WINDOW_TARGET_COUNT)
+    windows = []
+    offset = 0
+    for size in groups:
+        for index in range(size // window_packets):
+            start = offset + index * window_packets
+            windows.append(np.arange(start, start + window_packets))
+        offset += size
+    return windows if len(windows) >= 2 else []
+
+
+def pooled_name(records: list[LoadedCapture]) -> str:
+    """``pooled_141520_143239`` for records named like 20261001_141520_..."""
+    parts = []
+    for record in records:
+        pieces = record.name.split("_")
+        parts.append(pieces[1] if len(pieces) > 1 and pieces[1].isdigit() else record.name)
+    return "pooled_" + "_".join(parts)
+
+
 def analyze_capture(
     raw_path: Path,
     settings: SpectrumSettings,
@@ -1100,18 +1218,77 @@ def analyze_capture(
     probe_hz: list[float] | None = None,
     plan: ProbePlan | None = None,
 ) -> CaptureResult:
-    with np.load(raw_path, allow_pickle=False) as archive:
-        recorded_axes = {key: np.asarray(archive[key]) for _, key in AXIS_KEYS}
-        recorded_fs_hz = np.asarray(archive["packet_fs_hz"])
-    axes, packet_fs_hz, startup_dropped = drop_startup_packet(
-        recorded_axes, recorded_fs_hz,
-    )
+    return analyze_records([load_capture(raw_path)], settings, bands, probe_hz, plan)
+
+
+def analyze_pool(
+    raw_paths: list[Path],
+    settings: SpectrumSettings,
+    bands: list[tuple[str, float, float]],
+    probe_hz: list[float] | None = None,
+    plan: ProbePlan | None = None,
+) -> CaptureResult:
+    """Several runs of one point as one long record.
+
+    Each run is cut on its own and the segments of all runs go into one
+    average, so the pause between runs never sits inside a segment. Every
+    peak of the pooled record also says in how many runs the blind search
+    of that run alone finds it, on the same axis within the probe
+    tolerance. That count is taken from each run's own search, not from a
+    probe at the pooled frequency, which the run itself helped to pick.
+    """
+    records = [load_capture(path) for path in raw_paths]
+    lengths = {record.axes["x"].shape[1] for record in records}
+    if len(lengths) > 1:
+        raise ValueError(f"runs have different packet lengths {sorted(lengths)}")
+    rates = np.array([float(np.mean(record.packet_fs_hz)) for record in records])
+    if np.ptp(rates) > MAX_POOL_RATE_MISMATCH * float(np.mean(rates)):
+        listed = ", ".join(
+            f"{record.name} {rate:.2f} Hz" for record, rate in zip(records, rates)
+        )
+        raise ValueError(f"runs were recorded at different sampling rates ({listed})")
+    result = analyze_records(records, settings, bands, probe_hz, plan)
+    tolerance = (plan or ProbePlan()).tolerance_hz
+    singles = [analyze_records([record], settings, bands) for record in records]
+    peaks = [
+        replace(
+            peak,
+            runs_found=sum(
+                any(
+                    other.axis == peak.axis
+                    and abs(other.frequency_hz - peak.frequency_hz) <= tolerance
+                    for other in single.peaks
+                )
+                for single in singles
+            ),
+            runs_total=len(records),
+        )
+        for peak in result.peaks
+    ]
+    return replace(result, peaks=peaks)
+
+
+def analyze_records(
+    records: list[LoadedCapture],
+    settings: SpectrumSettings,
+    bands: list[tuple[str, float, float]],
+    probe_hz: list[float] | None = None,
+    plan: ProbePlan | None = None,
+) -> CaptureResult:
+    """One record, or several runs pooled, each cut on its own."""
+    groups = [record.axes["x"].shape[0] for record in records]
+    axes = {
+        key: np.vstack([record.axes[key] for record in records])
+        for _, key in AXIS_KEYS
+    }
+    packet_fs_hz = np.concatenate([record.packet_fs_hz for record in records])
     sampling_rate_hz = float(np.mean(packet_fs_hz))
     packet_count, samples_per_packet = axes["x"].shape
     duration_seconds = float(np.sum(samples_per_packet / packet_fs_hz))
+    pooled = len(records) > 1
 
     spectra = [
-        analyze_axis(axis, axes[key], sampling_rate_hz, settings)
+        analyze_axis(axis, axes[key], sampling_rate_hz, settings, groups)
         for axis, key in AXIS_KEYS
     ]
     bins_tested = sum(spectrum.frequencies.size for spectrum in spectra)
@@ -1121,7 +1298,7 @@ def analyze_capture(
     )
     peaks = find_stable_peaks(spectra, z_threshold, settings, bands)
 
-    windows = split_into_windows(packet_count)
+    windows = windows_for_groups(groups)
     window_packets = int(windows[0].size) if windows else 0
     window_rows = 0
     if windows and peaks:
@@ -1168,7 +1345,7 @@ def analyze_capture(
     confirm_skipped = ""
     confirm_z, confirm_bins, confirmations = 0.0, 0, []
     if plan.candidates:
-        if raw_path.stem in plan.candidate_captures:
+        if any(record.name in plan.candidate_captures for record in records):
             confirm_skipped = (
                 "this record is one of those the candidates were found in; "
                 "a record cannot confirm its own findings, use another run"
@@ -1180,22 +1357,30 @@ def analyze_capture(
             confirmations = probe_frequencies(
                 spectra, list(plan.candidates), confirm_z, plan.tolerance_hz,
             )
-    # The recording check looks at packets, whatever the segment length.
-    if settings.nperseg == samples_per_packet:
-        packet_spectra = spectra
-    else:
-        packet_settings = replace(
-            settings,
-            nperseg=samples_per_packet,
-            noverlap=samples_per_packet // 2,
-        )
-        packet_spectra = [
-            analyze_axis(axis, axes[key], sampling_rate_hz, packet_settings)
-            for axis, key in AXIS_KEYS
-        ]
+    # The recording check looks at packets, whatever the segment length,
+    # and at each run on its own.
+    packet_settings = replace(
+        settings,
+        nperseg=samples_per_packet,
+        noverlap=samples_per_packet // 2,
+    )
+    member_quality = []
+    for record in records:
+        if not pooled and settings.nperseg == samples_per_packet:
+            packet_spectra = spectra
+        else:
+            rate = float(np.mean(record.packet_fs_hz))
+            packet_spectra = [
+                analyze_axis(axis, record.axes[key], rate, packet_settings)
+                for axis, key in AXIS_KEYS
+            ]
+        member_quality.append((
+            record.name,
+            assess_quality(packet_spectra, record.recorded_fs_hz, record.recorded_axes),
+        ))
     return CaptureResult(
-        capture=raw_path.stem,
-        source=raw_path,
+        capture=pooled_name(records) if pooled else records[0].name,
+        source=records[0].source,
         packet_count=packet_count,
         samples_per_packet=samples_per_packet,
         sampling_rate_hz=sampling_rate_hz,
@@ -1206,7 +1391,7 @@ def analyze_capture(
         peaks=peaks,
         detection_limit_db=detection_limit_db,
         probes=probes,
-        quality=assess_quality(packet_spectra, recorded_fs_hz, recorded_axes),
+        quality=member_quality[0][1],
         window_count=len(windows),
         window_packets=window_packets,
         expected_support=SUPPORT_ALPHA * len(windows),
@@ -1218,7 +1403,7 @@ def analyze_capture(
         effective_rows=effective_rows,
         window_rows=window_rows,
         edge_warnings=band_edge_warnings(spectra, z_threshold),
-        startup_dropped=startup_dropped,
+        startup_dropped=any(record.startup_dropped for record in records),
         probe_plan=plan,
         probe_threshold=probe_z,
         probe_bins=probe_bins,
@@ -1226,6 +1411,12 @@ def analyze_capture(
         confirm_threshold=confirm_z,
         confirm_bins=confirm_bins,
         confirm_skipped=confirm_skipped,
+        members=tuple(record.name for record in records) if pooled else (),
+        pool_warnings=tuple(
+            level_jump_warnings([record.axes for record in records])
+        ) if pooled else (),
+        member_packets=tuple(groups) if pooled else (),
+        member_quality=tuple(member_quality) if pooled else (),
     )
 
 
@@ -1239,7 +1430,7 @@ PEAK_FIELDS = [
     "z_threshold", "axis", "band", "frequency_hz", "bin_frequency_hz",
     "prominence_db",
     "standard_error_db", "z", "half_z_low", "half_z_high", "persistent",
-    "support_windows", "support_total",
+    "support_windows", "support_total", "runs_found", "runs_total",
 ]
 
 
@@ -1265,6 +1456,8 @@ def peak_rows(result: CaptureResult) -> list[dict[str, Any]]:
             "persistent": int(peak.persistent),
             "support_windows": peak.support_windows,
             "support_total": peak.support_total,
+            "runs_found": peak.runs_found,
+            "runs_total": peak.runs_total,
         }
         for peak in result.peaks
     ]
@@ -1343,19 +1536,30 @@ def format_capture_report(result: CaptureResult) -> str:
     lines[2] += (
         f"   Rate spread: {result.quality.sampling_rate_spread_ppm:.0f} ppm"
     )
+    if result.pooled:
+        lines[1:2] = [
+            f"Pooled record of {len(result.members)} runs, each cut on its own: "
+            "no segment crosses the pause between runs",
+            *[
+                f"  {name}: {packets} packets"
+                for name, packets in zip(result.members, result.member_packets)
+            ],
+            *[f"  ! {message}" for message in result.pool_warnings],
+        ]
     lines.append("")
-    lines.append("Recording check:")
-    lines.append(
-        "  RMS in band: "
-        + ", ".join(
-            f"{axis} {rms:.2e} g"
-            for axis, rms in result.quality.axis_rms_g.items()
+    for name, quality in (result.member_quality or (("", result.quality),)):
+        lines.append(f"Recording check{': ' + name if name else ''}:")
+        lines.append(
+            "  RMS in band: "
+            + ", ".join(
+                f"{axis} {rms:.2e} g"
+                for axis, rms in quality.axis_rms_g.items()
+            )
         )
-    )
-    for message in result.quality.warnings:
-        lines.append(f"  ! {message}")
-    if not result.quality.warnings:
-        lines.append("  no anomaly found in the recording itself")
+        for message in quality.warnings:
+            lines.append(f"  ! {message}")
+        if not quality.warnings:
+            lines.append("  no anomaly found in the recording itself")
     if result.startup_dropped:
         lines.append(
             "  packet 1 holds a sharp transient (normally the sensor start-up) "
@@ -1408,7 +1612,7 @@ def format_capture_report(result: CaptureResult) -> str:
     lines.append(f"Significant frequencies: {len(result.peaks)}")
     lines.append(
         "Axis  Band              Freq Hz   Prom dB   SE dB      z   "
-        "half z      Persistent"
+        "half z      Persistent" + ("   Runs" if result.pooled else "")
     )
     for peak in result.peaks:
         lines.append(
@@ -1417,6 +1621,13 @@ def format_capture_report(result: CaptureResult) -> str:
             f"{peak.z:5.1f}   "
             f"{peak.half_z_low:4.1f}/{peak.half_z_high:<4.1f}  "
             f"{'yes' if peak.persistent else 'no':>10}"
+            + (f"   {peak.runs_label:>4}" if result.pooled else "")
+        )
+    if result.pooled:
+        lines.append(
+            "Runs: in how many of the pooled runs the blind search of that run "
+            "alone finds the frequency (same axis, within "
+            f"{result.probe_plan.tolerance_hz:g} Hz)."
         )
     return "\n".join(lines) + format_probes(result) + format_confirmations(result) + "\n"
 
@@ -1550,8 +1761,9 @@ def save_overview_figure(
                 f"{peak.support_windows}/{peak.support_total} win\n"
                 if peak.support_total else ""
             )
+            runs = f"  {peak.runs_label}" if peak.runs_label else ""
             panel.annotate(
-                f"{peak.frequency_hz:.2f} Hz\n{support}"
+                f"{peak.frequency_hz:.2f} Hz{runs}\n{support}"
                 f"{peak.prominence_db:.2f} dB",
                 xy=(peak.frequency_hz, height),
                 xytext=(0, 13), textcoords="offset points",
@@ -1617,7 +1829,7 @@ def save_overview_figure(
             "frequency that stands out",
             "requested / confirmed, honest threshold",
         ],
-        loc="lower center", ncol=6, fontsize=9,
+        loc="lower center", ncol=3, fontsize=9,
         bbox_to_anchor=(0.5, 0.0), frameon=False,
     )
     if result.peaks:
@@ -1646,7 +1858,7 @@ def save_overview_figure(
         f"{verdict}",
         fontsize=11,
     )
-    figure.tight_layout(rect=(0, 0.035, 1, 0.925))
+    figure.tight_layout(rect=(0, 0.06, 1, 0.925))
     figure.savefig(path, dpi=110)
     plt.close(figure)
 
@@ -1682,8 +1894,9 @@ def save_figure(path: Path, result: CaptureResult) -> None:
                 [peak.frequency_hz], [on_curve_db],
                 marker="v", color="crimson", markersize=8, lw=0,
             )
+            runs = f"  {peak.runs_label}" if peak.runs_label else ""
             panel.annotate(
-                f"{peak.frequency_hz:.2f} Hz\nz={peak.z:.1f}"
+                f"{peak.frequency_hz:.2f} Hz{runs}\nz={peak.z:.1f}"
                 + ("" if peak.persistent else "\n(one half only)"),
                 xy=(peak.frequency_hz, on_curve_db),
                 xytext=(0, 12), textcoords="offset points",
@@ -1718,13 +1931,15 @@ def save_figure(path: Path, result: CaptureResult) -> None:
 # ==========================================================
 
 
-def resolve_output_directory(output: Path | None, raw_paths: list[Path]) -> Path:
+def resolve_output_directory(
+    output: Path | None, raw_paths: list[Path], pool: bool = False,
+) -> Path:
     if output is not None:
         return output
     if len(raw_paths) == 1:
         return STABLE_RESULTS_DIRECTORY / raw_paths[0].stem
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return STABLE_RESULTS_DIRECTORY / f"multi_{stamp}"
+    return STABLE_RESULTS_DIRECTORY / f"{'pooled' if pool else 'multi'}_{stamp}"
 
 
 def run_single_resolution(
@@ -1733,6 +1948,7 @@ def run_single_resolution(
     settings: SpectrumSettings,
     probe_hz: list[float] | None = None,
     plan: ProbePlan | None = None,
+    pool: bool = False,
 ) -> list[CaptureResult]:
     """Analyse every capture at one segment length into one directory."""
     bands = load_band_names()
@@ -1754,12 +1970,17 @@ def run_single_resolution(
         "interleaved halves of the same record that share no samples.",
         "",
     ]
-    for raw_path in raw_paths:
+    jobs = [raw_paths] if pool else [[raw_path] for raw_path in raw_paths]
+    for job in jobs:
         try:
-            result = analyze_capture(raw_path, settings, bands, probe_hz, plan)
+            if pool:
+                result = analyze_pool(job, settings, bands, probe_hz, plan)
+            else:
+                result = analyze_capture(job[0], settings, bands, probe_hz, plan)
         except ValueError as error:
+            label = "pooled runs" if pool else job[0].stem
             message = (
-                f"{raw_path.stem}: skipped at nperseg {settings.nperseg}: "
+                f"{label}: skipped at nperseg {settings.nperseg}: "
                 f"{error}"
             )
             print(message)
@@ -1779,6 +2000,8 @@ def run_single_resolution(
             output_directory / f"figure_dominant_{result.capture}.png",
             result,
         )
+        for message in result.pool_warnings:
+            print(f"WARNING: {message}")
         print(
             f"{result.capture} [nperseg {result.nperseg}]: "
             f"{result.row_count} rows, z>={result.z_threshold:.2f} -> "
@@ -1922,6 +2145,7 @@ def run_stable_spectrum(
     probe_hz: list[float] | None = None,
     nperseg_values: list[int] | None = None,
     plan: ProbePlan | None = None,
+    pool: bool = False,
 ) -> Path:
     """Analyse captures, once per segment length.
 
@@ -1931,7 +2155,7 @@ def run_stable_spectrum(
     figure per capture are written next to them.
     """
     if not nperseg_values:
-        run_single_resolution(raw_paths, output_directory, settings, probe_hz, plan)
+        run_single_resolution(raw_paths, output_directory, settings, probe_hz, plan, pool)
         print(f"Saved stable spectrum analysis: {output_directory}")
         return output_directory
     output_directory.mkdir(parents=True, exist_ok=True)
@@ -1946,6 +2170,7 @@ def run_stable_spectrum(
             resolution_settings,
             probe_hz,
             plan,
+            pool,
         )
     (output_directory / "comparison.txt").write_text(
         format_comparison(results_by_nperseg), encoding="utf-8", newline="\n",
@@ -2002,6 +2227,13 @@ def parse_cli_arguments(arguments: list[str] | None = None) -> argparse.Namespac
              f"of --alpha (default {DEFAULT_ALPHA:g})",
     )
     parser.add_argument(
+        "--pool", action="store_true",
+        help="treat the given records as runs of one point and analyse them as "
+             "one long record: each run is cut on its own and all segments go "
+             "into one average; every peak says in how many runs it is found "
+             "on its own (e.g. 1/2)",
+    )
+    parser.add_argument(
         "--confirm-from", type=Path, nargs="+", default=None, metavar="PATH",
         help="stable_frequencies.csv files, or folders holding them, from a "
              "search on other runs (e.g. --alpha 0.05): their peaks are "
@@ -2040,11 +2272,12 @@ def main(arguments: list[str] | None = None) -> int:
     )
     run_stable_spectrum(
         cli.raw_paths,
-        resolve_output_directory(cli.output, cli.raw_paths),
+        resolve_output_directory(cli.output, cli.raw_paths, cli.pool),
         settings,
         None,
         cli.nperseg or load_default_nperseg(),
         plan,
+        cli.pool,
     )
     return 0
 
