@@ -16,7 +16,8 @@ tags: [vibro, конфигурация]
 | `[sensor]` | `odr_hz` | 250 | частота опроса по умолчанию |
 | `[welch]` | `nperseg` | 1024 | длина отрезка спектра в старом детекторе и в [[family_analysis.py]]; [[stable_spectrum.py]] перебирает свои значения, см. [[Разрешение nperseg]] |
 | | `noverlap` | 512 | перекрытие отрезков |
-| `[stable_spectrum]` | `baseline_window_hz` | 10.0 | ширина скользящей медианы, от которой [[stable_spectrum.py]] и [[overview_figure.py]] меряют превышение пика; старый детектор её не читает |
+| `[stable_spectrum]` | `nperseg` | [2048] | какие разрешения [[stable_spectrum.py]] считает без ключа `--nperseg`; до 02.10.2026 было [1024, 2048, 4096] |
+| | `baseline_window_hz` | 10.0 | ширина скользящей медианы, от которой [[stable_spectrum.py]] и [[overview_figure.py]] меряют превышение пика; старый детектор её не читает |
 | `[visualization.trusted_frequency]` | `min_support_fraction` | 0.50 | порог старого детектора «доверенных» частот |
 | | `min_median_prominence_db` | 1.55 | то же |
 | | `background_weight`, `min_band_contrast_db`, `weak_trusted_weight` | 0.5, 1.0, 0.7 | оформление старых графиков |

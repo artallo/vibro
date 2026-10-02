@@ -708,6 +708,32 @@ class DriverTests(unittest.TestCase):
             )
 
 
+class DefaultResolutionTests(unittest.TestCase):
+    def test_without_nperseg_only_the_configured_resolution_is_run(self) -> None:
+        import tempfile
+        import tomllib
+        from pathlib import Path
+
+        from stable_spectrum import CONFIG_PATH, load_default_nperseg, main
+
+        with CONFIG_PATH.open("rb") as handle:
+            configured = tomllib.load(handle)["stable_spectrum"]["nperseg"]
+        self.assertEqual(load_default_nperseg(), [int(value) for value in configured])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw = root / "synthetic_raw.npz"
+            np.savez(
+                raw,
+                x=add_tone(noise_packets(64, 980), ON_BIN_HZ, 0.3, seed=981),
+                y=noise_packets(64, 982), z=noise_packets(64, 983),
+                packet_fs_hz=np.full(64, SAMPLING_RATE_HZ),
+            )
+            main([str(raw), "--output", str(root / "out")])
+            folders = sorted(path.name for path in (root / "out").glob("nperseg_*"))
+            self.assertEqual(folders, [f"nperseg_{value}" for value in load_default_nperseg()])
+            self.assertTrue((root / "out" / "figure_compare_synthetic_raw.png").exists())
+
+
 class BandEdgeTests(unittest.TestCase):
     # Bins at 250 Hz and 1024 samples are 0.244 Hz apart. With the band
     # starting at 0.5 Hz, 0.732 Hz is the first bin inside it and 0.488 Hz

@@ -18,11 +18,11 @@ python stable_spectrum.py results/<capture>_raw.npz
 
 The first records about 17 minutes and writes `results/<capture>_raw.npz`.
 The second reads that file and writes `stable_results/<capture>/` with one
-directory per spectral resolution (`nperseg_1024/`, `nperseg_2048/`,
-`nperseg_4096/`), each holding the report, the peak table and the figures.
-`figure_dominant_<capture>.png` is the one to show. `comparison.txt` and
-`figure_compare_<capture>.png` next to them put the three resolutions side
-by side.
+directory per spectral resolution, `nperseg_2048/` by default (`[stable_spectrum]
+nperseg` in `config.toml`), holding the report, the peak table and the
+figures. `figure_dominant_<capture>.png` is the one to show. With
+`--nperseg 1024 2048 4096`, `comparison.txt` and
+`figure_compare_<capture>.png` put the three resolutions side by side.
 
 To see a whole folder of captures at once:
 
@@ -198,10 +198,13 @@ bin grid; the bin centre is kept in the CSV as `bin_frequency_hz`.
 
 ### Spectral resolution
 
-Every capture is analysed at three segment lengths by default:
+Every capture is analysed at 2048 by default, where the building modes
+found so far have the highest z (1024 is too coarse for them, 4096 only adds
+error). Give several lengths to compare:
 
 ```bash
-python stable_spectrum.py results/<capture>_raw.npz                  # 1024 2048 4096
+python stable_spectrum.py results/<capture>_raw.npz                  # 2048
+python stable_spectrum.py results/<capture>_raw.npz --nperseg 1024 2048 4096
 python stable_spectrum.py results/<capture>_raw.npz --nperseg 1024 8192
 ```
 

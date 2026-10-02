@@ -83,8 +83,15 @@ STABLE_RESULTS_DIRECTORY = Path("stable_results")
 CONFIG_PATH = Path(__file__).with_name("config.toml")
 
 DEFAULT_NPERSEG = 1024
-# Segment lengths analysed side by side, each into its own directory.
+# Segment lengths analysed side by side, each into its own directory: what
+# overview_figure.py and false_alarm_check.py compare, and what
+# stable_spectrum.py runs with --nperseg 1024 2048 4096.
 DEFAULT_NPERSEG_SWEEP = (1024, 2048, 4096)
+# What stable_spectrum.py analyses when --nperseg is not given. Building
+# modes found so far are about as wide as a 2048 bin (0.12 Hz): z is highest
+# there, 1024 is too coarse and 4096 only adds error. Overridden by
+# [stable_spectrum] nperseg in config.toml.
+DEFAULT_NPERSEG_RUN = (2048,)
 # A spectral estimate needs at least this many segments to have an error
 # bar at all; below it the analysis at that resolution is skipped.
 MINIMUM_SEGMENTS = 4
@@ -376,6 +383,21 @@ def load_settings(
         min_distance_hz=min_distance_hz,
         alpha=alpha,
     )
+
+
+def load_default_nperseg() -> list[int]:
+    """Segment lengths stable_spectrum.py analyses when none are given."""
+    values = DEFAULT_NPERSEG_RUN
+    if CONFIG_PATH.exists():
+        with CONFIG_PATH.open("rb") as config_file:
+            config = tomllib.load(config_file)
+        values = config.get("stable_spectrum", {}).get("nperseg", values)
+    if isinstance(values, int):
+        values = [values]
+    values = [int(value) for value in values]
+    if not values or any(value < 16 for value in values):
+        raise ValueError(f"[stable_spectrum] nperseg must list segment lengths, got {values}")
+    return values
 
 
 def load_band_names() -> list[tuple[str, float, float]]:
@@ -1956,10 +1978,10 @@ def parse_cli_arguments(arguments: list[str] | None = None) -> argparse.Namespac
         help="override the analysis band (default: from config.toml)",
     )
     parser.add_argument(
-        "--nperseg", type=int, nargs="+",
-        default=list(DEFAULT_NPERSEG_SWEEP), metavar="SAMPLES",
+        "--nperseg", type=int, nargs="+", default=None, metavar="SAMPLES",
         help="segment lengths to analyse, each into its own nperseg_<n> "
-             "directory (default: 1024 2048 4096)",
+             "directory (default: [stable_spectrum] nperseg in config.toml, "
+             "2048; give 1024 2048 4096 to compare resolutions)",
     )
     parser.add_argument(
         "--probe", type=parse_probe, nargs="+", default=None, metavar="HZ",
@@ -2021,7 +2043,7 @@ def main(arguments: list[str] | None = None) -> int:
         resolve_output_directory(cli.output, cli.raw_paths),
         settings,
         None,
-        cli.nperseg,
+        cli.nperseg or load_default_nperseg(),
         plan,
     )
     return 0
