@@ -260,6 +260,23 @@ have been needed, and the 95% upper bound. A structure stronger than that
 bound is excluded by the record; a weaker one is not. This turns "we saw
 nothing" into a measurement.
 
+A probe looks within +-0.2 Hz (`--probe-tolerance`) and is judged by a
+threshold that counts only the bins inside the probe windows, at
+`--probe-alpha` (0.01). `Y:2.88` probes one axis. That threshold is honest
+only for frequencies chosen before the record: from another run, floor or
+instrument, never from the same record.
+
+To search on one run and confirm on another:
+
+```bash
+python stable_spectrum.py <run A>_raw.npz --alpha 0.05 --nperseg 2048 --output stable_results/runA_search
+python stable_spectrum.py <run B>_raw.npz --nperseg 2048 --confirm-from stable_results/runA_search
+```
+
+The peaks run A found at the looser alpha are checked on run B with the
+honest threshold; a record is never asked to confirm its own findings.
+`false_alarm_check.py --probes 3` checks that threshold on noise.
+
 ### Measuring repeatability
 
 `repeatability_check.py` splits each capture into halves that share no

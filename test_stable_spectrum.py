@@ -308,6 +308,120 @@ class ProbeTests(unittest.TestCase):
 
 
 
+class HonestProbeTests(unittest.TestCase):
+    def test_probe_text_with_and_without_an_axis(self) -> None:
+        import argparse
+
+        from stable_spectrum import parse_probe
+
+        self.assertEqual(parse_probe("2.88").axis, None)
+        request = parse_probe("y:2,88")
+        self.assertEqual((request.axis, request.frequency_hz), ("Y", 2.88))
+        for wrong in ("Q:2.88", "abc", "-1", "Y:"):
+            with self.assertRaises(argparse.ArgumentTypeError):
+                parse_probe(wrong)
+
+    def test_the_threshold_counts_only_the_probe_windows(self) -> None:
+        from stable_spectrum import ProbeRequest, probe_threshold
+
+        spectrum, _ = peaks_for(noise_packets(256, 960))
+        full = significance_threshold(spectrum.frequencies.size * 3, 0.01, 256)
+        one_axis, bins_one = probe_threshold(
+            [spectrum], [ProbeRequest(5.0, "X")], 0.2, 0.01, 256,
+        )
+        other_axis, bins_other = probe_threshold(
+            [spectrum], [ProbeRequest(5.0, "Y")], 0.2, 0.01, 256,
+        )
+        self.assertLess(one_axis, full)
+        self.assertGreaterEqual(bins_one, 1)
+        self.assertLessEqual(bins_one, 2)
+        self.assertEqual((other_axis, bins_other), (0.0, 0))
+
+    def test_a_weak_line_passes_the_honest_threshold_not_the_blind_one(self) -> None:
+        from stable_spectrum import ProbeRequest, probe_frequencies, probe_threshold
+
+        for seed in (0, 3):
+            signal = add_tone(noise_packets(256, 900 + seed), ON_BIN_HZ, 0.04, seed=950 + seed)
+            spectrum, peaks = peaks_for(signal)
+            self.assertEqual(peaks, [], f"seed {seed}: the blind search should miss it")
+            request = [ProbeRequest(ON_BIN_HZ, "X")]
+            threshold, _ = probe_threshold([spectrum], request, 0.2, 0.01, 256)
+            probe = probe_frequencies([spectrum], request, threshold, 0.2)[0]
+            self.assertTrue(probe.detected, f"seed {seed}: z {probe.z:.2f}")
+
+    def test_a_stronger_neighbour_does_not_answer_for_the_probe(self) -> None:
+        from stable_spectrum import ProbeRequest, probe_frequencies, probe_threshold
+
+        signal = add_tone(noise_packets(256, 961), 5.6, 0.3, seed=962)
+        spectrum, _ = peaks_for(signal)
+        request = [ProbeRequest(5.0, "X")]
+        threshold, _ = probe_threshold([spectrum], request, 0.2, 0.01, 256)
+        probe = probe_frequencies([spectrum], request, threshold, 0.2)[0]
+        self.assertLess(abs(probe.frequency_hz - 5.0), 0.25)
+        self.assertFalse(probe.detected)
+
+    def test_candidates_from_another_search_are_merged_per_axis(self) -> None:
+        import csv
+        import tempfile
+        from pathlib import Path
+
+        from stable_spectrum import PEAK_FIELDS, load_candidates
+
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory) / "runA" / "nperseg_2048"
+            folder.mkdir(parents=True)
+            rows = [
+                ("X", 2.47, 12.0), ("X", 2.55, 5.0), ("Y", 2.47, 4.5), ("X", 9.8, 6.0),
+            ]
+            with (folder / "stable_frequencies.csv").open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=PEAK_FIELDS)
+                writer.writeheader()
+                for axis, frequency, z in rows:
+                    writer.writerow({
+                        "capture": "runA_raw", "nperseg": 2048, "axis": axis,
+                        "frequency_hz": frequency, "z": z,
+                    })
+            candidates, captures, files = load_candidates([Path(directory) / "runA"], 0.2)
+        self.assertEqual(
+            [(item.axis, item.frequency_hz) for item in candidates],
+            [("X", 2.47), ("X", 9.8), ("Y", 2.47)],
+        )
+        self.assertEqual(captures, frozenset({"runA_raw"}))
+        self.assertEqual(len(files), 1)
+
+    def test_one_run_confirms_another_but_not_itself(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from stable_spectrum import main
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, seed in (("runA_raw", 970), ("runB_raw", 975)):
+                np.savez(
+                    root / f"{name}.npz",
+                    x=add_tone(noise_packets(256, seed), ON_BIN_HZ, 0.08, seed=seed + 1),
+                    y=noise_packets(256, seed + 2), z=noise_packets(256, seed + 3),
+                    packet_fs_hz=np.full(256, SAMPLING_RATE_HZ),
+                )
+            main([str(root / "runA_raw.npz"), "--nperseg", "1024",
+                  "--alpha", "0.05", "--output", str(root / "A")])
+            main([str(root / "runB_raw.npz"), str(root / "runA_raw.npz"),
+                  "--nperseg", "1024", "--confirm-from", str(root / "A"),
+                  "--probe", "Y:7.0", "--output", str(root / "B")])
+            report = (root / "B" / "nperseg_1024" / "stable_report.txt").read_text(
+                encoding="utf-8",
+            )
+            self.assertIn("confirmed", report)
+            self.assertIn("a record cannot confirm its own findings", report)
+            self.assertIn("Requested frequencies (chosen before this record)", report)
+            probes = (root / "B" / "nperseg_1024" / "stable_probes.csv").read_text(
+                encoding="utf-8",
+            )
+            self.assertIn("confirm,X", probes)
+            self.assertIn("probe,Y", probes)
+
+
 def settings_at(nperseg: int) -> SpectrumSettings:
     from dataclasses import replace
 

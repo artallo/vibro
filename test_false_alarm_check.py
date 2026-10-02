@@ -49,6 +49,20 @@ class FalseAlarmTests(unittest.TestCase):
             self.assertEqual(outcome.runs, 12)
             self.assertLessEqual(outcome.runs_with_peaks, 2)
 
+    def test_probes_on_white_noise_rarely_come_out_present(self) -> None:
+        plain = run_check(
+            runs=12, packets=64, windows_hz=[10.0], nperseg_values=[1024],
+            shape=None, rate_hz=RATE_HZ, seed=7,
+        )
+        probed = run_check(
+            runs=12, packets=64, windows_hz=[10.0], nperseg_values=[1024],
+            shape=None, rate_hz=RATE_HZ, seed=7, probes=3,
+        )
+        # Probes draw from their own generator: the search is unchanged.
+        self.assertEqual(plain[0].runs_with_peaks, probed[0].runs_with_peaks)
+        self.assertLessEqual(probed[0].runs_with_probe_hits, 2)
+        self.assertGreater(probed[0].probe_threshold, 0.0)
+
     def test_captures_are_continuous_and_coloured(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "noise_raw.npz"
