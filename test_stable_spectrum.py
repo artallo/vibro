@@ -914,6 +914,73 @@ class PoolTests(unittest.TestCase):
             self.assertTrue((folder / "figure_dominant_pooled_141520_143239.png").exists())
 
 
+class FolderInputTests(unittest.TestCase):
+    def write(self, path, seed):
+        np.savez(
+            path,
+            x=add_tone(noise_packets(64, seed), ON_BIN_HZ, 0.3, seed=seed + 1),
+            y=noise_packets(64, seed + 2), z=noise_packets(64, seed + 3),
+            packet_fs_hz=np.full(64, SAMPLING_RATE_HZ),
+        )
+
+    def test_a_folder_is_all_runs_of_one_point(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from stable_spectrum import expand_raw_paths
+
+        with tempfile.TemporaryDirectory() as directory:
+            point = Path(directory) / "point"
+            (point / "other point").mkdir(parents=True)
+            for name in ("b_run02_raw.npz", "a_run01_raw.npz", "other point/c_raw.npz"):
+                (point / name).write_bytes(b"")
+            (point / "notes_figure.npz").write_bytes(b"")
+            single = Path(directory) / "single_raw.npz"
+            self.assertEqual(
+                expand_raw_paths([point, single, point / "a_run01_raw.npz"]),
+                [point / "a_run01_raw.npz", point / "b_run02_raw.npz", single],
+            )
+            building = Path(directory) / "building"
+            (building / "basement").mkdir(parents=True)
+            (building / "basement" / "r_raw.npz").write_bytes(b"")
+            with self.assertRaisesRegex(ValueError, "point folders inside: basement"):
+                expand_raw_paths([building])
+
+    def test_command_line_takes_a_folder_and_names_the_output_after_it(self) -> None:
+        import contextlib
+        import io
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+
+        import stable_spectrum
+        from stable_spectrum import main, resolve_output_directory
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            point = root / "лестница 1"
+            point.mkdir()
+            self.write(point / "20261001_133738_run01_raw.npz", 1100)
+            self.write(point / "20261001_135458_run02_raw.npz", 1110)
+            with mock.patch.object(stable_spectrum, "STABLE_RESULTS_DIRECTORY", root / "results"):
+                self.assertEqual(
+                    resolve_output_directory(None, [point]), root / "results" / "лестница 1",
+                )
+                self.assertEqual(
+                    resolve_output_directory(None, [point], pool=True),
+                    root / "results" / "лестница 1_pool",
+                )
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = main([str(point), "--nperseg", "2048", "--output", str(root / "out")])
+            self.assertEqual(code, 0)
+            report = (root / "out" / "nperseg_2048" / "stable_report.txt").read_text(encoding="utf-8")
+            self.assertIn("Capture: 20261001_133738_run01_raw", report)
+            self.assertIn("Capture: 20261001_135458_run02_raw", report)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main([str(root), "--output", str(root / "none")]), 1)
+            self.assertFalse((root / "none").exists())
+
+
 class DefaultResolutionTests(unittest.TestCase):
     def test_without_nperseg_only_the_configured_resolution_is_run(self) -> None:
         import tempfile

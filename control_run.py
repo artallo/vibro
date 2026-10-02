@@ -57,6 +57,7 @@ from stable_spectrum import (
     STABLE_RESULTS_DIRECTORY,
     CaptureResult,
     ProbePlan,
+    expand_raw_paths,
     load_default_nperseg,
     load_settings,
     parse_probe,
@@ -151,9 +152,10 @@ def run_quietly(*arguments: Any) -> tuple[list[CaptureResult], list[str]]:
 
 
 def analyse_point(point: ControlPoint, directory: Path, settings: Any, plan: ProbePlan) -> PointOutcome:
-    raw_paths = sorted(point.folder.glob("*_raw.npz"))
-    if not raw_paths:
-        raise ValueError(f"{point.name}: no *_raw.npz in {point.folder}")
+    try:
+        raw_paths = expand_raw_paths([point.folder])
+    except (OSError, ValueError) as error:
+        raise ValueError(f"{point.name}: {error}") from error
     runs, messages = run_quietly(raw_paths, directory / "runs", settings, None, plan, False)
     pool = None
     if len(raw_paths) > 1:
