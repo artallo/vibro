@@ -56,7 +56,7 @@ tags: [vibro, скрипт, проверка]
 | `--points NAME …` | все | только эти точки из списка |
 | `--points-file` | `control_points.toml` | другой список точек; папки в нём считаются от места файла |
 | `--nperseg` | из `config.toml` | одна длина отрезка |
-| `--alpha` | 0,01 | как в [[stable_spectrum.py]] |
+| `--alpha` | 0,01 | как в [[stable_spectrum.py]], см. [[Порог alpha и проверка половинами]] |
 | `--band MIN MAX` | из `config.toml` | полоса |
 | `--baseline-window` | из `config.toml` | ширина базы |
 | `--min-distance` | из `config.toml` | зазор между пиками |

@@ -977,6 +977,7 @@ class FolderInputTests(unittest.TestCase):
             report = (root / "out" / "nperseg_2048" / "stable_report.txt").read_text(encoding="utf-8")
             self.assertIn("Capture: 20261001_133738_run01_raw", report)
             self.assertIn("Capture: 20261001_135458_run02_raw", report)
+            self.assertIn("Each half (Persistent): z >=", report)
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(main([str(root), "--output", str(root / "none")]), 1)
             self.assertFalse((root / "none").exists())
