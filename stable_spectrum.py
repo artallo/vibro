@@ -83,8 +83,15 @@ STABLE_RESULTS_DIRECTORY = Path("stable_results")
 CONFIG_PATH = Path(__file__).with_name("config.toml")
 
 DEFAULT_NPERSEG = 1024
-# Segment lengths analysed side by side, each into its own directory.
+# Segment lengths analysed side by side, each into its own directory: what
+# overview_figure.py and false_alarm_check.py compare, and what
+# stable_spectrum.py runs with --nperseg 1024 2048 4096.
 DEFAULT_NPERSEG_SWEEP = (1024, 2048, 4096)
+# What stable_spectrum.py analyses when --nperseg is not given. Building
+# modes found so far are about as wide as a 2048 bin (0.12 Hz): z is highest
+# there, 1024 is too coarse and 4096 only adds error. Overridden by
+# [stable_spectrum] nperseg in config.toml.
+DEFAULT_NPERSEG_RUN = (2048,)
 # A spectral estimate needs at least this many segments to have an error
 # bar at all; below it the analysis at that resolution is skipped.
 MINIMUM_SEGMENTS = 4
@@ -97,6 +104,11 @@ DEFAULT_BAND_HZ = (0.2, 15.0)
 # config.toml or --baseline-window.
 DEFAULT_BASELINE_WINDOW_HZ = 10.0
 DEFAULT_ALPHA = 0.01
+# How far from a requested frequency the probe looks for its peak. Wide
+# enough for a mode that moves a little between runs, floors or
+# instruments (a few tenths of a hertz at most so far), narrow enough that a
+# stronger neighbour 0.5 Hz away does not answer for it.
+DEFAULT_PROBE_TOLERANCE_HZ = 0.2
 DEFAULT_MIN_DISTANCE_HZ = 1.0
 # Below this many packets the error bar is itself too noisy: the periodogram
 # is right-skewed, the Student correction stops covering the upper tail, and
@@ -247,6 +259,41 @@ class ProbeResult:
     upper_bound_db: float
     detection_limit_db: float
     detected: bool
+    source: str = ""
+
+
+@dataclass(frozen=True)
+class ProbeRequest:
+    """A frequency chosen before this record: from another run, floor or instrument."""
+
+    frequency_hz: float
+    axis: str | None = None  # None: look on every axis
+    source: str = ""
+
+    def label(self) -> str:
+        if self.axis:
+            return f"{self.axis}:{self.frequency_hz:g}"
+        return f"{self.frequency_hz:g}"
+
+
+@dataclass(frozen=True)
+class ProbePlan:
+    """What to look at besides the blind search, and how strictly.
+
+    ``requests`` come from the command line; ``candidates`` are the peaks a
+    search on another run found, to be confirmed here. Both are judged with
+    a threshold that counts only the bins inside their windows, which is
+    honest only because the frequencies were not taken from this record.
+    ``candidate_captures`` names the records the candidates came from, so a
+    record is never asked to confirm its own findings.
+    """
+
+    requests: tuple[ProbeRequest, ...] = ()
+    candidates: tuple[ProbeRequest, ...] = ()
+    candidate_captures: frozenset[str] = frozenset()
+    candidate_sources: tuple[str, ...] = ()
+    tolerance_hz: float = DEFAULT_PROBE_TOLERANCE_HZ
+    alpha: float = DEFAULT_ALPHA
 
 
 @dataclass(frozen=True)
@@ -274,6 +321,13 @@ class CaptureResult:
     window_rows: int = 0
     edge_warnings: list[str] = field(default_factory=list)
     startup_dropped: bool = False
+    probe_plan: ProbePlan = field(default_factory=ProbePlan)
+    probe_threshold: float = 0.0
+    probe_bins: int = 0
+    confirmations: list[ProbeResult] = field(default_factory=list)
+    confirm_threshold: float = 0.0
+    confirm_bins: int = 0
+    confirm_skipped: str = ""
 
     @property
     def segmented(self) -> bool:
@@ -329,6 +383,21 @@ def load_settings(
         min_distance_hz=min_distance_hz,
         alpha=alpha,
     )
+
+
+def load_default_nperseg() -> list[int]:
+    """Segment lengths stable_spectrum.py analyses when none are given."""
+    values = DEFAULT_NPERSEG_RUN
+    if CONFIG_PATH.exists():
+        with CONFIG_PATH.open("rb") as config_file:
+            config = tomllib.load(config_file)
+        values = config.get("stable_spectrum", {}).get("nperseg", values)
+    if isinstance(values, int):
+        values = [values]
+    values = [int(value) for value in values]
+    if not values or any(value < 16 for value in values):
+        raise ValueError(f"[stable_spectrum] nperseg must list segment lengths, got {values}")
+    return values
 
 
 def load_band_names() -> list[tuple[str, float, float]]:
@@ -861,9 +930,63 @@ def count_support(
 UPPER_BOUND_SIGMA = 1.96
 
 
+def as_request(item: ProbeRequest | float) -> ProbeRequest:
+    return item if isinstance(item, ProbeRequest) else ProbeRequest(float(item))
+
+
+def spectrum_bin_width(spectrum: AxisSpectrum) -> float:
+    if spectrum.frequencies.size < 2:
+        return 0.0
+    return float(spectrum.frequencies[1] - spectrum.frequencies[0])
+
+
+def probe_window(
+    spectrum: AxisSpectrum,
+    request: ProbeRequest,
+    search_radius_hz: float,
+) -> np.ndarray:
+    """Bins a probe may answer from: within the radius, at least the nearest bin.
+
+    A request on another axis, or outside the analysed band, gets no bins.
+    """
+    if request.axis is not None and request.axis != spectrum.axis:
+        return np.array([], dtype=int)
+    if spectrum.frequencies.size == 0:
+        return np.array([], dtype=int)
+    distance = np.abs(spectrum.frequencies - request.frequency_hz)
+    nearest = int(np.argmin(distance))
+    if distance[nearest] > search_radius_hz + spectrum_bin_width(spectrum):
+        return np.array([], dtype=int)
+    window = np.flatnonzero(distance <= search_radius_hz)
+    return window if window.size else np.array([nearest])
+
+
+def probe_threshold(
+    spectra: list[AxisSpectrum],
+    requests: list[ProbeRequest | float],
+    search_radius_hz: float,
+    alpha: float,
+    rows: int,
+) -> tuple[float, int]:
+    """Threshold for frequencies chosen before the record, and the bins it covers.
+
+    Only the bins inside the probe windows can produce a false answer, so
+    the Bonferroni correction counts those and not the whole band. This is
+    honest only when the frequencies were not picked from this record.
+    """
+    bins = sum(
+        probe_window(spectrum, as_request(item), search_radius_hz).size
+        for spectrum in spectra
+        for item in requests
+    )
+    if bins == 0:
+        return 0.0, 0
+    return significance_threshold(bins, alpha, rows), bins
+
+
 def probe_frequencies(
     spectra: list[AxisSpectrum],
-    requested: list[float],
+    requested: list[ProbeRequest | float],
     z_threshold: float,
     search_radius_hz: float,
 ) -> list[ProbeResult]:
@@ -876,11 +999,12 @@ def probe_frequencies(
     """
     probes: list[ProbeResult] = []
     for spectrum in spectra:
-        for requested_hz in requested:
-            window = np.abs(spectrum.frequencies - requested_hz) <= search_radius_hz
-            if not window.any():
+        for item in requested:
+            request = as_request(item)
+            requested_hz = request.frequency_hz
+            candidates = probe_window(spectrum, request, search_radius_hz)
+            if candidates.size == 0:
                 continue
-            candidates = np.flatnonzero(window)
             index = int(candidates[int(np.argmax(spectrum.z[candidates]))])
             standard_error = float(spectrum.standard_error_db[index])
             probes.append(ProbeResult(
@@ -896,8 +1020,77 @@ def probe_frequencies(
                 ),
                 detection_limit_db=z_threshold * standard_error,
                 detected=bool(spectrum.z[index] >= z_threshold),
+                source=request.source,
             ))
     return probes
+
+
+def parse_probe(text: str) -> ProbeRequest:
+    """``2.88`` looks on every axis, ``Y:2.88`` only on Y."""
+    axis = None
+    value = text.strip()
+    if ":" in value:
+        axis, value = (part.strip() for part in value.split(":", 1))
+        axis = axis.upper()
+        if axis not in {name for name, _ in AXIS_KEYS}:
+            raise argparse.ArgumentTypeError(
+                f"probe '{text}': the axis must be X, Y or Z"
+            )
+    try:
+        frequency_hz = float(value.replace(",", "."))
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            f"probe '{text}' is not a frequency like 2.88 or Y:2.88"
+        ) from error
+    if frequency_hz <= 0.0:
+        raise argparse.ArgumentTypeError(f"probe '{text}' must be positive")
+    return ProbeRequest(frequency_hz, axis)
+
+
+def load_candidates(
+    paths: list[Path],
+    tolerance_hz: float = DEFAULT_PROBE_TOLERANCE_HZ,
+) -> tuple[tuple[ProbeRequest, ...], frozenset[str], tuple[str, ...]]:
+    """Peaks found by a search on other runs, to be confirmed on this one.
+
+    Reads ``stable_frequencies.csv`` files, or every such file under a
+    folder. Peaks of one axis closer than the tolerance count as one
+    candidate, at the frequency of the strongest. Returns the candidates,
+    the names of the records they came from and the files read.
+    """
+    files: list[Path] = []
+    for path in paths:
+        if path.is_dir():
+            files.extend(sorted(path.rglob("stable_frequencies.csv")))
+        elif path.exists():
+            files.append(path)
+    if not files:
+        listed = " ".join(str(path) for path in paths)
+        raise ValueError(f"no stable_frequencies.csv found in {listed}")
+    found: list[tuple[str, float, float, str]] = []
+    captures: set[str] = set()
+    for file in files:
+        with file.open(encoding="utf-8") as handle:
+            for row in csv.DictReader(handle):
+                captures.add(row["capture"])
+                nperseg = row.get("nperseg") or "?"
+                found.append((
+                    row["axis"], float(row["frequency_hz"]), float(row["z"]),
+                    f"{row['capture']} n{nperseg}",
+                ))
+    kept: list[tuple[str, float, float, str]] = []
+    for axis, frequency, z, source in sorted(found, key=lambda item: -item[2]):
+        if any(
+            other[0] == axis and abs(other[1] - frequency) <= tolerance_hz
+            for other in kept
+        ):
+            continue
+        kept.append((axis, frequency, z, source))
+    requests = tuple(
+        ProbeRequest(frequency, axis, f"{source} z={z:.1f}")
+        for axis, frequency, z, source in sorted(kept, key=lambda item: (item[0], item[1]))
+    )
+    return requests, frozenset(captures), tuple(str(file) for file in files)
 
 
 def analyze_capture(
@@ -905,6 +1098,7 @@ def analyze_capture(
     settings: SpectrumSettings,
     bands: list[tuple[str, float, float]],
     probe_hz: list[float] | None = None,
+    plan: ProbePlan | None = None,
 ) -> CaptureResult:
     with np.load(raw_path, allow_pickle=False) as archive:
         recorded_axes = {key: np.asarray(archive[key]) for _, key in AXIS_KEYS}
@@ -964,6 +1158,28 @@ def analyze_capture(
         )
         for spectrum in spectra
     }
+    if plan is None:
+        plan = ProbePlan(requests=tuple(ProbeRequest(float(hz)) for hz in probe_hz or []))
+    rows = int(round(effective_rows))
+    probe_z, probe_bins = probe_threshold(
+        spectra, list(plan.requests), plan.tolerance_hz, plan.alpha, rows,
+    )
+    probes = probe_frequencies(spectra, list(plan.requests), probe_z, plan.tolerance_hz)
+    confirm_skipped = ""
+    confirm_z, confirm_bins, confirmations = 0.0, 0, []
+    if plan.candidates:
+        if raw_path.stem in plan.candidate_captures:
+            confirm_skipped = (
+                "this record is one of those the candidates were found in; "
+                "a record cannot confirm its own findings, use another run"
+            )
+        else:
+            confirm_z, confirm_bins = probe_threshold(
+                spectra, list(plan.candidates), plan.tolerance_hz, plan.alpha, rows,
+            )
+            confirmations = probe_frequencies(
+                spectra, list(plan.candidates), confirm_z, plan.tolerance_hz,
+            )
     # The recording check looks at packets, whatever the segment length.
     if settings.nperseg == samples_per_packet:
         packet_spectra = spectra
@@ -989,12 +1205,7 @@ def analyze_capture(
         spectra=spectra,
         peaks=peaks,
         detection_limit_db=detection_limit_db,
-        probes=probe_frequencies(
-            spectra,
-            probe_hz or [],
-            z_threshold,
-            settings.min_distance_hz / 2.0,
-        ),
+        probes=probes,
         quality=assess_quality(packet_spectra, recorded_fs_hz, recorded_axes),
         window_count=len(windows),
         window_packets=window_packets,
@@ -1008,6 +1219,13 @@ def analyze_capture(
         window_rows=window_rows,
         edge_warnings=band_edge_warnings(spectra, z_threshold),
         startup_dropped=startup_dropped,
+        probe_plan=plan,
+        probe_threshold=probe_z,
+        probe_bins=probe_bins,
+        confirmations=confirmations,
+        confirm_threshold=confirm_z,
+        confirm_bins=confirm_bins,
+        confirm_skipped=confirm_skipped,
     )
 
 
@@ -1050,6 +1268,41 @@ def peak_rows(result: CaptureResult) -> list[dict[str, Any]]:
         }
         for peak in result.peaks
     ]
+
+
+PROBE_FIELDS = [
+    "capture", "nperseg", "kind", "axis", "requested_hz", "frequency_hz",
+    "prominence_db", "standard_error_db", "z", "threshold", "window_bins",
+    "tolerance_hz", "alpha", "upper_bound_db", "detected", "source",
+]
+
+
+def probe_rows(result: CaptureResult) -> list[dict[str, Any]]:
+    rows = []
+    for kind, probes, threshold, bins in (
+        ("probe", result.probes, result.probe_threshold, result.probe_bins),
+        ("confirm", result.confirmations, result.confirm_threshold, result.confirm_bins),
+    ):
+        for probe in probes:
+            rows.append({
+                "capture": result.capture,
+                "nperseg": result.nperseg,
+                "kind": kind,
+                "axis": probe.axis,
+                "requested_hz": round(probe.requested_hz, 3),
+                "frequency_hz": round(probe.frequency_hz, 3),
+                "prominence_db": round(probe.prominence_db, 2),
+                "standard_error_db": round(probe.standard_error_db, 3),
+                "z": round(probe.z, 2),
+                "threshold": round(threshold, 2),
+                "window_bins": bins,
+                "tolerance_hz": result.probe_plan.tolerance_hz,
+                "alpha": result.probe_plan.alpha,
+                "upper_bound_db": round(probe.upper_bound_db, 2),
+                "detected": int(probe.detected),
+                "source": probe.source,
+            })
+    return rows
 
 
 def write_csv_rows(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -1151,7 +1404,7 @@ def format_capture_report(result: CaptureResult) -> str:
             "This is a stable result: a longer record is required, not a "
             "lower threshold."
         )
-        return "\n".join(lines) + format_probes(result) + "\n"
+        return "\n".join(lines) + format_probes(result) + format_confirmations(result) + "\n"
     lines.append(f"Significant frequencies: {len(result.peaks)}")
     lines.append(
         "Axis  Band              Freq Hz   Prom dB   SE dB      z   "
@@ -1165,7 +1418,33 @@ def format_capture_report(result: CaptureResult) -> str:
             f"{peak.half_z_low:4.1f}/{peak.half_z_high:<4.1f}  "
             f"{'yes' if peak.persistent else 'no':>10}"
         )
-    return "\n".join(lines) + format_probes(result) + "\n"
+    return "\n".join(lines) + format_probes(result) + format_confirmations(result) + "\n"
+
+
+def probe_threshold_note(
+    plan: ProbePlan, threshold: float, bins: int, full_threshold: float,
+) -> str:
+    return (
+        f"  window +-{plan.tolerance_hz:g} Hz, {bins} bins; z >= {threshold:.2f} "
+        f"at alpha {plan.alpha:g} (the blind search of the band needs "
+        f"z >= {full_threshold:.2f})"
+    )
+
+
+def probe_lines(probes: list[ProbeResult], present: str, absent: str) -> list[str]:
+    lines = ["Axis  Asked   Peak Hz   Prom dB      z   Needed   95% upper   Verdict"]
+    for probe in probes:
+        verdict = (
+            present if probe.detected
+            else f"{absent} above {probe.upper_bound_db:.2f} dB"
+        )
+        lines.append(
+            f"{probe.axis:<5} {probe.requested_hz:6.2f}  {probe.frequency_hz:7.2f}  "
+            f"{probe.prominence_db:8.2f}  {probe.z:5.1f}  "
+            f"{probe.detection_limit_db:7.2f}  {probe.upper_bound_db:10.2f}   "
+            f"{verdict}"
+        )
+    return lines
 
 
 def format_probes(result: CaptureResult) -> str:
@@ -1173,20 +1452,42 @@ def format_probes(result: CaptureResult) -> str:
         return ""
     lines = [
         "",
-        "Requested frequencies:",
-        "Axis  Asked    Bin     Prom dB      z   Needed   95% upper   Verdict",
+        "Requested frequencies (chosen before this record):",
+        probe_threshold_note(
+            result.probe_plan, result.probe_threshold, result.probe_bins,
+            result.z_threshold,
+        ),
+        "  The lower threshold is honest only for frequencies taken from",
+        "  another run, floor or instrument, not from this record.",
     ]
-    for probe in result.probes:
-        verdict = (
-            "present" if probe.detected
-            else f"absent above {probe.upper_bound_db:.2f} dB"
-        )
-        lines.append(
-            f"{probe.axis:<5} {probe.requested_hz:6.2f} {probe.frequency_hz:6.2f}  "
-            f"{probe.prominence_db:9.2f}  {probe.z:5.1f}  "
-            f"{probe.detection_limit_db:7.2f}  {probe.upper_bound_db:10.2f}   "
-            f"{verdict}"
-        )
+    lines += probe_lines(result.probes, "present", "absent")
+    return "\n" + "\n".join(lines)
+
+
+def format_confirmations(result: CaptureResult) -> str:
+    plan = result.probe_plan
+    if not plan.candidates:
+        return ""
+    lines = [
+        "",
+        f"Confirmation of {len(plan.candidates)} candidate(s) found by a search on other runs:",
+    ]
+    lines += [f"  from {source}" for source in plan.candidate_sources]
+    if result.confirm_skipped:
+        lines.append(f"  skipped: {result.confirm_skipped}")
+        return "\n" + "\n".join(lines)
+    if not result.confirmations:
+        lines.append("  no candidate falls inside the analysed band")
+        return "\n" + "\n".join(lines)
+    lines.append(probe_threshold_note(
+        plan, result.confirm_threshold, result.confirm_bins, result.z_threshold,
+    ))
+    lines += probe_lines(result.confirmations, "confirmed", "not confirmed,")
+    lines.append("Found in:")
+    lines += [
+        f"  {probe.axis} {probe.requested_hz:.2f} Hz: {probe.source}"
+        for probe in result.confirmations
+    ]
     return "\n" + "\n".join(lines)
 
 
@@ -1257,13 +1558,38 @@ def save_overview_figure(
                 ha="center", va="bottom", fontsize=8.5, color="crimson",
                 zorder=6,
             )
+        # Requested or confirmed frequencies that pass the honest threshold
+        # but not the blind one: shown, but told apart from the peaks.
+        marked = {round(peak.frequency_hz, 2) for peak in axis_peaks}
+        honest = [
+            (probe, "conf." if probe in result.confirmations else "asked")
+            for probe in [*result.probes, *result.confirmations]
+            if probe.axis == spectrum.axis and probe.detected
+            and round(probe.frequency_hz, 2) not in marked
+        ]
+        for probe, kind in honest:
+            height = float(np.interp(
+                probe.frequency_hz, spectrum.frequencies, spectrum.mean_psd,
+            ))
+            panel.plot(
+                [probe.frequency_hz], [height],
+                marker="o", markerfacecolor="none", markeredgecolor="darkgreen",
+                markersize=10, markeredgewidth=1.8, lw=0, zorder=5,
+            )
+            panel.annotate(
+                f"{probe.frequency_hz:.2f} Hz\n{kind} z={probe.z:.1f}",
+                xy=(probe.frequency_hz, height),
+                xytext=(0, 13), textcoords="offset points",
+                ha="center", va="bottom", fontsize=8.5, color="darkgreen",
+                zorder=6,
+            )
         top = max(
             float(np.max(spectrum.mean_psd)), float(np.max(ceiling)),
         )
-        panel.set_ylim(0.0, top * (1.42 if axis_peaks else 1.08))
+        panel.set_ylim(0.0, top * (1.42 if axis_peaks or honest else 1.08))
         panel.set_ylabel(f"{spectrum.axis} axis\nPSD [g$^2$/Hz]")
         panel.grid(True, alpha=0.3)
-        if not axis_peaks:
+        if not axis_peaks and not honest:
             panel.text(
                 0.012, 0.94,
                 "nothing rises out of the noise on this axis",
@@ -1279,6 +1605,9 @@ def save_overview_figure(
             Line2D([0], [0], color="0.2", lw=1.6),
             Line2D([0], [0], color="crimson", marker="x", lw=0,
                    markersize=9, markeredgewidth=2),
+            Line2D([0], [0], marker="o", markerfacecolor="none",
+                   markeredgecolor="darkgreen", markersize=9,
+                   markeredgewidth=1.8, lw=0),
         ],
         labels=[
             "sensor noise: nothing here is a structure",
@@ -1286,8 +1615,9 @@ def save_overview_figure(
             "broadband floor",
             "measured PSD (axis colour)",
             "frequency that stands out",
+            "requested / confirmed, honest threshold",
         ],
-        loc="lower center", ncol=5, fontsize=9,
+        loc="lower center", ncol=6, fontsize=9,
         bbox_to_anchor=(0.5, 0.0), frameon=False,
     )
     if result.peaks:
@@ -1402,11 +1732,13 @@ def run_single_resolution(
     output_directory: Path,
     settings: SpectrumSettings,
     probe_hz: list[float] | None = None,
+    plan: ProbePlan | None = None,
 ) -> list[CaptureResult]:
     """Analyse every capture at one segment length into one directory."""
     bands = load_band_names()
     output_directory.mkdir(parents=True, exist_ok=True)
     all_rows: list[dict[str, Any]] = []
+    all_probe_rows: list[dict[str, Any]] = []
     results: list[CaptureResult] = []
     report_parts = [
         "Stable spectrum report",
@@ -1424,7 +1756,7 @@ def run_single_resolution(
     ]
     for raw_path in raw_paths:
         try:
-            result = analyze_capture(raw_path, settings, bands, probe_hz)
+            result = analyze_capture(raw_path, settings, bands, probe_hz, plan)
         except ValueError as error:
             message = (
                 f"{raw_path.stem}: skipped at nperseg {settings.nperseg}: "
@@ -1436,6 +1768,7 @@ def run_single_resolution(
             continue
         results.append(result)
         all_rows.extend(peak_rows(result))
+        all_probe_rows.extend(probe_rows(result))
         report_parts.append("=" * 72)
         report_parts.append(format_capture_report(result))
         save_figure(
@@ -1457,6 +1790,13 @@ def run_single_resolution(
             )
         )
     write_csv_rows(output_directory / "stable_frequencies.csv", all_rows)
+    if all_probe_rows:
+        with (output_directory / "stable_probes.csv").open(
+            "w", encoding="utf-8", newline="",
+        ) as csv_file:
+            writer = csv.DictWriter(csv_file, fieldnames=PROBE_FIELDS)
+            writer.writeheader()
+            writer.writerows(all_probe_rows)
     (output_directory / "stable_report.txt").write_text(
         "\n".join(report_parts), encoding="utf-8", newline="\n",
     )
@@ -1581,6 +1921,7 @@ def run_stable_spectrum(
     settings: SpectrumSettings,
     probe_hz: list[float] | None = None,
     nperseg_values: list[int] | None = None,
+    plan: ProbePlan | None = None,
 ) -> Path:
     """Analyse captures, once per segment length.
 
@@ -1590,7 +1931,7 @@ def run_stable_spectrum(
     figure per capture are written next to them.
     """
     if not nperseg_values:
-        run_single_resolution(raw_paths, output_directory, settings, probe_hz)
+        run_single_resolution(raw_paths, output_directory, settings, probe_hz, plan)
         print(f"Saved stable spectrum analysis: {output_directory}")
         return output_directory
     output_directory.mkdir(parents=True, exist_ok=True)
@@ -1604,6 +1945,7 @@ def run_stable_spectrum(
             output_directory / resolution_directory_name(int(nperseg)),
             resolution_settings,
             probe_hz,
+            plan,
         )
     (output_directory / "comparison.txt").write_text(
         format_comparison(results_by_nperseg), encoding="utf-8", newline="\n",
@@ -1636,15 +1978,34 @@ def parse_cli_arguments(arguments: list[str] | None = None) -> argparse.Namespac
         help="override the analysis band (default: from config.toml)",
     )
     parser.add_argument(
-        "--nperseg", type=int, nargs="+",
-        default=list(DEFAULT_NPERSEG_SWEEP), metavar="SAMPLES",
+        "--nperseg", type=int, nargs="+", default=None, metavar="SAMPLES",
         help="segment lengths to analyse, each into its own nperseg_<n> "
-             "directory (default: 1024 2048 4096)",
+             "directory (default: [stable_spectrum] nperseg in config.toml, "
+             "2048; give 1024 2048 4096 to compare resolutions)",
     )
     parser.add_argument(
-        "--probe", type=float, nargs="+", default=None, metavar="HZ",
-        help="report what sits at these frequencies on every axis, "
-             "including the 95%% upper bound when nothing is detected",
+        "--probe", type=parse_probe, nargs="+", default=None, metavar="HZ",
+        help="frequencies chosen before this record (2.88 on every axis, "
+             "Y:2.88 on one): what sits there, judged with a threshold that "
+             "counts only the bins near them, and the 95%% upper bound when "
+             "nothing is found",
+    )
+    parser.add_argument(
+        "--probe-tolerance", type=float, default=DEFAULT_PROBE_TOLERANCE_HZ,
+        metavar="HZ",
+        help="how far from a requested frequency its peak may sit "
+             f"(default {DEFAULT_PROBE_TOLERANCE_HZ:g} Hz)",
+    )
+    parser.add_argument(
+        "--probe-alpha", type=float, default=DEFAULT_ALPHA,
+        help="false-positive rate for --probe and --confirm-from, independent "
+             f"of --alpha (default {DEFAULT_ALPHA:g})",
+    )
+    parser.add_argument(
+        "--confirm-from", type=Path, nargs="+", default=None, metavar="PATH",
+        help="stable_frequencies.csv files, or folders holding them, from a "
+             "search on other runs (e.g. --alpha 0.05): their peaks are "
+             "checked on these records as frequencies chosen in advance",
     )
     parser.add_argument(
         "--baseline-window", type=float, default=None, metavar="HZ",
@@ -1658,12 +2019,32 @@ def main(arguments: list[str] | None = None) -> int:
     cli = parse_cli_arguments(arguments)
     band = tuple(cli.band) if cli.band is not None else None
     settings = load_settings(cli.alpha, band, cli.baseline_window)
+    candidates: tuple[ProbeRequest, ...] = ()
+    candidate_captures: frozenset[str] = frozenset()
+    candidate_sources: tuple[str, ...] = ()
+    if cli.confirm_from:
+        try:
+            candidates, candidate_captures, candidate_sources = load_candidates(
+                cli.confirm_from, cli.probe_tolerance,
+            )
+        except (OSError, ValueError, KeyError) as error:
+            print(f"error: --confirm-from: {error}")
+            return 1
+    plan = ProbePlan(
+        requests=tuple(cli.probe or ()),
+        candidates=candidates,
+        candidate_captures=candidate_captures,
+        candidate_sources=candidate_sources,
+        tolerance_hz=cli.probe_tolerance,
+        alpha=cli.probe_alpha,
+    )
     run_stable_spectrum(
         cli.raw_paths,
         resolve_output_directory(cli.output, cli.raw_paths),
         settings,
-        cli.probe,
-        cli.nperseg,
+        None,
+        cli.nperseg or load_default_nperseg(),
+        plan,
     )
     return 0
 

@@ -18,11 +18,11 @@ python stable_spectrum.py results/<capture>_raw.npz
 
 The first records about 17 minutes and writes `results/<capture>_raw.npz`.
 The second reads that file and writes `stable_results/<capture>/` with one
-directory per spectral resolution (`nperseg_1024/`, `nperseg_2048/`,
-`nperseg_4096/`), each holding the report, the peak table and the figures.
-`figure_dominant_<capture>.png` is the one to show. `comparison.txt` and
-`figure_compare_<capture>.png` next to them put the three resolutions side
-by side.
+directory per spectral resolution, `nperseg_2048/` by default (`[stable_spectrum]
+nperseg` in `config.toml`), holding the report, the peak table and the
+figures. `figure_dominant_<capture>.png` is the one to show. With
+`--nperseg 1024 2048 4096`, `comparison.txt` and
+`figure_compare_<capture>.png` put the three resolutions side by side.
 
 To see a whole folder of captures at once:
 
@@ -198,10 +198,13 @@ bin grid; the bin centre is kept in the CSV as `bin_frequency_hz`.
 
 ### Spectral resolution
 
-Every capture is analysed at three segment lengths by default:
+Every capture is analysed at 2048 by default, where the building modes
+found so far have the highest z (1024 is too coarse for them, 4096 only adds
+error). Give several lengths to compare:
 
 ```bash
-python stable_spectrum.py results/<capture>_raw.npz                  # 1024 2048 4096
+python stable_spectrum.py results/<capture>_raw.npz                  # 2048
+python stable_spectrum.py results/<capture>_raw.npz --nperseg 1024 2048 4096
 python stable_spectrum.py results/<capture>_raw.npz --nperseg 1024 8192
 ```
 
@@ -259,6 +262,23 @@ Each probe reports the prominence measured there, the prominence that would
 have been needed, and the 95% upper bound. A structure stronger than that
 bound is excluded by the record; a weaker one is not. This turns "we saw
 nothing" into a measurement.
+
+A probe looks within +-0.2 Hz (`--probe-tolerance`) and is judged by a
+threshold that counts only the bins inside the probe windows, at
+`--probe-alpha` (0.01). `Y:2.88` probes one axis. That threshold is honest
+only for frequencies chosen before the record: from another run, floor or
+instrument, never from the same record.
+
+To search on one run and confirm on another:
+
+```bash
+python stable_spectrum.py <run A>_raw.npz --alpha 0.05 --nperseg 2048 --output stable_results/runA_search
+python stable_spectrum.py <run B>_raw.npz --nperseg 2048 --confirm-from stable_results/runA_search
+```
+
+The peaks run A found at the looser alpha are checked on run B with the
+honest threshold; a record is never asked to confirm its own findings.
+`false_alarm_check.py --probes 3` checks that threshold on noise.
 
 ### Measuring repeatability
 

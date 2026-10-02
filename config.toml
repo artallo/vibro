@@ -20,6 +20,11 @@ noverlap = 512
 # baseline; 10 Hz keeps the top of a 3-4 Hz wide hump. Was 5 Hz until
 # 2026-10-01.
 baseline_window_hz = 10.0
+# Segment lengths stable_spectrum.py analyses when --nperseg is not given.
+# 2048 (bin 0.12 Hz) gives the highest z on the building modes found so far;
+# list several, e.g. [1024, 2048, 4096], to compare resolutions. Was
+# [1024, 2048, 4096] until 2026-10-02.
+nperseg = [2048]
 
 [visualization.trusted_frequency]
 min_support_fraction = 0.50

@@ -19,9 +19,18 @@ Two kinds of noise:
 Captures are made as one continuous series and cut into packets, so long
 segments that span packet joins see no artificial steps.
 
+With ``--probes K`` every capture is also probed at K frequencies drawn at
+random in the band, each on one random axis, as ``stable_spectrum.py
+--probe`` and ``--confirm-from`` do: the threshold counts only the bins in
+the probe windows. A capture counts when any probe comes out "present".
+This checks the honest threshold for frequencies chosen in advance; the
+frequencies come from their own random generator, so the search results
+do not change when probes are added.
+
 Usage::
 
     python false_alarm_check.py --runs 300
+    python false_alarm_check.py --runs 300 --probes 3
     python false_alarm_check.py --runs 300 --baseline-window 5 10 \\
         --noise-shape "tumen_results/20260912_*_raw.npz" "tumen_results/20260916_*_raw.npz"
 """
@@ -41,11 +50,15 @@ from stable_spectrum import (
     AXIS_KEYS,
     DEFAULT_NPERSEG_SWEEP,
     STABLE_RESULTS_DIRECTORY,
+    DEFAULT_PROBE_TOLERANCE_HZ,
+    ProbeRequest,
     analyze_axis,
     drop_startup_packet,
     find_stable_peaks,
     load_band_names,
     load_settings,
+    probe_frequencies,
+    probe_threshold,
     rolling_median,
     significance_threshold,
 )
@@ -64,10 +77,17 @@ class Outcome:
     runs: int
     runs_with_peaks: int
     peaks: list[tuple[str, float, float]]  # axis, frequency, z
+    runs_with_probe_hits: int = 0
+    probe_hits: list[tuple[str, float, float]] = ()  # axis, frequency, z
+    probe_threshold: float = 0.0
 
     @property
     def rate(self) -> float:
         return self.runs_with_peaks / self.runs if self.runs else 0.0
+
+    @property
+    def probe_rate(self) -> float:
+        return self.runs_with_probe_hits / self.runs if self.runs else 0.0
 
 
 def expand(items: list[str]) -> list[Path]:
@@ -140,13 +160,37 @@ def peaks_in(
     rate_hz: float,
     settings,
     bands,
+    spectra=None,
 ) -> list:
-    spectra = [analyze_axis(axis, axes[key], rate_hz, settings) for axis, key in AXIS_KEYS]
+    if spectra is None:
+        spectra = [analyze_axis(axis, axes[key], rate_hz, settings) for axis, key in AXIS_KEYS]
     bins_tested = sum(spectrum.frequencies.size for spectrum in spectra)
     threshold = significance_threshold(
         bins_tested, settings.alpha, int(round(spectra[0].effective_rows)),
     )
     return find_stable_peaks(spectra, threshold, settings, bands)
+
+
+def random_probes(
+    generator: np.random.Generator,
+    count: int,
+    band_hz: tuple[float, float],
+    tolerance_hz: float,
+) -> list[ProbeRequest]:
+    """Frequencies picked without looking at the capture, one axis each."""
+    low, high = band_hz[0] + tolerance_hz, band_hz[1] - tolerance_hz
+    axes = [name for name, _ in AXIS_KEYS]
+    return [
+        ProbeRequest(float(generator.uniform(low, high)), str(generator.choice(axes)))
+        for _ in range(count)
+    ]
+
+
+def probe_hits_in(spectra, requests, tolerance_hz: float, alpha: float):
+    rows = int(round(spectra[0].effective_rows))
+    threshold, _ = probe_threshold(spectra, requests, tolerance_hz, alpha, rows)
+    results = probe_frequencies(spectra, requests, threshold, tolerance_hz)
+    return [probe for probe in results if probe.detected], threshold
 
 
 def run_check(
@@ -160,10 +204,17 @@ def run_check(
     band_hz: tuple[float, float] | None = None,
     alpha: float = 0.01,
     progress: bool = False,
+    probes: int = 0,
+    probe_tolerance_hz: float = DEFAULT_PROBE_TOLERANCE_HZ,
+    probe_alpha: float = 0.01,
 ) -> list[Outcome]:
     """Every window and segment length sees the same noise captures."""
     bands = load_band_names()
     base = load_settings(alpha, band_hz)
+    probe_generator = np.random.default_rng([seed, 1])
+    probe_hits = {}
+    probe_found = {}
+    probe_thresholds = {}
     settings = {
         (window, nperseg): replace(
             base, nperseg=nperseg, noverlap=nperseg // 2, baseline_window_hz=window,
@@ -176,15 +227,36 @@ def run_check(
     generator = np.random.default_rng(seed)
     for run in range(runs):
         axes = make_capture(generator, packets, shape)
+        requests = random_probes(probe_generator, probes, base.band_hz, probe_tolerance_hz)
         for key, current in settings.items():
-            peaks = peaks_in(axes, rate_hz, current, bands)
+            spectra = [
+                analyze_axis(axis, axes[axis_key], rate_hz, current)
+                for axis, axis_key in AXIS_KEYS
+            ]
+            peaks = peaks_in(axes, rate_hz, current, bands, spectra)
             if peaks:
                 hits[key] += 1
                 found[key].extend((peak.axis, peak.frequency_hz, peak.z) for peak in peaks)
+            if requests:
+                detected, threshold = probe_hits_in(
+                    spectra, requests, probe_tolerance_hz, probe_alpha,
+                )
+                probe_thresholds.setdefault(key, []).append(threshold)
+                if detected:
+                    probe_hits[key] = probe_hits.get(key, 0) + 1
+                    probe_found.setdefault(key, []).extend(
+                        (probe.axis, probe.frequency_hz, probe.z) for probe in detected
+                    )
         if progress and (run + 1) % 25 == 0:
             print(f"  {run + 1}/{runs} captures", flush=True)
     return [
-        Outcome(window, nperseg, runs, hits[(window, nperseg)], found[(window, nperseg)])
+        Outcome(
+            window, nperseg, runs, hits[(window, nperseg)], found[(window, nperseg)],
+            probe_hits.get((window, nperseg), 0),
+            probe_found.get((window, nperseg), []),
+            float(np.median(probe_thresholds[(window, nperseg)]))
+            if (window, nperseg) in probe_thresholds else 0.0,
+        )
         for window, nperseg in settings
     ]
 
@@ -207,6 +279,9 @@ def format_report(
     rate_hz: float,
     alpha: float,
     seed: int,
+    probes: int = 0,
+    probe_tolerance_hz: float = DEFAULT_PROBE_TOLERANCE_HZ,
+    probe_alpha: float = 0.01,
 ) -> str:
     lines = [
         "False alarm check of stable_spectrum.py",
@@ -233,6 +308,28 @@ def format_report(
             f"{outcome.runs_with_peaks:9d} {outcome.rate:6.1%} "
             f"{low:6.1%}-{high:6.1%}  {listed}"
         )
+    if probes:
+        lines += [
+            "",
+            f"Probes: {probes} random frequencies per capture, one axis each, "
+            f"window +-{probe_tolerance_hz:g} Hz, alpha {probe_alpha:g}.",
+            "A capture counts when any probe comes out present. Expected rate:",
+            f"about alpha = {probe_alpha:.1%}.",
+            "",
+            f"{'Window Hz':>9s} {'nperseg':>7s} {'runs':>5s} {'present':>9s} "
+            f"{'rate':>6s} {'95% interval':>15s} {'thr':>5s}  hits (axis Hz z)",
+        ]
+        for outcome in outcomes:
+            low, high = binomial_interval(outcome.runs_with_probe_hits, outcome.runs)
+            listed = ", ".join(
+                f"{axis} {frequency:.2f} z{z:.1f}"
+                for axis, frequency, z in list(outcome.probe_hits)[:12]
+            )
+            lines.append(
+                f"{outcome.window_hz:9g} {outcome.nperseg:7d} {outcome.runs:5d} "
+                f"{outcome.runs_with_probe_hits:9d} {outcome.probe_rate:6.1%} "
+                f"{low:6.1%}-{high:6.1%} {outcome.probe_threshold:5.2f}  {listed}"
+            )
     return "\n".join(lines) + "\n"
 
 
@@ -262,6 +359,15 @@ def parse_cli_arguments(arguments: list[str] | None = None) -> argparse.Namespac
         help="analysis band (default: from config.toml)",
     )
     parser.add_argument("--alpha", type=float, default=0.01)
+    parser.add_argument(
+        "--probes", type=int, default=0, metavar="K",
+        help="also probe K random frequencies per capture with the honest "
+             "threshold of --probe and --confirm-from (default 0: off)",
+    )
+    parser.add_argument(
+        "--probe-tolerance", type=float, default=DEFAULT_PROBE_TOLERANCE_HZ, metavar="HZ",
+    )
+    parser.add_argument("--probe-alpha", type=float, default=0.01)
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument(
         "--output", type=Path, default=None,
@@ -285,9 +391,13 @@ def main(arguments: list[str] | None = None) -> int:
         rate_hz, shape, noise_kind = DEFAULT_RATE_HZ, None, "white Gaussian"
     outcomes = run_check(
         cli.runs, cli.packets, windows, cli.nperseg, shape, rate_hz, cli.seed,
-        band, cli.alpha, progress=True,
+        band, cli.alpha, progress=True, probes=cli.probes,
+        probe_tolerance_hz=cli.probe_tolerance, probe_alpha=cli.probe_alpha,
     )
-    report = format_report(outcomes, noise_kind, cli.packets, rate_hz, cli.alpha, cli.seed)
+    report = format_report(
+        outcomes, noise_kind, cli.packets, rate_hz, cli.alpha, cli.seed,
+        cli.probes, cli.probe_tolerance, cli.probe_alpha,
+    )
     output = cli.output or (
         STABLE_RESULTS_DIRECTORY / f"false_alarm_{datetime.now():%Y%m%d_%H%M%S}"
     )
