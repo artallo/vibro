@@ -1,0 +1,42 @@
+# Control points: the real records every method change is checked on, with
+# control_run.py before and after the change. One entry is one point, which
+# is one folder of runs. Why each point is here: the vault note
+# Vibro_vault/Данные/Контрольные точки.md.
+#
+# probes: frequencies chosen before these records, from another point or
+# another day (same syntax as stable_spectrum.py --probe: 2.88 on every
+# axis, Y:2.88 on one). Never frequencies found in the records themselves.
+
+[[point]]
+name = "resp40_st1_f5"
+folder = "tumen_results/261001_Ростелеком на Республики 40/лестница 1, 5 этаж"
+
+[[point]]
+name = "resp40_st2_f5"
+folder = "tumen_results/261001_Ростелеком на Республики 40/лестница 2, 5 этаж"
+
+[[point]]
+name = "resp40_base"
+folder = "tumen_results/261001_Ростелеком на Республики 40/цоколь"
+# Found on the 5th floor of the same building.
+probes = ["Y:2.88", "X:2.49", "Y:2.33"]
+
+[[point]]
+name = "malkova23_f25"
+folder = "tumen_results/260919 25этаж из 25 монолитно-каркасный, Малкова 23"
+
+[[point]]
+name = "ervye_f5"
+folder = "tumen_results/260919 5этаж из 10 на полу, Эрвье"
+# Found on 13.09.
+probes = ["Y:1.73", "X:1.97"]
+
+[[point]]
+name = "tumen_0913"
+folder = "tumen_results/260913 Тюмень, 10k"
+
+[[point]]
+name = "ervye_f1"
+folder = "tumen_results/260917 1этаж из 10 день, Эрвье"
+# Found on 13.09; the 5th floor of this building has them as Y 1.75 / X 1.96.
+probes = ["Y:1.73", "X:1.97"]

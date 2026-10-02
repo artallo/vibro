@@ -57,9 +57,14 @@ against the noise in its bin, at the price of fewer segments and a larger
 error bar. A structure wider than the bin gains nothing. Comparing the
 three directories shows which kind a peak is.
 
+A folder on the command line stands for one measuring point: every
+``*_raw.npz`` in it (not in its subfolders) is a run of that point.
+
 Usage::
 
     python stable_spectrum.py real_results/<capture>_raw.npz
+    python stable_spectrum.py "tumen_results/260913 Тюмень, 10k"
+    python stable_spectrum.py "tumen_results/260913 Тюмень, 10k" --pool
     python stable_spectrum.py real_results/*_raw.npz --output stable_results/all
     python stable_spectrum.py real_results/<capture>_raw.npz --nperseg 1024 4096
 """
@@ -2000,11 +2005,40 @@ def save_figure(path: Path, result: CaptureResult) -> None:
 # ==========================================================
 
 
+def expand_raw_paths(paths: list[Path]) -> list[Path]:
+    """Files as given; a folder is one measuring point, all its runs.
+
+    Only ``*_raw.npz`` directly in the folder count, in name order:
+    subfolders are other points and are never mixed in.
+    """
+    expanded: list[Path] = []
+    for path in paths:
+        if not path.is_dir():
+            expanded.append(path)
+            continue
+        runs = sorted(path.glob("*_raw.npz"))
+        if not runs:
+            inner = sorted(
+                item.name for item in path.iterdir()
+                if item.is_dir() and any(item.glob("*_raw.npz"))
+            )
+            hint = f"; point folders inside: {', '.join(inner)}" if inner else ""
+            raise ValueError(f"no *_raw.npz in {path}{hint}")
+        expanded.extend(runs)
+    return list(dict.fromkeys(expanded))
+
+
 def resolve_output_directory(
     output: Path | None, raw_paths: list[Path], pool: bool = False,
 ) -> Path:
+    """``raw_paths`` as given on the command line, folders not expanded."""
     if output is not None:
         return output
+    if len(raw_paths) == 1 and raw_paths[0].is_dir():
+        # One directory per point, named as overview_figure.py names it:
+        # the runs one by one in runs/, pooled in pool/ next to it.
+        point = STABLE_RESULTS_DIRECTORY / raw_paths[0].resolve().name
+        return point / ("pool" if pool else "runs")
     if len(raw_paths) == 1:
         return STABLE_RESULTS_DIRECTORY / raw_paths[0].stem
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -2260,7 +2294,11 @@ def parse_cli_arguments(arguments: list[str] | None = None) -> argparse.Namespac
     parser = argparse.ArgumentParser(
         description="Repeatable frequency extraction from raw captures",
     )
-    parser.add_argument("raw_paths", nargs="+", type=Path)
+    parser.add_argument(
+        "raw_paths", nargs="+", type=Path, metavar="PATH",
+        help="*_raw.npz files, or a folder of one measuring point: all "
+             "*_raw.npz directly in it are its runs",
+    )
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument(
         "--alpha", type=float, default=DEFAULT_ALPHA,
@@ -2353,8 +2391,13 @@ def main(arguments: list[str] | None = None) -> int:
         tolerance_hz=cli.probe_tolerance,
         alpha=cli.probe_alpha,
     )
+    try:
+        raw_paths = expand_raw_paths(cli.raw_paths)
+    except (OSError, ValueError) as error:
+        print(f"error: {error}")
+        return 1
     run_stable_spectrum(
-        cli.raw_paths,
+        raw_paths,
         resolve_output_directory(cli.output, cli.raw_paths, cli.pool),
         settings,
         None,
