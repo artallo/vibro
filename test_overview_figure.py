@@ -94,10 +94,11 @@ class OverviewTests(unittest.TestCase):
                 self.assertAlmostEqual(
                     overview.bin_width_hz, RATE_HZ / nperseg, places=6,
                 )
-                # 192 packets in one row, half-overlapping segments.
+                # Three captures of 64 packets, each cut on its own into
+                # half-overlapping segments: no segment crosses a join.
                 hop = nperseg // 2
                 self.assertEqual(
-                    overview.segment_count, (192 * 1024 - nperseg) // hop + 1,
+                    overview.segment_count, 3 * ((64 * 1024 - nperseg) // hop + 1),
                 )
                 self.assertLess(
                     overview.effective_segments, overview.segment_count,

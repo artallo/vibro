@@ -280,6 +280,18 @@ The peaks run A found at the looser alpha are checked on run B with the
 honest threshold; a record is never asked to confirm its own findings.
 `false_alarm_check.py --probes 3` checks that threshold on noise.
 
+To analyse the runs of one point as one long record:
+
+```bash
+python stable_spectrum.py <run 1>_raw.npz <run 2>_raw.npz --pool
+```
+
+Each run is cut into segments on its own and the segments of all runs go
+into one average, so no segment straddles the pause between runs (where the
+sensor may have been moved). Every peak of the pooled record is marked
+`k/N`: in how many of the N runs the blind search of that run alone finds
+it. `overview_figure.py` pools a folder the same way.
+
 ### Measuring repeatability
 
 `repeatability_check.py` splits each capture into halves that share no

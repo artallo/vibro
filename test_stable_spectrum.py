@@ -708,6 +708,108 @@ class DriverTests(unittest.TestCase):
             )
 
 
+class PoolTests(unittest.TestCase):
+    def write(self, path, seed, tone=0.0, rate=SAMPLING_RATE_HZ, offset=0.0, packets=128):
+        np.savez(
+            path,
+            x=add_tone(noise_packets(packets, seed), ON_BIN_HZ, tone, seed=seed + 1) + offset,
+            y=noise_packets(packets, seed + 2), z=noise_packets(packets, seed + 3),
+            packet_fs_hz=np.full(packets, rate),
+        )
+
+    def test_no_segment_crosses_the_pause_between_runs(self) -> None:
+        from stable_spectrum import segment_periodograms
+
+        settings = settings_at(4096)
+        # A level step between two runs, as when the sensor settles anew.
+        joined = np.vstack([noise_packets(32, 990), noise_packets(32, 991) + 50.0])
+        _, glued, _ = segment_periodograms(joined, SAMPLING_RATE_HZ, settings)
+        _, apart, _ = segment_periodograms(joined, SAMPLING_RATE_HZ, settings, [32, 32])
+        hop = 2048
+        self.assertEqual(glued.shape[0], (64 * 1024 - 4096) // hop + 1)
+        self.assertEqual(apart.shape[0], 2 * ((32 * 1024 - 4096) // hop + 1))
+        # The glued row holds the step and lifts the lowest bins; apart, no row does.
+        self.assertGreater(glued[:, 1:4].max(), 50.0 * np.median(glued[:, 1:4]))
+        self.assertLess(apart[:, 1:4].max(), 50.0 * np.median(apart[:, 1:4]))
+
+    def test_support_windows_stay_inside_one_run(self) -> None:
+        from stable_spectrum import split_into_windows, windows_for_groups
+
+        windows = windows_for_groups([255, 256])
+        self.assertEqual(len(windows), 16)
+        for window in windows:
+            self.assertTrue(window[-1] < 255 or window[0] >= 255)
+        single = windows_for_groups([256])
+        self.assertEqual(
+            [list(item) for item in single], [list(item) for item in split_into_windows(256)],
+        )
+
+    def test_runs_count_how_many_runs_find_the_peak_alone(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from stable_spectrum import analyze_pool, load_band_names
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            both = [root / "a_raw.npz", root / "b_raw.npz"]
+            self.write(both[0], 1000, tone=0.12)
+            self.write(both[1], 1010, tone=0.12)
+            result = analyze_pool(both, SETTINGS, load_band_names())
+            peak = next(item for item in result.peaks if item.axis == "X")
+            self.assertEqual((peak.runs_found, peak.runs_total), (2, 2))
+            self.assertEqual(peak.runs_label, "2/2")
+            self.assertTrue(result.pooled)
+            self.assertEqual(result.member_packets, (128, 128))
+
+            one = [root / "c_raw.npz", root / "d_raw.npz"]
+            self.write(one[0], 1020, tone=0.15)
+            self.write(one[1], 1030, tone=0.0)
+            result = analyze_pool(one, SETTINGS, load_band_names())
+            peak = next(item for item in result.peaks if item.axis == "X")
+            self.assertEqual(peak.runs_label, "1/2")
+
+    def test_runs_with_different_rates_are_refused(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from stable_spectrum import analyze_pool, load_band_names
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write(root / "a_raw.npz", 1040)
+            self.write(root / "b_raw.npz", 1041, rate=125.0)
+            with self.assertRaises(ValueError):
+                analyze_pool(
+                    [root / "a_raw.npz", root / "b_raw.npz"], SETTINGS, load_band_names(),
+                )
+
+    def test_command_line_pool_writes_one_pooled_report(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from stable_spectrum import main
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, seed in (("20261001_141520_run01_raw", 1050), ("20261001_143239_run02_raw", 1060)):
+                self.write(root / f"{name}.npz", seed, tone=0.12)
+            main([
+                str(root / "20261001_141520_run01_raw.npz"),
+                str(root / "20261001_143239_run02_raw.npz"),
+                "--pool", "--nperseg", "2048", "--output", str(root / "out"),
+            ])
+            folder = root / "out" / "nperseg_2048"
+            report = (folder / "stable_report.txt").read_text(encoding="utf-8")
+            self.assertIn("Pooled record of 2 runs", report)
+            self.assertIn("Capture: pooled_141520_143239", report)
+            self.assertIn("2/2", report)
+            self.assertEqual(report.count("Recording check"), 2)
+            table = (folder / "stable_frequencies.csv").read_text(encoding="utf-8")
+            self.assertIn("runs_found,runs_total", table)
+            self.assertTrue((folder / "figure_dominant_pooled_141520_143239.png").exists())
+
+
 class DefaultResolutionTests(unittest.TestCase):
     def test_without_nperseg_only_the_configured_resolution_is_run(self) -> None:
         import tempfile
