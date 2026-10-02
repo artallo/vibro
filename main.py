@@ -52,7 +52,15 @@ VIRTUAL_SESSION_LAYOUTS = {
     "8x8": (8, 8),
     "8x16": (8, 16),
     "8x32": (8, 32),
+    # 16 packets per session keep 15 Welch segments of 2048 samples per
+    # session, as 8 packets do at 1024. Added 2026-10-02 to compare segment
+    # lengths; not part of "all", whose output family_analysis.py reads.
+    "16x8": (16, 8),
+    "16x16": (16, 16),
 }
+REPLAY_ALL_LAYOUTS = (
+    "4x4", "4x8", "4x16", "4x32", "4x64", "8x4", "8x8", "8x16", "8x32",
+)
 
 # ==========================================================
 
@@ -492,8 +500,24 @@ def parse_cli_arguments(
     parser.add_argument("--replay", type=Path)
     parser.add_argument(
         "--virtual-mode",
+        nargs="+",
         choices=(*VIRTUAL_SESSION_LAYOUTS, "all"),
-        default="8x8",
+        default=["8x8"],
+        help="replay layouts, packets per session x sessions per run; "
+             "several may be given; all = the nine original layouts",
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=CONFIG_PATH,
+        help="configuration file (default: config.toml next to main.py)",
+    )
+    parser.add_argument(
+        "--replay-root",
+        type=Path,
+        default=REPLAY_RESULTS_DIRECTORY,
+        help="where --replay writes its <record> folder "
+             "(default: replay_results)",
     )
     return parser.parse_args(arguments)
 
@@ -3464,6 +3488,8 @@ def compute_statistics(
 
 try:
     cli_arguments = parse_cli_arguments()
+    CONFIG_PATH = cli_arguments.config
+    REPLAY_RESULTS_DIRECTORY = cli_arguments.replay_root
     config = build_effective_config_from_cli(CONFIG_PATH, cli_arguments)
 except FileNotFoundError:
     raise SystemExit(f"Configuration file not found: {CONFIG_PATH}")
@@ -4544,7 +4570,7 @@ def save_replay_summaries(
 
 def replay_raw_measurement(
     source_raw_path: Path,
-    virtual_mode: str,
+    virtual_modes: list[str],
     base_config: ApplicationConfig,
 ) -> None:
     raw = load_raw_measurement(source_raw_path)
@@ -4553,11 +4579,11 @@ def replay_raw_measurement(
     layout_rows = []
     result_root = REPLAY_RESULTS_DIRECTORY / source_raw_path.stem
     result_root.mkdir(parents=True, exist_ok=False)
-    modes = (
-        list(VIRTUAL_SESSION_LAYOUTS)
-        if virtual_mode == "all"
-        else [virtual_mode]
-    )
+    modes = list(dict.fromkeys(
+        layout
+        for mode in virtual_modes
+        for layout in (REPLAY_ALL_LAYOUTS if mode == "all" else (mode,))
+    ))
     for mode in modes:
         packets_per_session, target_sessions = VIRTUAL_SESSION_LAYOUTS[mode]
         packets_per_run = packets_per_session * target_sessions

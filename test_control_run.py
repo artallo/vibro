@@ -167,5 +167,107 @@ class ControlRunTests(unittest.TestCase):
             self.assertTrue(list(point.folder.glob("*_raw.npz")), point.name)
 
 
+
+class OldDetectorTests(unittest.TestCase):
+    def test_only_the_welch_lines_change(self) -> None:
+        from control_run import old_detector_config
+
+        text = (
+            "[serial]\r\nport = \"COM8\"\r\n\r\n[welch]\r\nnperseg = 1024\r\n"
+            "noverlap = 512\r\n\r\n[stable_spectrum]\r\nnperseg = [2048]\r\n"
+        )
+        same, nperseg, noverlap = old_detector_config(text, None)
+        self.assertEqual((same, nperseg, noverlap), (text, 1024, 512))
+        changed, nperseg, noverlap = old_detector_config(text, 2048)
+        self.assertEqual((nperseg, noverlap), (2048, 1024))
+        self.assertEqual(
+            changed,
+            text.replace("nperseg = 1024", "nperseg = 2048").replace("noverlap = 512", "noverlap = 1024"),
+        )
+        self.assertIn("[stable_spectrum]\r\nnperseg = [2048]", changed)
+        with self.assertRaises(ValueError):
+            old_detector_config("[serial]\nport = 1\n", 2048)
+
+    def test_regions_group_by_axis_and_frequency(self) -> None:
+        from control_run import group_by_frequency
+
+        items = [
+            {"axis": "Y", "frequency_hz": 1.73}, {"axis": "X", "frequency_hz": 1.97},
+            {"axis": "Y", "frequency_hz": 1.85}, {"axis": "Y", "frequency_hz": 2.30},
+            {"axis": "X", "frequency_hz": 1.73},
+        ]
+        groups = group_by_frequency(items, 0.2)
+        self.assertEqual(
+            [[row["frequency_hz"] for row in group] for group in groups],
+            [[1.73], [1.97], [1.73, 1.85], [2.30]],
+        )
+
+    def test_keys_of_one_detector_are_refused_with_the_other(self) -> None:
+        for arguments in (
+            ["v", "--layouts", "8x8"],
+            ["v", "--old-detector", "--alpha", "0.05"],
+            ["v", "--old-detector", "--separation-sigma", "3"],
+        ):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                control_run.parse_cli_arguments(arguments)
+        cli = control_run.parse_cli_arguments(["v", "--old-detector"])
+        self.assertEqual(cli.layouts, control_run.DEFAULT_OLD_LAYOUTS)
+
+    def test_replay_of_a_point_tables_its_trusted_regions(self) -> None:
+        from false_alarm_check import save_capture
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            folder = root / "tone"
+            folder.mkdir()
+            for seed in range(2):
+                generator = np.random.default_rng(seed)
+                time = np.arange(64 * 1024) / RATE_HZ
+                axes = {
+                    key: generator.normal(0.0, 1.0, 64 * 1024) for key in "xyz"
+                }
+                axes["y"] += 0.4 * np.sin(2.0 * np.pi * 3.0 * time)
+                axes = {key: value.reshape(64, 1024) for key, value in axes.items()}
+                save_capture(folder / f"run{seed}_raw.npz", axes, RATE_HZ, "test")
+            points = root / "points.toml"
+            write_points(points, [("tone", folder, [])])
+            output = root / "control"
+            code = main([
+                "old", "--old-detector", "--layouts", "8x8", "4x4", "--nperseg", "2048",
+                "--points-file", str(points), "--output", str(output),
+            ])
+            self.assertEqual(code, 0)
+            variant = output / "old"
+            config = (variant / "config.toml").read_text(encoding="utf-8")
+            self.assertIn("nperseg = 2048", config)
+            self.assertIn("noverlap = 1024", config)
+            self.assertTrue((variant / "tone" / "run0_raw" / "8x8" / "virtual_run01").is_dir())
+            self.assertEqual(
+                len(list((variant / "tone" / "run0_raw" / "4x4").glob("virtual_run*"))), 4,
+            )
+            rows = read_rows(variant / "control_old_peaks.csv")
+            tone = [
+                row for row in rows
+                if row["axis"] == "Y" and abs(float(row["frequency_hz"]) - 3.0) < 0.2
+            ]
+            records = {row["record"] for row in tone}
+            self.assertIn("run0_raw full", records)
+            self.assertIn("run1_raw full", records)
+            self.assertIn("across runs full", records)
+            across = next(row for row in tone if row["record"] == "across runs full")
+            self.assertEqual(across["runs"], "2/2")
+            self.assertTrue(all(row["nperseg"] == "2048" for row in rows))
+            summary = (variant / "control_summary.txt").read_text(encoding="utf-8")
+            self.assertIn("Welch nperseg 2048, noverlap 1024", summary)
+            self.assertIn("4x4 (4 runs)", summary)
+            # Runs of the two detectors are never compared with each other.
+            stable = output / "stable"
+            stable.mkdir()
+            (stable / "control_peaks.csv").write_text(
+                ",".join(control_run.PEAK_FIELDS) + "\n", encoding="utf-8",
+            )
+            self.assertEqual(main(["--compare", "old", "stable", "--output", str(output)]), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

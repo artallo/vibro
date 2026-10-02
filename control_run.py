@@ -43,7 +43,9 @@ import argparse
 import contextlib
 import csv
 import io
+import re
 import shutil
+import subprocess
 import sys
 import tomllib
 from dataclasses import dataclass, replace
@@ -51,7 +53,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from stable_spectrum import (
+    CONFIG_PATH,
     DEFAULT_ALPHA,
     DEFAULT_PROBE_TOLERANCE_HZ,
     STABLE_RESULTS_DIRECTORY,
@@ -65,12 +70,18 @@ from stable_spectrum import (
 )
 
 POINTS_PATH = Path(__file__).with_name("control_points.toml")
+MAIN_PATH = Path(__file__).with_name("main.py")
+DEFAULT_OLD_LAYOUTS = ["8x32", "8x8"]
 CONTROL_DIRECTORY = STABLE_RESULTS_DIRECTORY / "_control"
 POOL_RECORD = "pool"
 
 PEAK_FIELDS = [
     "point", "record", "nperseg", "z_threshold", "axis", "frequency_hz",
     "z", "prominence_db", "persistent", "runs",
+]
+OLD_PEAK_FIELDS = [
+    "point", "record", "layout", "nperseg", "axis", "frequency_hz",
+    "prom_db", "support", "runs",
 ]
 PROBE_FIELDS = [
     "point", "record", "nperseg", "axis", "requested_hz", "frequency_hz",
@@ -313,16 +324,249 @@ def run_variant(cli: argparse.Namespace) -> int:
 
 
 # ==========================================================
+# The old detector of main.py
+# ==========================================================
+
+def old_detector_config(text: str, nperseg: int | None) -> tuple[str, int, int]:
+    """config.toml with [welch] nperseg and noverlap set; nothing else changes.
+
+    Returns the text and the segment length and overlap it holds. Without
+    ``nperseg`` the configured values stay.
+    """
+    lines = text.splitlines(keepends=True)
+    start = next(
+        (i for i, line in enumerate(lines) if line.strip() == "[welch]"), None,
+    )
+    if start is None:
+        raise ValueError("config.toml has no [welch] section")
+    end = next(
+        (i for i in range(start + 1, len(lines)) if lines[i].lstrip().startswith("[")),
+        len(lines),
+    )
+    values = {}
+    for i in range(start + 1, end):
+        match = re.match(r"\s*(nperseg|noverlap)\s*=\s*(\d+)", lines[i])
+        if match:
+            values[match.group(1)] = (i, int(match.group(2)))
+    if set(values) != {"nperseg", "noverlap"}:
+        raise ValueError("[welch] of config.toml needs nperseg and noverlap")
+    if nperseg is None:
+        return text, values["nperseg"][1], values["noverlap"][1]
+    for key, value in (("nperseg", nperseg), ("noverlap", nperseg // 2)):
+        line = lines[values[key][0]]
+        newline = line[len(line.rstrip("\r\n")):]
+        lines[values[key][0]] = f"{key} = {value}{newline}"
+    return "".join(lines), nperseg, nperseg // 2
+
+
+def read_csv_rows(path: Path) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+    with path.open(encoding="utf-8", newline="") as csv_file:
+        return list(csv.DictReader(csv_file))
+
+
+def group_by_frequency(
+    items: list[dict[str, Any]], tolerance_hz: float,
+) -> list[list[dict[str, Any]]]:
+    """Regions of one axis within the tolerance of their group's mean."""
+    groups: list[list[dict[str, Any]]] = []
+    for item in sorted(items, key=lambda row: (row["axis"], row["frequency_hz"])):
+        last = groups[-1] if groups else None
+        if (
+            last is not None and last[0]["axis"] == item["axis"]
+            and abs(item["frequency_hz"] - np.mean([row["frequency_hz"] for row in last]))
+            <= tolerance_hz
+        ):
+            last.append(item)
+        else:
+            groups.append([item])
+    return groups
+
+
+def summarise_group(group: list[dict[str, Any]], found: int, total: int) -> dict[str, Any]:
+    return {
+        "axis": group[0]["axis"],
+        "frequency_hz": round(float(np.mean([row["frequency_hz"] for row in group])), 3),
+        "prom_db": round(float(np.mean([row["prom_db"] for row in group])), 2),
+        "support": "",
+        "runs": f"{found}/{total}",
+    }
+
+
+def old_point_rows(
+    point: ControlPoint, raw_paths: list[Path], replay_root: Path,
+    layouts: list[str], nperseg: int, tolerance_hz: float,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Trusted regions of every run and layout, and the summary lines."""
+    rows: list[dict[str, Any]] = []
+    lines = [f"{point.name}   {point.listed or point.folder.as_posix()}"]
+    whole: dict[str, list[dict[str, Any]]] = {layout: [] for layout in layouts}
+    for raw_path in raw_paths:
+        folder = replay_root / raw_path.stem
+        regions = read_csv_rows(folder / "replay_regions.csv")
+        runs = read_csv_rows(folder / "replay_runs.csv")
+        lines.append(f"  {raw_path.stem}")
+        for layout in layouts:
+            parts = sorted({int(row["virtual_run"]) for row in runs if row["mode"] == layout})
+            found = [
+                {
+                    "axis": row["axis"],
+                    "frequency_hz": float(row["med_freq_hz"]),
+                    "prom_db": float(row["med_prom_db"]),
+                    "support": f"{row['support_n']}/{row['support_total']}",
+                    "part": int(row["virtual_run"]),
+                }
+                for row in regions if row["mode"] == layout
+            ]
+            base = {"point": point.name, "layout": layout, "nperseg": nperseg}
+            if not parts:
+                lines.append(f"    {layout:<6} record too short for this layout")
+                continue
+            if len(parts) == 1:
+                kind = "full"
+                entries = [
+                    {
+                        "axis": item["axis"],
+                        "frequency_hz": round(item["frequency_hz"], 3),
+                        "prom_db": round(item["prom_db"], 2),
+                        "support": item["support"],
+                        "runs": "",
+                    }
+                    for item in sorted(found, key=lambda row: (row["axis"], row["frequency_hz"]))
+                ]
+                text = ", ".join(
+                    f"{item['axis']} {item['frequency_hz']:.2f} ({item['support']}, "
+                    f"{item['prom_db']:.1f} dB)" for item in entries
+                )
+                whole[layout].extend({**item, "source": raw_path.stem} for item in found)
+            else:
+                kind = "parts"
+                entries = [
+                    summarise_group(group, len({row["part"] for row in group}), len(parts))
+                    for group in group_by_frequency(found, tolerance_hz)
+                ]
+                text = ", ".join(
+                    f"{item['axis']} {item['frequency_hz']:.2f} {item['runs']}" for item in entries
+                )
+            label = f"{layout} ({len(parts)} run{'s' if len(parts) > 1 else ''})"
+            lines.append(f"    {label:<14} {text or 'no trusted region'}")
+            rows.extend(
+                {**base, "record": f"{raw_path.stem} {kind}", **entry} for entry in entries
+            )
+    if len(raw_paths) > 1:
+        for layout, found in whole.items():
+            if not found:
+                continue
+            entries = [
+                summarise_group(group, len({row["source"] for row in group}), len(raw_paths))
+                for group in group_by_frequency(found, tolerance_hz)
+            ]
+            lines.append(
+                f"  across runs, {layout}: "
+                + ", ".join(f"{item['axis']} {item['frequency_hz']:.2f} {item['runs']}" for item in entries)
+            )
+            rows.extend(
+                {"point": point.name, "layout": layout, "nperseg": nperseg,
+                 "record": "across runs full", **entry}
+                for entry in entries
+            )
+    return rows, lines
+
+
+def run_old_variant(cli: argparse.Namespace) -> int:
+    variant = cli.variant
+    if Path(variant).name != variant or variant in {".", ".."}:
+        print(f"error: variant '{variant}' must be a plain folder name")
+        return 1
+    try:
+        points = select_points(load_points(cli.points_file), cli.points)
+        config_text, nperseg, noverlap = old_detector_config(
+            CONFIG_PATH.read_text(encoding="utf-8"), cli.nperseg,
+        )
+        point_paths = {}
+        for point in points:
+            try:
+                point_paths[point.name] = expand_raw_paths([point.folder])
+            except (OSError, ValueError) as error:
+                raise ValueError(f"{point.name}: {error}") from error
+    except (OSError, ValueError) as error:
+        print(f"error: {error}")
+        return 1
+
+    output = cli.output / variant
+    if output.exists():
+        shutil.rmtree(output)
+    output.mkdir(parents=True)
+    config_path = output / "config.toml"
+    config_path.write_text(config_text, encoding="utf-8")
+    all_rows = []
+    lines = [
+        f"Old detector (main.py --replay) control run '{variant}'",
+        f"Created: {datetime.now().isoformat(timespec='seconds')}",
+        f"Welch nperseg {nperseg}, noverlap {noverlap}   layouts {' '.join(cli.layouts)}",
+        "Trusted regions at the spectral maximum of the median PSD (Med.Freq):",
+        "one run of a layout: support n/N sessions and Med.Prom; several runs:",
+        "in how many of them the region is trusted, grouped within "
+        f"{cli.tolerance:g} Hz.",
+        "",
+    ]
+    for point in points:
+        replay_root = output / point.name
+        for raw_path in point_paths[point.name]:
+            completed = subprocess.run(
+                [
+                    sys.executable, str(MAIN_PATH), "--replay", str(raw_path),
+                    "--virtual-mode", *cli.layouts,
+                    "--config", str(config_path), "--replay-root", str(replay_root),
+                ],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+            )
+            replay_root.mkdir(parents=True, exist_ok=True)
+            (replay_root / f"{raw_path.stem}_replay.log").write_text(
+                completed.stdout + completed.stderr, encoding="utf-8",
+            )
+            if completed.returncode != 0:
+                print(f"error: main.py --replay failed on {raw_path}, see the log in {replay_root}")
+                return 1
+        rows, point_lines = old_point_rows(
+            point, point_paths[point.name], replay_root, cli.layouts, nperseg, cli.tolerance,
+        )
+        all_rows.extend(rows)
+        lines.extend(point_lines + [""])
+        print(f"{point.name}: {len(point_paths[point.name])} run(s) replayed")
+
+    write_table(output / "control_old_peaks.csv", OLD_PEAK_FIELDS, all_rows)
+    (output / "control_summary.txt").write_text("\n".join(lines), encoding="utf-8", newline="\n")
+    print(f"Saved old detector control run: {output}")
+    return 0
+
+
+# ==========================================================
 # Comparison of two variants
 # ==========================================================
 
-def read_peaks(path: Path) -> list[dict[str, Any]]:
-    with path.open(encoding="utf-8", newline="") as csv_file:
-        rows = list(csv.DictReader(csv_file))
-    for row in rows:
-        row["frequency_hz"] = float(row["frequency_hz"])
-        row["z"] = float(row["z"])
-    return rows
+PEAK_TABLES = {
+    "control_peaks.csv": ("z", "z"),
+    "control_old_peaks.csv": ("prom_db", "Med.Prom dB"),
+}
+
+
+def read_peaks(directory: Path) -> tuple[list[dict[str, Any]], str, str]:
+    """Peaks of one run, its table name and what the value column holds.
+
+    The value goes to ``z`` either way, so both kinds compare alike.
+    """
+    for name, (column, label) in PEAK_TABLES.items():
+        path = directory / name
+        if path.exists():
+            with path.open(encoding="utf-8", newline="") as csv_file:
+                rows = list(csv.DictReader(csv_file))
+            for row in rows:
+                row["frequency_hz"] = float(row["frequency_hz"])
+                row["z"] = float(row[column])
+            return rows, name, label
+    raise OSError(f"no {' or '.join(PEAK_TABLES)} in {directory}")
 
 
 def match_peaks(
@@ -354,14 +598,14 @@ def format_comparison(
     name_a: str, name_b: str,
     pairs: list[tuple[dict[str, Any], dict[str, Any]]],
     lost: list[dict[str, Any]], new: list[dict[str, Any]],
-    skipped: list[str], tolerance_hz: float,
+    skipped: list[str], tolerance_hz: float, value_label: str = "z",
 ) -> str:
     def where(row: dict[str, Any]) -> str:
         return f"{row['point']:<16} {row['record']:<36}"
 
     def peak(row: dict[str, Any]) -> str:
         runs = f" {row['runs']}" if row.get("runs") else ""
-        return f"{row['axis']} {row['frequency_hz']:.2f} z {row['z']:.1f}{runs}"
+        return f"{row['axis']} {row['frequency_hz']:.2f} {value_label} {row['z']:.1f}{runs}"
 
     order = lambda row: (row["point"], row["record"], row["axis"], row["frequency_hz"])
     lines = [
@@ -379,7 +623,7 @@ def format_comparison(
     lines.append(f"New (in '{name_b}' only):")
     lines += [f"  {where(row)} {peak(row)}" for row in sorted(new, key=order)] or ["  none"]
     lines.append("")
-    lines.append("Kept, z before -> after:")
+    lines.append(f"Kept, {value_label} before -> after:")
     for old, fresh in sorted(pairs, key=lambda pair: order(pair[0])):
         shift = fresh["frequency_hz"] - old["frequency_hz"]
         moved = f"  ({shift:+.2f} Hz)" if abs(shift) >= 0.005 else ""
@@ -388,7 +632,7 @@ def format_comparison(
             runs = f"  runs {old.get('runs') or '-'} -> {fresh.get('runs') or '-'}"
         lines.append(
             f"  {where(old)} {old['axis']} {old['frequency_hz']:.2f}  "
-            f"z {old['z']:.1f} -> {fresh['z']:.1f}{moved}{runs}"
+            f"{value_label} {old['z']:.1f} -> {fresh['z']:.1f}{moved}{runs}"
         )
     return "\n".join(lines) + "\n"
 
@@ -396,10 +640,13 @@ def format_comparison(
 def compare_variants(cli: argparse.Namespace) -> int:
     name_a, name_b = cli.compare
     try:
-        before = read_peaks(cli.output / name_a / "control_peaks.csv")
-        after = read_peaks(cli.output / name_b / "control_peaks.csv")
+        before, table_a, label = read_peaks(cli.output / name_a)
+        after, table_b, _ = read_peaks(cli.output / name_b)
     except OSError as error:
         print(f"error: {error}")
+        return 1
+    if table_a != table_b:
+        print(f"error: '{name_a}' and '{name_b}' are runs of different detectors")
         return 1
     summary_points = []
     for name in (name_a, name_b):
@@ -412,7 +659,7 @@ def compare_variants(cli: argparse.Namespace) -> int:
         [row for row in after if row["point"] in common],
         cli.tolerance,
     )
-    text = format_comparison(name_a, name_b, pairs, lost, new, skipped, cli.tolerance)
+    text = format_comparison(name_a, name_b, pairs, lost, new, skipped, cli.tolerance, label)
     path = cli.output / f"compare_{name_a}_{name_b}.txt"
     path.write_text(text, encoding="utf-8", newline="\n")
     print(text)
@@ -443,7 +690,18 @@ def parse_cli_arguments(arguments: list[str] | None = None) -> argparse.Namespac
     parser.add_argument(
         "--nperseg", type=int, default=None, metavar="SAMPLES",
         help="one segment length (default: [stable_spectrum] nperseg in "
-             "config.toml, which must hold one value)",
+             "config.toml, which must hold one value; with --old-detector "
+             "[welch] nperseg, and noverlap becomes half of it)",
+    )
+    parser.add_argument(
+        "--old-detector", action="store_true",
+        help="run the old detector of main.py (--replay) instead of "
+             "stable_spectrum.py and table its trusted regions",
+    )
+    parser.add_argument(
+        "--layouts", nargs="+", default=None, metavar="PxS",
+        help="--old-detector: replay layouts, packets per session x sessions "
+             f"per run (default {' '.join(DEFAULT_OLD_LAYOUTS)})",
     )
     parser.add_argument("--alpha", type=float, default=DEFAULT_ALPHA)
     parser.add_argument(
@@ -460,6 +718,20 @@ def parse_cli_arguments(arguments: list[str] | None = None) -> argparse.Namespac
     cli = parser.parse_args(arguments)
     if (cli.variant is None) == (cli.compare is None):
         parser.error("give either a variant name to run or --compare A B")
+    if cli.old_detector:
+        unused = [
+            key for key, value in (
+                ("--alpha", cli.alpha != DEFAULT_ALPHA), ("--band", cli.band),
+                ("--baseline-window", cli.baseline_window),
+                ("--min-distance", cli.min_distance),
+                ("--separation-sigma", cli.separation_sigma),
+            ) if value
+        ]
+        if unused:
+            parser.error(f"{', '.join(unused)}: not used by the old detector")
+        cli.layouts = cli.layouts or list(DEFAULT_OLD_LAYOUTS)
+    elif cli.layouts:
+        parser.error("--layouts needs --old-detector")
     return cli
 
 
@@ -467,6 +739,8 @@ def main(arguments: list[str] | None = None) -> int:
     cli = parse_cli_arguments(arguments)
     if cli.compare:
         return compare_variants(cli)
+    if cli.old_detector:
+        return run_old_variant(cli)
     return run_variant(cli)
 
 

@@ -31,6 +31,7 @@ Usage::
 
     python false_alarm_check.py --runs 300
     python false_alarm_check.py --runs 300 --probes 3
+    python false_alarm_check.py --runs 20 --nperseg 2048 --save-captures stable_results/_noise/white
     python false_alarm_check.py --runs 300 --baseline-window 5 10 \\
         --noise-shape "tumen_results/260912 Тюмень/*_raw.npz" "tumen_results/260916 Тюмень, три прогона/*_raw.npz"
 """
@@ -155,6 +156,31 @@ def make_capture(
     return axes
 
 
+RAW_PACKETS_PER_SESSION = 8
+
+
+def save_capture(path: Path, axes: dict[str, np.ndarray], rate_hz: float, label: str) -> None:
+    """One noise capture in the raw format of main.py, so --replay reads it.
+
+    Sessions of 8 packets as recorded; the packet count must divide by 8.
+    """
+    packets = axes["x"].shape[0]
+    if packets % RAW_PACKETS_PER_SESSION:
+        raise ValueError(f"--save-captures needs packets divisible by {RAW_PACKETS_PER_SESSION}")
+    np.savez_compressed(
+        path,
+        format_version=np.asarray(1, dtype=np.int64),
+        created_at=np.asarray(label),
+        requested_odr_hz=np.asarray(250.0),
+        packet_count=np.asarray(packets, dtype=np.int64),
+        samples_per_packet=np.asarray(axes["x"].shape[1], dtype=np.int64),
+        packets_per_session=np.asarray(RAW_PACKETS_PER_SESSION, dtype=np.int64),
+        target_sessions=np.asarray(packets // RAW_PACKETS_PER_SESSION, dtype=np.int64),
+        x=axes["x"], y=axes["y"], z=axes["z"],
+        packet_fs_hz=np.full(packets, rate_hz),
+    )
+
+
 def peaks_in(
     axes: dict[str, np.ndarray],
     rate_hz: float,
@@ -208,8 +234,15 @@ def run_check(
     probe_tolerance_hz: float = DEFAULT_PROBE_TOLERANCE_HZ,
     probe_alpha: float = 0.01,
     separation_sigma: float | None = None,
+    save_directory: Path | None = None,
 ) -> list[Outcome]:
-    """Every window and segment length sees the same noise captures."""
+    """Every window and segment length sees the same noise captures.
+
+    With ``save_directory`` every capture is also written there as
+    ``noise_<n>_raw.npz``, readable by main.py --replay.
+    """
+    if save_directory is not None:
+        save_directory.mkdir(parents=True, exist_ok=True)
     bands = load_band_names()
     base = load_settings(alpha, band_hz, None, None, separation_sigma)
     probe_generator = np.random.default_rng([seed, 1])
@@ -228,6 +261,11 @@ def run_check(
     generator = np.random.default_rng(seed)
     for run in range(runs):
         axes = make_capture(generator, packets, shape)
+        if save_directory is not None:
+            save_capture(
+                save_directory / f"noise_{run + 1:03d}_raw.npz", axes, rate_hz,
+                f"synthetic noise, seed {seed}, capture {run + 1}",
+            )
         requests = random_probes(probe_generator, probes, base.band_hz, probe_tolerance_hz)
         for key, current in settings.items():
             spectra = [
@@ -376,6 +414,11 @@ def parse_cli_arguments(arguments: list[str] | None = None) -> argparse.Namespac
     )
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument(
+        "--save-captures", type=Path, default=None, metavar="FOLDER",
+        help="also write every generated capture there in the raw format of "
+             "main.py, e.g. to replay the old detector on it",
+    )
+    parser.add_argument(
         "--output", type=Path, default=None,
         help="folder for the report (default: stable_results/false_alarm_<time>/)",
     )
@@ -399,7 +442,7 @@ def main(arguments: list[str] | None = None) -> int:
         cli.runs, cli.packets, windows, cli.nperseg, shape, rate_hz, cli.seed,
         band, cli.alpha, progress=True, probes=cli.probes,
         probe_tolerance_hz=cli.probe_tolerance, probe_alpha=cli.probe_alpha,
-        separation_sigma=cli.separation_sigma,
+        separation_sigma=cli.separation_sigma, save_directory=cli.save_captures,
     )
     report = format_report(
         outcomes, noise_kind, cli.packets, rate_hz, cli.alpha, cli.seed,

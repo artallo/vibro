@@ -94,6 +94,27 @@ class FalseAlarmTests(unittest.TestCase):
         self.assertGreater(high, 0.01)
         self.assertEqual(binomial_interval(0, 0), (0.0, 0.0))
 
+    def test_saved_captures_carry_the_raw_format_of_main(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory) / "noise"
+            run_check(
+                runs=2, packets=16, windows_hz=[10.0], nperseg_values=[1024],
+                shape=None, rate_hz=RATE_HZ, seed=3, save_directory=folder,
+            )
+            paths = sorted(folder.glob("*_raw.npz"))
+            self.assertEqual([path.name for path in paths], ["noise_001_raw.npz", "noise_002_raw.npz"])
+            with np.load(paths[0]) as archive:
+                self.assertEqual(int(archive["format_version"]), 1)
+                self.assertEqual(int(archive["packet_count"]), 16)
+                self.assertEqual(int(archive["samples_per_packet"]), SAMPLES_PER_PACKET)
+                self.assertEqual(
+                    int(archive["packets_per_session"]) * int(archive["target_sessions"]), 16,
+                )
+                self.assertEqual(float(archive["requested_odr_hz"]), 250.0)
+                self.assertEqual(archive["x"].shape, (16, SAMPLES_PER_PACKET))
+                self.assertTrue(np.all(archive["packet_fs_hz"] == RATE_HZ))
+                self.assertTrue(str(archive["created_at"]))
+
     def test_command_line_writes_a_report(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "out"
