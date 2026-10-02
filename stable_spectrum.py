@@ -340,6 +340,7 @@ class CaptureResult:
     members: tuple[str, ...] = ()
     member_packets: tuple[int, ...] = ()
     member_quality: tuple[tuple[str, "QualityReport"], ...] = ()
+    pool_warnings: tuple[str, ...] = ()
 
     @property
     def pooled(self) -> bool:
@@ -1156,6 +1157,35 @@ def load_capture(raw_path: Path) -> LoadedCapture:
 
 # Records pooled together must share one frequency grid.
 MAX_POOL_RATE_MISMATCH = 0.005
+# Runs of one sensor placement differ in mean level by at most a few times
+# the noise of one sample (up to 7x on all records so far); moving the
+# sensor tilts it and shifts X and Y by 70-170x. A spread above this ratio
+# means the runs are probably not of one point.
+LEVEL_JUMP_NOISE_RATIO = 20.0
+
+
+def level_jump_warnings(axes_list: list[dict[str, np.ndarray]]) -> list[str]:
+    """Axes whose mean level differs between runs far more than their noise.
+
+    Each item holds the (packets, samples) arrays of one run. The noise is
+    the median over runs of the median per-packet standard deviation.
+    """
+    if len(axes_list) < 2:
+        return []
+    messages = []
+    for axis, key in AXIS_KEYS:
+        means = [float(np.mean(axes[key])) for axes in axes_list]
+        noise = float(np.median([
+            np.median(np.std(axes[key], axis=1)) for axes in axes_list
+        ]))
+        spread = max(means) - min(means)
+        if noise > 0.0 and spread > LEVEL_JUMP_NOISE_RATIO * noise:
+            messages.append(
+                f"{axis}: the mean level differs by {spread * 1.0e3:.1f} mg between "
+                f"runs ({spread / noise:.0f}x the noise of one sample): the sensor "
+                "was probably moved, pool only the runs of one point"
+            )
+    return messages
 
 
 def windows_for_groups(groups: list[int]) -> list[np.ndarray]:
@@ -1382,6 +1412,9 @@ def analyze_records(
         confirm_bins=confirm_bins,
         confirm_skipped=confirm_skipped,
         members=tuple(record.name for record in records) if pooled else (),
+        pool_warnings=tuple(
+            level_jump_warnings([record.axes for record in records])
+        ) if pooled else (),
         member_packets=tuple(groups) if pooled else (),
         member_quality=tuple(member_quality) if pooled else (),
     )
@@ -1511,6 +1544,7 @@ def format_capture_report(result: CaptureResult) -> str:
                 f"  {name}: {packets} packets"
                 for name, packets in zip(result.members, result.member_packets)
             ],
+            *[f"  ! {message}" for message in result.pool_warnings],
         ]
     lines.append("")
     for name, quality in (result.member_quality or (("", result.quality),)):
@@ -1966,6 +2000,8 @@ def run_single_resolution(
             output_directory / f"figure_dominant_{result.capture}.png",
             result,
         )
+        for message in result.pool_warnings:
+            print(f"WARNING: {message}")
         print(
             f"{result.capture} [nperseg {result.nperseg}]: "
             f"{result.row_count} rows, z>={result.z_threshold:.2f} -> "

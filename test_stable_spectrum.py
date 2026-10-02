@@ -769,6 +769,30 @@ class PoolTests(unittest.TestCase):
             peak = next(item for item in result.peaks if item.axis == "X")
             self.assertEqual(peak.runs_label, "1/2")
 
+    def test_a_level_jump_between_runs_is_warned_about(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from stable_spectrum import analyze_pool, level_jump_warnings, load_band_names
+
+        same = [{key: noise_packets(32, 1100 + index) for key in "xyz"} for index in range(2)]
+        self.assertEqual(level_jump_warnings(same), [])
+        near = [same[0], {key: value + 2.0 for key, value in same[1].items()}]
+        self.assertEqual(level_jump_warnings(near), [])
+        moved = [same[0], {**same[1], "x": same[1]["x"] + 60.0}]
+        messages = level_jump_warnings(moved)
+        self.assertEqual(len(messages), 1)
+        self.assertTrue(messages[0].startswith("X:"))
+        self.assertEqual(level_jump_warnings(same[:1]), [])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write(root / "a_raw.npz", 1110)
+            self.write(root / "b_raw.npz", 1111, offset=60.0)
+            result = analyze_pool(
+                [root / "a_raw.npz", root / "b_raw.npz"], SETTINGS, load_band_names(),
+            )
+            self.assertEqual(len(result.pool_warnings), 1)
+
     def test_runs_with_different_rates_are_refused(self) -> None:
         import tempfile
         from pathlib import Path

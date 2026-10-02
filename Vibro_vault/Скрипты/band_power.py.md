@@ -64,7 +64,7 @@ tags: [vibro, скрипт]
 сканирование:
 
 ```bash
-python band_power.py --point "Лестница 1, 5 этаж" "tumen_results/261001_Ростелеком на Республики 40/20261001_13*_raw.npz" --point "Лестница 2, 5 этаж" "tumen_results/261001_Ростелеком на Республики 40/20261001_15*_raw.npz" --point "Цоколь" "tumen_results/261001_Ростелеком на Республики 40/20261001_14*_raw.npz" --noise "tumen_results/20260912_*_raw.npz" "tumen_results/20260916_*_raw.npz" --bands 9.5-13 9-12 --scan 2 --band 0.5 30 --baseline-windows 5 15 --output stable_results/261001_resp40_band_power
+python band_power.py --point "Лестница 1, 5 этаж" "tumen_results/261001_Ростелеком на Республики 40/лестница 1, 5 этаж/*_raw.npz" --point "Лестница 2, 5 этаж" "tumen_results/261001_Ростелеком на Республики 40/лестница 2, 5 этаж/*_raw.npz" --point "Цоколь" "tumen_results/261001_Ростелеком на Республики 40/цоколь/*_raw.npz" --noise "tumen_results/20260912_*_raw.npz" "tumen_results/20260916_*_raw.npz" --bands 9.5-13 9-12 --scan 2 --band 0.5 30 --baseline-windows 5 15 --output stable_results/261001_resp40_band_power
 ```
 
 Пятый этаж против цоколя вместо шума датчика:

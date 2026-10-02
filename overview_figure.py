@@ -64,6 +64,7 @@ from stable_spectrum import (
     analyze_axis,
     drop_startup_packet,
     find_stable_peaks,
+    level_jump_warnings,
     load_band_names,
     load_settings,
     resolution_directory_name,
@@ -607,6 +608,12 @@ def main(arguments: list[str] | None = None) -> int:
     output = cli.output or STABLE_RESULTS_DIRECTORY / cli.folder.resolve().name
     for capture in captures:
         print(f"  {capture.name}: {capture.axes['x'].shape[0]} packets")
+    warnings = [
+        f"WARNING: {message}"
+        for message in level_jump_warnings([capture.axes for capture in captures])
+    ]
+    for line in warnings:
+        print(line)
     for nperseg in dict.fromkeys(cli.nperseg):
         try:
             overview = build_overview(
@@ -624,7 +631,8 @@ def main(arguments: list[str] | None = None) -> int:
         save_overview(figure, overview)
         report = format_resolution(overview)
         (directory / "overview.txt").write_text(
-            report, encoding="utf-8", newline="\n",
+            "".join(f"{line}\n" for line in warnings) + report,
+            encoding="utf-8", newline="\n",
         )
         print(report, end="")
         print(f"  Saved: {figure}")
