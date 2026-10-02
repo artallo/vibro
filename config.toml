@@ -20,6 +20,13 @@ noverlap = 512
 # baseline; 10 Hz keeps the top of a 3-4 Hz wide hump. Was 5 Hz until
 # 2026-10-01.
 baseline_window_hz = 10.0
+# Peaks of stable_spectrum.py and overview_figure.py closer than this merge;
+# its own key, so the old detector keeps min_distance_hz of [[analysis.bands]].
+min_distance_hz = 1.0
+# A weaker peak within min_distance_hz of a stronger one stays when the dip
+# between them is deeper than this many standard errors; 0 merges every
+# close pair, as before 2026-10-02.
+separation_sigma = 2.0
 # Segment lengths stable_spectrum.py analyses when --nperseg is not given.
 # 2048 (bin 0.12 Hz) gives the highest z on the building modes found so far;
 # list several, e.g. [1024, 2048, 4096], to compare resolutions. Was

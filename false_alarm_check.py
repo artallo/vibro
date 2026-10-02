@@ -207,10 +207,11 @@ def run_check(
     probes: int = 0,
     probe_tolerance_hz: float = DEFAULT_PROBE_TOLERANCE_HZ,
     probe_alpha: float = 0.01,
+    separation_sigma: float | None = None,
 ) -> list[Outcome]:
     """Every window and segment length sees the same noise captures."""
     bands = load_band_names()
-    base = load_settings(alpha, band_hz)
+    base = load_settings(alpha, band_hz, None, None, separation_sigma)
     probe_generator = np.random.default_rng([seed, 1])
     probe_hits = {}
     probe_found = {}
@@ -282,13 +283,14 @@ def format_report(
     probes: int = 0,
     probe_tolerance_hz: float = DEFAULT_PROBE_TOLERANCE_HZ,
     probe_alpha: float = 0.01,
+    separation: float = 0.0,
 ) -> str:
     lines = [
         "False alarm check of stable_spectrum.py",
         f"Created: {datetime.now().isoformat(timespec='seconds')}",
         f"Noise: {noise_kind}",
         f"Captures of {packets} packets x {SAMPLES_PER_PACKET} samples at {rate_hz:.2f} Hz, "
-        f"seed {seed}, alpha {alpha:g}",
+        f"seed {seed}, alpha {alpha:g}, separation sigma {separation:g}",
         "",
         "A capture counts when the peak search finds at least one peak in it.",
         f"Expected rate: about alpha = {alpha:.1%}, at most that by design.",
@@ -368,6 +370,10 @@ def parse_cli_arguments(arguments: list[str] | None = None) -> argparse.Namespac
         "--probe-tolerance", type=float, default=DEFAULT_PROBE_TOLERANCE_HZ, metavar="HZ",
     )
     parser.add_argument("--probe-alpha", type=float, default=0.01)
+    parser.add_argument(
+        "--separation-sigma", type=float, default=None, metavar="K",
+        help="dip test for close peaks, as in stable_spectrum.py (default: from config.toml)",
+    )
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument(
         "--output", type=Path, default=None,
@@ -393,10 +399,12 @@ def main(arguments: list[str] | None = None) -> int:
         cli.runs, cli.packets, windows, cli.nperseg, shape, rate_hz, cli.seed,
         band, cli.alpha, progress=True, probes=cli.probes,
         probe_tolerance_hz=cli.probe_tolerance, probe_alpha=cli.probe_alpha,
+        separation_sigma=cli.separation_sigma,
     )
     report = format_report(
         outcomes, noise_kind, cli.packets, rate_hz, cli.alpha, cli.seed,
         cli.probes, cli.probe_tolerance, cli.probe_alpha,
+        load_settings(cli.alpha, band, None, None, cli.separation_sigma).separation_sigma,
     )
     output = cli.output or (
         STABLE_RESULTS_DIRECTORY / f"false_alarm_{datetime.now():%Y%m%d_%H%M%S}"

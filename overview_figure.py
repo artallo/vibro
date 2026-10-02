@@ -252,6 +252,8 @@ def build_overview(
     alpha: float = DEFAULT_ALPHA,
     baseline_window_hz: float | None = None,
     nperseg: int | None = None,
+    min_distance_hz: float | None = None,
+    separation_sigma: float | None = None,
 ) -> Overview:
     """Both panels at one segment length, one packet long by default.
 
@@ -260,7 +262,9 @@ def build_overview(
     sampling_rate_hz = float(np.mean(
         [capture.sampling_rate_hz for capture in captures]
     ))
-    settings = load_settings(alpha, band_hz, baseline_window_hz)
+    settings = load_settings(
+        alpha, band_hz, baseline_window_hz, min_distance_hz, separation_sigma,
+    )
     segment = nperseg or captures[0].axes["x"].shape[1]
     settings = replace(settings, nperseg=segment, noverlap=segment // 2)
     nyquist = sampling_rate_hz / 2.0
@@ -546,6 +550,15 @@ def parse_cli_arguments(arguments: list[str] | None = None) -> argparse.Namespac
         "--baseline-window", type=float, default=None, metavar="HZ",
         help="width of the running-median baseline (default: from config.toml)",
     )
+    parser.add_argument(
+        "--min-distance", type=float, default=None, metavar="HZ",
+        help="peaks closer than this merge (default: from config.toml)",
+    )
+    parser.add_argument(
+        "--separation-sigma", type=float, default=None, metavar="K",
+        help="keep a weaker close peak behind a dip deeper than K standard "
+             "errors (default: from config.toml, else off)",
+    )
     return parser.parse_args(arguments)
 
 
@@ -622,6 +635,8 @@ def main(arguments: list[str] | None = None) -> int:
                 cli.alpha,
                 cli.baseline_window,
                 int(nperseg),
+                cli.min_distance,
+                cli.separation_sigma,
             )
         except ValueError as error:
             print(f"nperseg {nperseg}: skipped: {error}")

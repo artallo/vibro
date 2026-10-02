@@ -110,6 +110,13 @@ DEFAULT_ALPHA = 0.01
 # stronger neighbour 0.5 Hz away does not answer for it.
 DEFAULT_PROBE_TOLERANCE_HZ = 0.2
 DEFAULT_MIN_DISTANCE_HZ = 1.0
+# With a separation test, peaks are first looked for this many bins apart.
+SEPARATION_MIN_BINS = 2
+# A weaker peak within min_distance_hz of a stronger one stays when the dip
+# between them is deeper than this many standard errors. Overridden by
+# [stable_spectrum] separation_sigma in config.toml or --separation-sigma;
+# 0 merges every pair closer than min_distance_hz, as before 2026-10-02.
+DEFAULT_SEPARATION_SIGMA = 2.0
 # Below this many packets the error bar is itself too noisy: the periodogram
 # is right-skewed, the Student correction stops covering the upper tail, and
 # occasional false peaks appear. Measured on the evening captures: zero false
@@ -137,6 +144,11 @@ class SpectrumSettings:
     baseline_window_hz: float
     min_distance_hz: float
     alpha: float
+    # 0: peaks closer than min_distance_hz merge, the stronger z stays.
+    # Above 0: a weaker peak inside min_distance_hz of a stronger one stays
+    # too when the dip between them is deeper than this many standard
+    # errors.
+    separation_sigma: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -360,13 +372,16 @@ def load_settings(
     alpha: float,
     band_hz: tuple[float, float] | None,
     baseline_window_hz: float | None = None,
+    min_distance_hz: float | None = None,
+    separation_sigma: float | None = None,
 ) -> SpectrumSettings:
     """Read Welch, band and baseline settings from config.toml when it is available."""
     nperseg = DEFAULT_NPERSEG
     noverlap = DEFAULT_NOVERLAP
     minimum, maximum = DEFAULT_BAND_HZ
-    min_distance_hz = DEFAULT_MIN_DISTANCE_HZ
+    min_distance_hz_config = DEFAULT_MIN_DISTANCE_HZ
     configured_window_hz = DEFAULT_BASELINE_WINDOW_HZ
+    configured_sigma = DEFAULT_SEPARATION_SIGMA
     if CONFIG_PATH.exists():
         with CONFIG_PATH.open("rb") as config_file:
             config = tomllib.load(config_file)
@@ -377,28 +392,38 @@ def load_settings(
         if bands:
             minimum = min(float(band["min_frequency"]) for band in bands)
             maximum = max(float(band["max_frequency"]) for band in bands)
-            min_distance_hz = min(
-                float(band.get("min_distance_hz", min_distance_hz))
+            min_distance_hz_config = min(
+                float(band.get("min_distance_hz", min_distance_hz_config))
                 for band in bands
             )
-        configured_window_hz = float(
-            config.get("stable_spectrum", {}).get(
-                "baseline_window_hz", configured_window_hz,
-            )
-        )
+        own = config.get("stable_spectrum", {})
+        configured_window_hz = float(own.get("baseline_window_hz", configured_window_hz))
+        # Its own key, so that the old detector keeps the min_distance_hz
+        # of [[analysis.bands]].
+        configured_distance_hz = own.get("min_distance_hz")
+        if configured_distance_hz is not None:
+            min_distance_hz_config = float(configured_distance_hz)
+        configured_sigma = float(own.get("separation_sigma", configured_sigma))
     if band_hz is not None:
         minimum, maximum = band_hz
     if baseline_window_hz is not None:
         configured_window_hz = baseline_window_hz
     if configured_window_hz <= 0.0:
         raise ValueError("the baseline window must be positive")
+    if min_distance_hz is not None:
+        min_distance_hz_config = min_distance_hz
+    if separation_sigma is not None:
+        configured_sigma = separation_sigma
+    if min_distance_hz_config < 0.0 or configured_sigma < 0.0:
+        raise ValueError("min distance and separation sigma must not be negative")
     return SpectrumSettings(
         nperseg=nperseg,
         noverlap=noverlap,
         band_hz=(minimum, maximum),
         baseline_window_hz=configured_window_hz,
-        min_distance_hz=min_distance_hz,
+        min_distance_hz=min_distance_hz_config,
         alpha=alpha,
+        separation_sigma=configured_sigma,
     )
 
 
@@ -696,7 +721,9 @@ def find_stable_peaks(
         bin_width_hz = float(
             spectrum.frequencies[1] - spectrum.frequencies[0]
         )
-        distance = max(1, int(round(settings.min_distance_hz / bin_width_hz)))
+        window = max(1, int(round(settings.min_distance_hz / bin_width_hz)))
+        separating = settings.separation_sigma > 0.0
+        distance = min(window, SEPARATION_MIN_BINS) if separating else window
         # Search the profile that reaches past the band edges, then keep the
         # peaks whose top lies inside the band. A peak in the edge bin is
         # then compared with the real bin beyond the edge.
@@ -707,6 +734,10 @@ def find_stable_peaks(
         found, _ = find_peaks(search_z, height=z_threshold, distance=distance)
         indices = found - offset
         indices = indices[(indices >= 0) & (indices < spectrum.z.size)]
+        if separating:
+            indices = separate_close_peaks(
+                spectrum, indices, window, settings.separation_sigma,
+            )
         for index in indices:
             half_low = float(spectrum.half_z[0][index])
             half_high = float(spectrum.half_z[1][index])
@@ -736,6 +767,44 @@ def find_stable_peaks(
             ))
     peaks.sort(key=lambda peak: -peak.z)
     return peaks
+
+
+def separate_close_peaks(
+    spectrum: AxisSpectrum,
+    indices: np.ndarray,
+    window_bins: int,
+    sigma: float,
+) -> np.ndarray:
+    """Keep a weaker peak near a stronger one only behind a real dip.
+
+    Peaks are taken by z, strongest first. A peak within ``window_bins`` of
+    one already kept stays only when the lowest prominence between the two
+    lies below its own prominence by more than ``sigma`` standard errors of
+    that difference. A wiggle on the flank or on a ragged top has no such
+    dip and goes; a second mode beside a first one keeps it.
+    """
+    kept: list[int] = []
+    for index in sorted((int(item) for item in indices), key=lambda item: -spectrum.z[item]):
+        separate = True
+        for other in kept:
+            # As for find_peaks, peaks exactly window_bins apart are already apart.
+            if abs(index - other) >= window_bins:
+                continue
+            low, high = sorted((index, other))
+            if high - low < 2:
+                separate = False
+                break
+            saddle = low + 1 + int(np.argmin(spectrum.prominence_db[low + 1:high]))
+            dip = float(spectrum.prominence_db[index] - spectrum.prominence_db[saddle])
+            error = float(np.hypot(
+                spectrum.standard_error_db[index], spectrum.standard_error_db[saddle],
+            ))
+            if dip < sigma * error:
+                separate = False
+                break
+        if separate:
+            kept.append(index)
+    return np.array(sorted(kept), dtype=int)
 
 
 def band_edge_warnings(
@@ -2244,13 +2313,27 @@ def parse_cli_arguments(arguments: list[str] | None = None) -> argparse.Namespac
         help="width of the running-median baseline (default: from "
              f"config.toml, {DEFAULT_BASELINE_WINDOW_HZ:g} Hz without it)",
     )
+    parser.add_argument(
+        "--min-distance", type=float, default=None, metavar="HZ",
+        help="peaks closer than this merge (default: [stable_spectrum] "
+             "min_distance_hz, else the bands of config.toml, 1 Hz)",
+    )
+    parser.add_argument(
+        "--separation-sigma", type=float, default=None, metavar="K",
+        help="keep a weaker peak within --min-distance of a stronger one when "
+             "the dip between them is deeper than K standard errors "
+             "(default: [stable_spectrum] separation_sigma, else "
+             f"{DEFAULT_SEPARATION_SIGMA:g}; 0 merges every close pair)",
+    )
     return parser.parse_args(arguments)
 
 
 def main(arguments: list[str] | None = None) -> int:
     cli = parse_cli_arguments(arguments)
     band = tuple(cli.band) if cli.band is not None else None
-    settings = load_settings(cli.alpha, band, cli.baseline_window)
+    settings = load_settings(
+        cli.alpha, band, cli.baseline_window, cli.min_distance, cli.separation_sigma,
+    )
     candidates: tuple[ProbeRequest, ...] = ()
     candidate_captures: frozenset[str] = frozenset()
     candidate_sources: tuple[str, ...] = ()
