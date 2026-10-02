@@ -31,6 +31,9 @@ ADXL355 на ESP32. Цель — находить собственные час�
   экспериментальной причины. Список того, что не трогать, в заметке
   `Vibro_vault/Методы/Старый детектор — как он устроен.md`.
 - Пустой ответ с названным пределом в дБ — это результат, а не неудача.
+- Правку метода проверяй на контрольных точках: `python control_run.py
+  before` до правки, `after` после, `python control_run.py --compare before
+  after`. Список точек в `control_points.toml`.
 
 ## Окружение
 
@@ -41,7 +44,8 @@ ADXL355 на ESP32. Цель — находить собственные час�
   иначе падает на символе `σ`.
 - Порт датчика задаётся в `config.toml`, на каждой машине он свой.
 - Тесты: `python -m unittest test_stable_spectrum test_overview_figure
-  test_family_analysis test_band_power test_false_alarm_check`.
+  test_family_analysis test_band_power test_false_alarm_check
+  test_control_run`.
 
 ## Данные
 
