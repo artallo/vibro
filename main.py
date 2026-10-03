@@ -673,66 +673,58 @@ def parabola_peak(
     frequency: np.ndarray,
     psd: np.ndarray,
     index: int,
-    points: int = 21,
-) -> tuple[float, float, np.ndarray, np.ndarray]:
+) -> tuple[float, float]:
     """Top of a peak between bins, as stable_spectrum.py finds it.
 
     A parabola through the log PSD of the peak bin and its two neighbours
     puts the top of a Hann-windowed peak to a small fraction of a bin; the
-    shift is kept within half a bin. Returns the top's frequency and PSD and
-    the parabola between the two neighbours for drawing. A bin at the edge
-    or one that is not above both neighbours stays as it is, with no curve.
+    shift is kept within half a bin. Returns the top's frequency and PSD. A
+    bin at the edge or one that is not above both neighbours stays as it is.
     Only what is reported uses this; the detector decides on bin centres.
     """
     bin_frequency = float(frequency[index])
     bin_psd = float(psd[index])
-    empty = np.array([])
     if index <= 0 or index >= len(psd) - 1:
-        return bin_frequency, bin_psd, empty, empty
+        return bin_frequency, bin_psd
     tiny = np.finfo(float).tiny
     left, centre, right = 10.0 * np.log10(
         np.maximum(np.asarray(psd[index - 1:index + 2], dtype=float), tiny)
     )
     curvature = left - 2.0 * centre + right
     if not curvature < 0.0:
-        return bin_frequency, bin_psd, empty, empty
+        return bin_frequency, bin_psd
     step = float(frequency[index + 1] - frequency[index])
     offset = float(np.clip(0.5 * (left - right) / curvature, -0.5, 0.5))
-
-    def level_db(position: np.ndarray) -> np.ndarray:
-        return (
-            centre
-            + 0.5 * (right - left) * position
-            + 0.5 * curvature * position ** 2
-        )
-
-    positions = np.linspace(-1.0, 1.0, points)
-    curve_frequency = bin_frequency + positions * step
-    curve_psd = 10.0 ** (level_db(positions) / 10.0)
-    top_psd = float(10.0 ** (level_db(np.array([offset]))[0] / 10.0))
-    return bin_frequency + offset * step, top_psd, curve_frequency, curve_psd
+    top_db = centre + 0.5 * (right - left) * offset + 0.5 * curvature * offset ** 2
+    return bin_frequency + offset * step, float(10.0 ** (top_db / 10.0))
 
 
-def draw_parabola_peak(
-    ax,
+def peak_tops_on_curve(
     frequency: np.ndarray,
     psd: np.ndarray,
-    peak_frequency: float,
-    color: str,
-) -> tuple[float, float]:
-    """Draw the parabola of a reported peak over the curve; return its top."""
-    matching_indices = np.flatnonzero(frequency == peak_frequency)
-    if len(matching_indices) != 1:
-        raise ValueError(
-            f"Peak frequency {peak_frequency} Hz does not match exactly one "
-            "frequency bin"
-        )
-    top_frequency, top_psd, curve_frequency, curve_psd = parabola_peak(
-        frequency, psd, int(matching_indices[0]),
-    )
-    if curve_frequency.size:
-        ax.plot(curve_frequency, curve_psd, color=color, linewidth=1.5)
-    return top_frequency, top_psd
+    peak_frequencies,
+) -> tuple[np.ndarray, np.ndarray, list[tuple[float, float]]]:
+    """The curve to draw, with the top of each reported peak as a vertex.
+
+    Each peak is given by the centre of its bin. Its parabola top is added
+    to the plotted points, so the line runs through it and the cross put
+    there sits on the curve at the reported frequency. Only the figure gets
+    the extra points.
+    """
+    tops = []
+    for peak_frequency in peak_frequencies:
+        matching_indices = np.flatnonzero(frequency == peak_frequency)
+        if len(matching_indices) != 1:
+            raise ValueError(
+                f"Peak frequency {peak_frequency} Hz does not match exactly one "
+                "frequency bin"
+            )
+        tops.append(parabola_peak(frequency, psd, int(matching_indices[0])))
+    extra = [top for top in tops if not np.any(frequency == top[0])]
+    curve_frequency = np.concatenate([frequency, [top[0] for top in extra]])
+    curve_psd = np.concatenate([psd, [top[1] for top in extra]])
+    order = np.argsort(curve_frequency, kind="stable")
+    return curve_frequency[order], curve_psd[order], tops
 
 
 def session_layout_name(config: ApplicationConfig) -> str:
@@ -2819,7 +2811,7 @@ def compute_median_psd_evidence(
     )
     if not np.isfinite(band_contrast_db):
         raise ValueError("Band-level Median PSD contrast must be finite")
-    refined_frequency, refined_psd, _, _ = parabola_peak(
+    refined_frequency, refined_psd = parabola_peak(
         frequency, median_psd, global_peak_index,
     )
     return MedianPSDEvidence(
@@ -4189,19 +4181,17 @@ def build_analysis_figures(
         stability_axis = stat_axes[axis_index * 2 + 1]
 
         draw_analysis_bands(psd_axis, analysis_bands)
-        psd_axis.plot(
+        curve_frequency, curve_psd, peak_tops = peak_tops_on_curve(
             axis_data.frequency,
             axis_data.median_psd,
+            axis_data.peak_frequencies,
+        )
+        psd_axis.plot(
+            curve_frequency,
+            curve_psd,
             color=COLORS[axis_name],
             label=f"{axis_name} Median PSD",
         )
-        peak_tops = [
-            draw_parabola_peak(
-                psd_axis, axis_data.frequency, axis_data.median_psd,
-                float(peak_frequency), COLORS[axis_name],
-            )
-            for peak_frequency in axis_data.peak_frequencies
-        ]
         peak_top_frequencies = np.array([top[0] for top in peak_tops])
         peak_top_values = np.array([top[1] for top in peak_tops])
         psd_axis.scatter(
@@ -4295,28 +4285,28 @@ def build_analysis_figures(
         trusted_axes,
         visualization_axes.items(),
     ):
-        trusted_axis.plot(
+        trusted_regions = [
+            region for region in trusted_regions_by_axis[axis_name]
+            if is_trusted_frequency_cluster(
+                region,
+                config.visualization.trusted_frequency,
+            )
+        ]
+        # The tops of the plotted curve: Med.Freq is computed on the median
+        # PSD, and the trusted weight is the same over the peak.
+        curve_frequency, curve_psd, region_tops = peak_tops_on_curve(
             axis_data.frequency,
             axis_data.trusted_frequency_psd,
+            [region.median_evidence.peak_frequency for region in trusted_regions],
+        )
+        trusted_axis.plot(
+            curve_frequency,
+            curve_psd,
             color=COLORS[axis_name],
             label=f"{axis_name} Trusted Median PSD",
         )
-        for region in trusted_regions_by_axis[axis_name]:
-            if not is_trusted_frequency_cluster(
-                region,
-                config.visualization.trusted_frequency,
-            ):
-                continue
+        for region, (peak_frequency, peak_psd) in zip(trusted_regions, region_tops):
             evidence = region.median_evidence
-            # The parabola of the plotted curve: Med.Freq is computed on the
-            # median PSD, and the trusted weight is the same over the peak.
-            peak_frequency, peak_psd = draw_parabola_peak(
-                trusted_axis,
-                axis_data.frequency,
-                axis_data.trusted_frequency_psd,
-                evidence.peak_frequency,
-                COLORS[axis_name],
-            )
             trusted_axis.scatter(
                 peak_frequency,
                 peak_psd,
