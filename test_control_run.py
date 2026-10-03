@@ -5,6 +5,7 @@ Run with: python -m unittest test_control_run
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import csv
 import io
@@ -188,6 +189,30 @@ class OldDetectorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             old_detector_config("[serial]\nport = 1\n", 2048)
 
+    def test_layout_thresholds_go_into_their_own_table(self) -> None:
+        from control_run import applied_thresholds, parse_threshold, set_layout_thresholds
+
+        self.assertEqual(parse_threshold("2.0"), (None, 2.0))
+        self.assertEqual(parse_threshold("8x16=2.95"), ("8x16", 2.95))
+        for bad in ("8-16=2", "x=1", "8x16=a", "-1"):
+            with self.assertRaises(argparse.ArgumentTypeError):
+                parse_threshold(bad)
+        text = (
+            "[visualization.trusted_frequency]\r\nmin_median_prominence_db = 2.0\r\n\r\n"
+            "[[analysis.bands]]\r\nprominence_db = 1.8\r\n"
+        )
+        added = set_layout_thresholds(text, {"8x16": 2.95, "8x8": 4.25})
+        self.assertTrue(added.startswith(text))
+        changed = set_layout_thresholds(added, {"8x16": 3.0})
+        self.assertEqual(changed.count('"8x16"'), 1)
+        self.assertIn('"8x16" = 3.0\r\n', changed)
+        self.assertIn('"8x8" = 4.25\r\n', changed)
+        self.assertEqual(
+            applied_thresholds(changed, ["8x8", "8x16", "8x32"]),
+            "8x8 4.25, 8x16 3, 8x32 2 (default)",
+        )
+        self.assertEqual(set_layout_thresholds(text, {}), text)
+
     def test_only_the_median_prominence_line_changes(self) -> None:
         from control_run import set_median_prominence
 
@@ -249,7 +274,7 @@ class OldDetectorTests(unittest.TestCase):
             output = root / "control"
             code = main([
                 "old", "--old-detector", "--layouts", "8x8", "4x4", "--nperseg", "2048",
-                "--median-prominence", "1.6",
+                "--median-prominence", "1.6", "4x4=99",
                 "--points-file", str(points), "--output", str(output),
             ])
             self.assertEqual(code, 0)
@@ -279,6 +304,13 @@ class OldDetectorTests(unittest.TestCase):
             self.assertIn("4x4 (4 runs)", summary)
             self.assertIn("runs with a trusted region: 8x8 2/2, 4x4 ", summary)
             self.assertIn("strongest trusted Med.Prom: 8x8 ", summary)
+            # main.py takes the threshold of the layout from its own table.
+            self.assertIn("Med.Prom thresholds, dB: 8x8 1.6 (default), 4x4 99", summary)
+            self.assertIn("runs with a trusted region: 8x8 2/2, 4x4 0/8", summary)
+            log = variant / "tone" / "run0_raw" / "4x4" / "virtual_run01" / "result.txt"
+            self.assertIn("Trusted Med.Prom threshold: 99 dB (layout 4x4)", log.read_text(encoding="utf-8"))
+            log = variant / "tone" / "run0_raw" / "8x8" / "virtual_run01" / "result.txt"
+            self.assertIn("Trusted Med.Prom threshold: 1.6 dB (default)", log.read_text(encoding="utf-8"))
             # Runs of the two detectors are never compared with each other.
             stable = output / "stable"
             stable.mkdir()

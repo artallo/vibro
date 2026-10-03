@@ -1,5 +1,6 @@
 import argparse
 import csv
+import re
 import struct
 import sys
 import tomllib
@@ -105,10 +106,16 @@ class WelchConfig:
 @dataclass(frozen=True)
 class TrustedFrequencyVisualizationConfig:
     min_support_fraction: float
+    # The threshold a run applies: the default of config.toml, or the one
+    # its layout names in min_median_prominence_db_by_layout.
     min_median_prominence_db: float
     background_weight: float
     min_band_contrast_db: float
     weak_trusted_weight: float
+    # ("8x16", 2.95), ...: packets per session x sessions per run. A shorter
+    # run has a noisier median PSD and needs a higher Med.Prom; the values
+    # were calibrated on synthetic noise at nperseg 2048 on 2026-10-03.
+    min_median_prominence_db_by_layout: tuple[tuple[str, float], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -238,6 +245,23 @@ def validate_config(config: ApplicationConfig) -> None:
             "Visualization trusted frequency min_median_prominence_db must "
             "be non-negative"
         )
+    for layout, value in trusted_frequency.min_median_prominence_db_by_layout:
+        if not re.fullmatch(r"[1-9][0-9]*x[1-9][0-9]*", layout):
+            raise ValueError(
+                "Visualization trusted frequency "
+                "min_median_prominence_db_by_layout keys must look like "
+                f"8x16, not {layout!r}"
+            )
+        require_finite_number(
+            value,
+            "Visualization trusted frequency min_median_prominence_db "
+            f"for {layout}",
+        )
+        if value < 0:
+            raise ValueError(
+                "Visualization trusted frequency min_median_prominence_db "
+                f"for {layout} must be non-negative"
+            )
     if not 0 <= trusted_frequency.background_weight <= 1:
         raise ValueError(
             "Visualization trusted frequency background_weight must be "
@@ -474,6 +498,12 @@ def load_config(
                 weak_trusted_weight=trusted_frequency_data[
                     "weak_trusted_weight"
                 ],
+                min_median_prominence_db_by_layout=tuple(
+                    (str(layout), float(value))
+                    for layout, value in trusted_frequency_data.get(
+                        "min_median_prominence_db_by_layout", {},
+                    ).items()
+                ),
             ),
         ),
         frequency_clustering=frequency_clustering,
@@ -604,6 +634,52 @@ def build_effective_config(
     return apply_cli_overrides(config, cli_arguments)
 
 
+def session_layout_name(config: ApplicationConfig) -> str:
+    return (
+        f"{config.session.packets_per_session}"
+        f"x{config.session.min_recommended_sessions}"
+    )
+
+
+def resolve_layout_trusted_threshold(
+    config: ApplicationConfig,
+) -> ApplicationConfig:
+    """The run config with the Med.Prom threshold of its own layout.
+
+    Layouts not named in min_median_prominence_db_by_layout keep the
+    default min_median_prominence_db.
+    """
+    trusted_frequency = config.visualization.trusted_frequency
+    thresholds = dict(trusted_frequency.min_median_prominence_db_by_layout)
+    layout = session_layout_name(config)
+    if layout not in thresholds:
+        return config
+    return replace(
+        config,
+        visualization=replace(
+            config.visualization,
+            trusted_frequency=replace(
+                trusted_frequency,
+                min_median_prominence_db=thresholds[layout],
+            ),
+        ),
+    )
+
+
+def trusted_threshold_line(config: ApplicationConfig) -> str:
+    trusted_frequency = config.visualization.trusted_frequency
+    layout = session_layout_name(config)
+    source = (
+        f"layout {layout}"
+        if layout in dict(trusted_frequency.min_median_prominence_db_by_layout)
+        else "default"
+    )
+    return (
+        "Trusted Med.Prom threshold: "
+        f"{trusted_frequency.min_median_prominence_db:g} dB ({source})\n"
+    )
+
+
 def build_effective_config_from_cli(
     path: Path,
     cli_arguments: argparse.Namespace,
@@ -686,7 +762,8 @@ def initialize_run_log(
             "Hz\n"
             f"Welch nperseg: {config.welch.nperseg}\n"
             f"Welch noverlap: {config.welch.noverlap}\n"
-            "\n"
+            + trusted_threshold_line(config)
+            + "\n"
             f"Packets: {packet_count:4d}"
             f"   Duration: {duration_seconds:6.1f} s"
             f"   Fs={measured_fs:6.2f}\n"
@@ -3498,6 +3575,10 @@ except tomllib.TOMLDecodeError as error:
 except (KeyError, TypeError, ValueError) as error:
     raise SystemExit(f"Invalid configuration: {error}")
 
+if cli_arguments.replay is None:
+    # Replay resolves the threshold for each of its layouts instead.
+    config = resolve_layout_trusted_threshold(config)
+
 total_runs = cli_arguments.repeat
 
 analysis_bands = config.analysis_bands
@@ -3747,7 +3828,7 @@ def build_replay_config(
         ],
     )
     validate_config(replay_config)
-    return replay_config
+    return resolve_layout_trusted_threshold(replay_config)
 
 
 def build_virtual_run_slices(
@@ -4324,7 +4405,8 @@ def initialize_replay_log(
             "Hz\n"
             f"Welch nperseg: {run_config.welch.nperseg}\n"
             f"Welch noverlap: {run_config.welch.noverlap}\n"
-            f"Fs={measured_fs:6.2f}\n\n"
+            + trusted_threshold_line(run_config)
+            + f"Fs={measured_fs:6.2f}\n\n"
         )
 
 

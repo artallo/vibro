@@ -386,6 +386,69 @@ def set_median_prominence(text: str, value: float | None) -> tuple[str, float]:
     raise ValueError("[visualization.trusted_frequency] needs min_median_prominence_db")
 
 
+LAYOUT_TABLE = "[visualization.trusted_frequency.min_median_prominence_db_by_layout]"
+
+
+def parse_threshold(text: str) -> tuple[str | None, float]:
+    """``2.0`` is the default threshold, ``8x16=2.95`` the one of a layout."""
+    layout, _, value = text.rpartition("=")
+    if layout and not re.fullmatch(r"[1-9][0-9]*x[1-9][0-9]*", layout):
+        raise argparse.ArgumentTypeError(f"'{text}': the layout must look like 8x16")
+    try:
+        number = float(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(f"'{text}' is not 2.0 or 8x16=2.95") from error
+    if number < 0:
+        raise argparse.ArgumentTypeError(f"'{text}' must not be negative")
+    return (layout or None), number
+
+
+def set_layout_thresholds(text: str, thresholds: dict[str, float]) -> str:
+    """config.toml with these entries in the table of thresholds by layout.
+
+    Entries already there for other layouts stay; the table is added at the
+    end when the file has none.
+    """
+    if not thresholds:
+        return text
+    newline = "\r\n" if "\r\n" in text else "\n"
+    lines = text.splitlines(keepends=True)
+    start = next((i for i, line in enumerate(lines) if line.strip() == LAYOUT_TABLE), None)
+    if start is None:
+        if lines and not lines[-1].endswith(("\n", "\r")):
+            lines[-1] += newline
+        lines += [newline, LAYOUT_TABLE + newline]
+        start = len(lines) - 1
+    end = next(
+        (i for i in range(start + 1, len(lines)) if lines[i].lstrip().startswith("[")),
+        len(lines),
+    )
+    for layout, value in thresholds.items():
+        entry = f'"{layout}" = {float(value)!r}{newline}'
+        found = next(
+            (i for i in range(start + 1, end)
+             if re.match(rf'\s*"?{re.escape(layout)}"?\s*=', lines[i])),
+            None,
+        )
+        if found is None:
+            lines.insert(start + 1, entry)
+            end += 1
+        else:
+            lines[found] = entry
+    return "".join(lines)
+
+
+def applied_thresholds(text: str, layouts: list[str]) -> str:
+    """What each layout of a run will use, as main.py resolves it."""
+    trusted = tomllib.loads(text)["visualization"]["trusted_frequency"]
+    table = trusted.get("min_median_prominence_db_by_layout", {})
+    return ", ".join(
+        f"{layout} {table[layout]:g}" if layout in table
+        else f"{layout} {trusted['min_median_prominence_db']:g} (default)"
+        for layout in layouts
+    )
+
+
 def read_csv_rows(path: Path) -> list[dict[str, str]]:
     if not path.exists():
         return []
@@ -534,9 +597,14 @@ def run_old_variant(cli: argparse.Namespace) -> int:
         config_text, nperseg, noverlap = old_detector_config(
             CONFIG_PATH.read_text(encoding="utf-8"), cli.nperseg,
         )
-        config_text, median_prominence = set_median_prominence(
-            config_text, cli.median_prominence,
-        )
+        defaults = [value for layout, value in cli.median_prominence or [] if layout is None]
+        if len(defaults) > 1:
+            raise ValueError("--median-prominence takes one default value")
+        config_text, _ = set_median_prominence(config_text, defaults[0] if defaults else None)
+        config_text = set_layout_thresholds(config_text, {
+            layout: value for layout, value in cli.median_prominence or [] if layout
+        })
+        thresholds_text = applied_thresholds(config_text, cli.layouts)
         point_paths = {}
         for point in points:
             try:
@@ -557,8 +625,8 @@ def run_old_variant(cli: argparse.Namespace) -> int:
     lines = [
         f"Old detector (main.py --replay) control run '{variant}'",
         f"Created: {datetime.now().isoformat(timespec='seconds')}",
-        f"Welch nperseg {nperseg}, noverlap {noverlap}   layouts {' '.join(cli.layouts)}   "
-        f"Med.Prom >= {median_prominence:g} dB",
+        f"Welch nperseg {nperseg}, noverlap {noverlap}   layouts {' '.join(cli.layouts)}",
+        f"Med.Prom thresholds, dB: {thresholds_text}",
         "Trusted regions at the spectral maximum of the median PSD (Med.Freq):",
         "one run of a layout: support n/N sessions and Med.Prom; several runs:",
         "in how many of them the region is trusted, grouped within "
@@ -753,9 +821,11 @@ def parse_cli_arguments(arguments: list[str] | None = None) -> argparse.Namespac
              "stable_spectrum.py and table its trusted regions",
     )
     parser.add_argument(
-        "--median-prominence", type=float, default=None, metavar="DB",
-        help="--old-detector: Med.Prom a trusted region needs "
-             "(default: min_median_prominence_db in config.toml)",
+        "--median-prominence", type=parse_threshold, nargs="+", default=None,
+        metavar="DB|PxS=DB",
+        help="--old-detector: Med.Prom a trusted region needs; a plain value "
+             "sets the default, 8x16=2.95 the threshold of one layout "
+             "(default: config.toml)",
     )
     parser.add_argument(
         "--layouts", nargs="+", default=None, metavar="PxS",
