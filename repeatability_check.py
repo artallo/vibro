@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import csv
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -138,6 +139,14 @@ def check_capture(
     axes, packet_fs_hz, _ = drop_startup_packet(axes, packet_fs_hz)
     sampling_rate_hz = float(np.mean(packet_fs_hz))
     packet_count = axes["x"].shape[0]
+    # One periodogram per packet, whatever nperseg stable_spectrum.py uses:
+    # the even/odd split interleaves packets, and a longer segment would join
+    # packets that were never adjacent; the threshold counts packets as the
+    # independent rows.
+    samples_per_packet = axes["x"].shape[1]
+    settings = replace(
+        settings, nperseg=samples_per_packet, noverlap=samples_per_packet // 2,
+    )
     splits = {
         "first/second": (
             np.arange(0, packet_count // 2),

@@ -87,7 +87,6 @@ from scipy.stats import t
 STABLE_RESULTS_DIRECTORY = Path("stable_results")
 CONFIG_PATH = Path(__file__).with_name("config.toml")
 
-DEFAULT_NPERSEG = 1024
 # Segment lengths analysed side by side, each into its own directory: what
 # overview_figure.py and false_alarm_check.py compare, and what
 # stable_spectrum.py runs with --nperseg 1024 2048 4096.
@@ -100,7 +99,6 @@ DEFAULT_NPERSEG_RUN = (2048,)
 # A spectral estimate needs at least this many segments to have an error
 # bar at all; below it the analysis at that resolution is skipped.
 MINIMUM_SEGMENTS = 4
-DEFAULT_NOVERLAP = 512
 DEFAULT_BAND_HZ = (0.2, 15.0)
 # Width of the running-median baseline. A structure wider than about half
 # of it lifts its own baseline. At 5 Hz the top of a 3-4 Hz wide hump lost
@@ -339,7 +337,7 @@ class CaptureResult:
     window_count: int
     window_packets: int
     expected_support: float
-    nperseg: int = DEFAULT_NPERSEG
+    nperseg: int
     bin_width_hz: float = 0.0
     row_count: int = 0
     effective_rows: float = 0.0
@@ -382,12 +380,14 @@ def load_settings(
 ) -> SpectrumSettings:
     """Read band and baseline settings from config.toml when it is available.
 
-    The segment length stays DEFAULT_NPERSEG: [welch] of config.toml is the
-    mode of the old detector in main.py (since 2026-10-03), and the scripts
-    here set their own nperseg ([stable_spectrum] nperseg, --nperseg).
+    The segment length is the first of [stable_spectrum] nperseg, with half
+    of it as overlap. stable_spectrum.py replaces it with each length it
+    analyses, and the other scripts set their own; it only stays for a
+    caller that analyses these settings as they are. [welch] of config.toml
+    is the mode of the old detector in main.py and is not read here.
     """
-    nperseg = DEFAULT_NPERSEG
-    noverlap = DEFAULT_NOVERLAP
+    nperseg = load_default_nperseg()[0]
+    noverlap = nperseg // 2
     minimum, maximum = DEFAULT_BAND_HZ
     min_distance_hz_config = DEFAULT_MIN_DISTANCE_HZ
     configured_window_hz = DEFAULT_BASELINE_WINDOW_HZ
