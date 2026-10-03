@@ -1122,6 +1122,8 @@ class StartupPacketTests(unittest.TestCase):
         import tempfile
         from pathlib import Path
 
+        from dataclasses import replace
+
         from stable_spectrum import analyze_capture, load_band_names, load_settings
 
         with tempfile.TemporaryDirectory() as directory:
@@ -1133,7 +1135,9 @@ class StartupPacketTests(unittest.TestCase):
                 z=self.started(128, 127),
                 packet_fs_hz=np.full(128, SAMPLING_RATE_HZ),
             )
-            result = analyze_capture(raw, load_settings(0.01, None), load_band_names())
+            # One periodogram per packet, as the test was written for.
+            settings = replace(load_settings(0.01, None), nperseg=1024, noverlap=512)
+            result = analyze_capture(raw, settings, load_band_names())
         self.assertTrue(result.startup_dropped)
         self.assertEqual(result.packet_count, 127)
         self.assertEqual(result.peaks, [])
