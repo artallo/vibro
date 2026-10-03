@@ -45,7 +45,7 @@ ADXL355 на ESP32. Цель — находить собственные час�
 - Порт датчика задаётся в `config.toml`, на каждой машине он свой.
 - Тесты: `python -m unittest test_stable_spectrum test_overview_figure
   test_family_analysis test_band_power test_false_alarm_check
-  test_control_run`.
+  test_control_run test_main`.
 
 ## Данные
 

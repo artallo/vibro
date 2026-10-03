@@ -34,7 +34,7 @@ odr_hz, frequency_tolerance_hz,
 mode, packets_per_session, sessions_per_run, virtual_run,
 packet_start, packet_end, packet_count, duration_seconds,
 axis, band,
-freq_hz, med_freq_hz,
+freq_hz, med_freq_hz, med_freq_bin_hz, med_top_rise_db,
 support_n, support_total, support_fraction,
 range_min_hz, range_max_hz, frequency_std_hz,
 med_prom_db, med_contrast_db, band_contrast_db,
@@ -48,7 +48,11 @@ sources, weight
 > надо помнить.
 
 Смысл `freq_hz` и `med_freq_hz` разный, см.
-[[Старый детектор — как он устроен]].
+[[Старый детектор — как он устроен]]. С 03.10.2026 `med_freq_hz` —
+вершина параболы через три бина, `med_freq_bin_hz` — центр бина, на котором
+детектор принимает решения, `med_top_rise_db` — насколько вершина выше
+бина. До этой даты `med_freq_hz` был центром бина, а двух новых столбцов не
+было.
 
 ## replay_metadata.txt
 

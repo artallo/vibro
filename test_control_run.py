@@ -223,32 +223,6 @@ class OldDetectorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             run_thresholds(self.MODES, 2048, None, [(None, 1.0), (None, 2.0)])
 
-    def test_main_refuses_layouts_its_mode_has_no_threshold_for(self) -> None:
-        import subprocess
-        import sys
-
-        def run(*arguments: str) -> str:
-            completed = subprocess.run(
-                [sys.executable, str(control_run.MAIN_PATH), *arguments],
-                capture_output=True, text=True, encoding="utf-8", errors="replace",
-            )
-            self.assertNotEqual(completed.returncode, 0)
-            return completed.stdout + completed.stderr
-
-        # A live run is refused before the serial port is opened.
-        self.assertIn(
-            "layout 8x5 has no Med.Prom threshold for nperseg 2048",
-            run("--min-recommended-sessions", "5", "--nperseg", "2048"),
-        )
-        self.assertIn(
-            "replay layout 4x16 has no Med.Prom threshold for nperseg 2048",
-            run("--replay", "missing_raw.npz", "--virtual-mode", "4x16", "--nperseg", "2048"),
-        )
-        self.assertIn(
-            "--nperseg 4096 has no [old_detector.nperseg_4096] section",
-            run("--replay", "missing_raw.npz", "--nperseg", "4096"),
-        )
-
     def test_regions_group_by_axis_and_frequency(self) -> None:
         from control_run import group_by_frequency
 

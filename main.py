@@ -669,6 +669,72 @@ def build_effective_config(
     return apply_cli_overrides(config, cli_arguments)
 
 
+def parabola_peak(
+    frequency: np.ndarray,
+    psd: np.ndarray,
+    index: int,
+    points: int = 21,
+) -> tuple[float, float, np.ndarray, np.ndarray]:
+    """Top of a peak between bins, as stable_spectrum.py finds it.
+
+    A parabola through the log PSD of the peak bin and its two neighbours
+    puts the top of a Hann-windowed peak to a small fraction of a bin; the
+    shift is kept within half a bin. Returns the top's frequency and PSD and
+    the parabola between the two neighbours for drawing. A bin at the edge
+    or one that is not above both neighbours stays as it is, with no curve.
+    Only what is reported uses this; the detector decides on bin centres.
+    """
+    bin_frequency = float(frequency[index])
+    bin_psd = float(psd[index])
+    empty = np.array([])
+    if index <= 0 or index >= len(psd) - 1:
+        return bin_frequency, bin_psd, empty, empty
+    tiny = np.finfo(float).tiny
+    left, centre, right = 10.0 * np.log10(
+        np.maximum(np.asarray(psd[index - 1:index + 2], dtype=float), tiny)
+    )
+    curvature = left - 2.0 * centre + right
+    if not curvature < 0.0:
+        return bin_frequency, bin_psd, empty, empty
+    step = float(frequency[index + 1] - frequency[index])
+    offset = float(np.clip(0.5 * (left - right) / curvature, -0.5, 0.5))
+
+    def level_db(position: np.ndarray) -> np.ndarray:
+        return (
+            centre
+            + 0.5 * (right - left) * position
+            + 0.5 * curvature * position ** 2
+        )
+
+    positions = np.linspace(-1.0, 1.0, points)
+    curve_frequency = bin_frequency + positions * step
+    curve_psd = 10.0 ** (level_db(positions) / 10.0)
+    top_psd = float(10.0 ** (level_db(np.array([offset]))[0] / 10.0))
+    return bin_frequency + offset * step, top_psd, curve_frequency, curve_psd
+
+
+def draw_parabola_peak(
+    ax,
+    frequency: np.ndarray,
+    psd: np.ndarray,
+    peak_frequency: float,
+    color: str,
+) -> tuple[float, float]:
+    """Draw the parabola of a reported peak over the curve; return its top."""
+    matching_indices = np.flatnonzero(frequency == peak_frequency)
+    if len(matching_indices) != 1:
+        raise ValueError(
+            f"Peak frequency {peak_frequency} Hz does not match exactly one "
+            "frequency bin"
+        )
+    top_frequency, top_psd, curve_frequency, curve_psd = parabola_peak(
+        frequency, psd, int(matching_indices[0]),
+    )
+    if curve_frequency.size:
+        ax.plot(curve_frequency, curve_psd, color=color, linewidth=1.5)
+    return top_frequency, top_psd
+
+
 def session_layout_name(config: ApplicationConfig) -> str:
     return (
         f"{config.session.packets_per_session}"
@@ -1727,6 +1793,15 @@ class PeakCandidateDiagnostic:
     maximum_session_frequency: float
     accepted: bool
     rejection_reason: str | None
+    # Top of the parabola through the candidate bin and its neighbours,
+    # reported instead of the bin centre; decisions use ``frequency``.
+    refined_frequency: float | None = None
+
+    @property
+    def reported_frequency(self) -> float:
+        if self.refined_frequency is not None:
+            return self.refined_frequency
+        return self.frequency
 
 
 @dataclass(frozen=True)
@@ -1765,12 +1840,24 @@ class FrequencyClusterResult:
 
 @dataclass(frozen=True)
 class MedianPSDEvidence:
+    # Centre of the peak bin: every decision of the detector uses it.
     peak_frequency: float | None
     peak_psd: float | None
     prominence_db: float | None
     local_contrast_db: float | None
     band_contrast_db: float | None
     passed_prominence: bool | None
+    # Top of the parabola through the peak bin and its neighbours: what the
+    # tables, CSV files and figures report as Med.Freq since 2026-10-03.
+    refined_frequency: float | None = None
+    # How far the parabola top rises above the peak bin, in dB.
+    refined_rise_db: float | None = None
+
+
+def reported_median_frequency(evidence: MedianPSDEvidence) -> float | None:
+    if evidence.refined_frequency is not None:
+        return evidence.refined_frequency
+    return evidence.peak_frequency
 
 
 @dataclass(frozen=True)
@@ -2344,7 +2431,7 @@ def print_peak_candidate_diagnostics(
                 f"{item.maximum_session_frequency:.2f}"
             )
             print(
-                f"{item.band_name:<{band_width}}  {item.frequency:7.2f}  "
+                f"{item.band_name:<{band_width}}  {item.reported_frequency:7.2f}  "
                 f"{item.prominence_db:7.2f}  "
                 f"{item.window_power_stability:8.2f}  "
                 f"{item.min_stability:8.2f}  {item.local_snr_db:7.2f}  "
@@ -2732,8 +2819,15 @@ def compute_median_psd_evidence(
     )
     if not np.isfinite(band_contrast_db):
         raise ValueError("Band-level Median PSD contrast must be finite")
+    refined_frequency, refined_psd, _, _ = parabola_peak(
+        frequency, median_psd, global_peak_index,
+    )
     return MedianPSDEvidence(
         peak_frequency=peak_frequency,
+        refined_frequency=refined_frequency,
+        refined_rise_db=float(
+            10.0 * np.log10(max(refined_psd, tiny) / safe_peak_psd)
+        ),
         peak_psd=peak_psd,
         prominence_db=prominence_db,
         local_contrast_db=local_contrast,
@@ -2874,7 +2968,7 @@ def print_session_frequency_clusters(
                 str(index) for index in cluster.session_indices
             )
             median_frequency = (
-                f"{evidence.peak_frequency:.2f}"
+                f"{reported_median_frequency(evidence):.2f}"
                 if evidence.peak_frequency is not None
                 else "N/A"
             )
@@ -2937,7 +3031,7 @@ def print_consolidated_frequency_regions(
         for region in axis_regions:
             evidence = region.median_evidence
             median_frequency = (
-                f"{evidence.peak_frequency:.2f}"
+                f"{reported_median_frequency(evidence):.2f}"
                 if evidence.peak_frequency is not None
                 else "N/A"
             )
@@ -3018,7 +3112,7 @@ def print_trusted_frequency_regions(
                 f"{region.band_name:<{band_width}}  "
                 f"{region.frequency:7.2f}  "
                 f"{region.support_count:>3}/{total_sessions:<3}  "
-                f"{evidence.peak_frequency:8.2f}  "
+                f"{reported_median_frequency(evidence):8.2f}  "
                 f"{evidence.prominence_db:8.2f}  "
                 f"{median_contrast:>9}  "
                 f"{band_contrast:>10}  "
@@ -3082,7 +3176,7 @@ def annotate_peak_frequencies(
         frequency = peak_frequencies[index]
         value = peak_values[index]
         ax.annotate(
-            f"{frequency:.1f} Hz\n"
+            f"{frequency:.2f} Hz\n"
             f"σf {peak_frequency_std_hz[index]:.2f} Hz\n"
             f"SNR {local_snr_db[index]:.1f} dB",
             xy=(frequency, value),
@@ -3423,6 +3517,9 @@ def _find_axis_peaks_by_bands(
                                 band.frequency_stability_max_std_hz
                             ),
                             frequency=float(candidate_frequency),
+                            refined_frequency=parabola_peak(
+                                freq, median, int(global_peak_index),
+                            )[0],
                             prominence_db=candidate_prominence_db,
                             window_power_stability=unavailable,
                             local_noise_floor=unavailable,
@@ -3495,6 +3592,9 @@ def _find_axis_peaks_by_bands(
                         band.frequency_stability_max_std_hz
                     ),
                     frequency=float(candidate_frequency),
+                    refined_frequency=parabola_peak(
+                        freq, median, int(global_peak_index),
+                    )[0],
                     prominence_db=candidate_prominence_db,
                     window_power_stability=float(window_power_stability),
                     local_noise_floor=local_noise_floor,
@@ -4095,17 +4195,26 @@ def build_analysis_figures(
             color=COLORS[axis_name],
             label=f"{axis_name} Median PSD",
         )
+        peak_tops = [
+            draw_parabola_peak(
+                psd_axis, axis_data.frequency, axis_data.median_psd,
+                float(peak_frequency), COLORS[axis_name],
+            )
+            for peak_frequency in axis_data.peak_frequencies
+        ]
+        peak_top_frequencies = np.array([top[0] for top in peak_tops])
+        peak_top_values = np.array([top[1] for top in peak_tops])
         psd_axis.scatter(
-            axis_data.peak_frequencies,
-            axis_data.peak_amplitudes,
+            peak_top_frequencies,
+            peak_top_values,
             color=COLORS[axis_name],
             marker="x",
             label="Stable peaks",
         )
         annotate_peak_frequencies(
             psd_axis,
-            axis_data.peak_frequencies,
-            axis_data.peak_amplitudes,
+            peak_top_frequencies,
+            peak_top_values,
             axis_data.peak_frequency_std_hz,
             axis_data.peak_local_snr_db,
         )
@@ -4199,27 +4308,27 @@ def build_analysis_figures(
             ):
                 continue
             evidence = region.median_evidence
-            matching_indices = np.flatnonzero(
-                axis_data.frequency == evidence.peak_frequency
-            )
-            if len(matching_indices) != 1:
-                raise ValueError(
-                    f"Trusted Median peak frequency {evidence.peak_frequency} Hz "
-                    f"does not match exactly one {axis_name} frequency bin"
-                )
-            peak_psd = axis_data.trusted_frequency_psd[matching_indices[0]]
-            trusted_axis.scatter(
+            # The parabola of the plotted curve: Med.Freq is computed on the
+            # median PSD, and the trusted weight is the same over the peak.
+            peak_frequency, peak_psd = draw_parabola_peak(
+                trusted_axis,
+                axis_data.frequency,
+                axis_data.trusted_frequency_psd,
                 evidence.peak_frequency,
+                COLORS[axis_name],
+            )
+            trusted_axis.scatter(
+                peak_frequency,
                 peak_psd,
                 color=COLORS[axis_name],
                 marker="x",
             )
             trusted_axis.annotate(
-                f"{evidence.peak_frequency:.1f} Hz\n"
+                f"{reported_median_frequency(evidence):.2f} Hz\n"
                 f"{region.support_count}/"
                 f"{aligned_psd.x_stack.shape[0]}\n"
                 f"{evidence.prominence_db:.2f} dB",
-                xy=(evidence.peak_frequency, peak_psd),
+                xy=(peak_frequency, peak_psd),
                 xytext=(0, 6),
                 textcoords="offset points",
                 ha="center",
@@ -4668,7 +4777,9 @@ def build_replay_summary_rows(
                 "axis": axis_name,
                 "band": region.band_name,
                 "freq_hz": region.frequency,
-                "med_freq_hz": evidence.peak_frequency,
+                "med_freq_hz": reported_median_frequency(evidence),
+                "med_freq_bin_hz": evidence.peak_frequency,
+                "med_top_rise_db": evidence.refined_rise_db,
                 "support_n": region.support_count,
                 "support_total": support_total,
                 "support_fraction": region.support_fraction,
@@ -4724,7 +4835,8 @@ def save_replay_summaries(
         "unused_packet_count", "odr_hz", "frequency_tolerance_hz",
         "mode", "packets_per_session", "sessions_per_run", "virtual_run",
         "packet_start", "packet_end", "packet_count", "duration_seconds",
-        "axis", "band", "freq_hz", "med_freq_hz", "support_n",
+        "axis", "band", "freq_hz", "med_freq_hz", "med_freq_bin_hz",
+        "med_top_rise_db", "support_n",
         "support_total", "support_fraction", "range_min_hz", "range_max_hz",
         "frequency_std_hz", "med_prom_db", "med_contrast_db",
         "band_contrast_db", "sources", "weight",
