@@ -188,6 +188,20 @@ class OldDetectorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             old_detector_config("[serial]\nport = 1\n", 2048)
 
+    def test_only_the_median_prominence_line_changes(self) -> None:
+        from control_run import set_median_prominence
+
+        text = (
+            "[visualization.trusted_frequency]\r\nmin_support_fraction = 0.50\r\n"
+            "min_median_prominence_db = 1.55\r\n\r\n[[analysis.bands]]\r\nprominence_db = 1.8\r\n"
+        )
+        self.assertEqual(set_median_prominence(text, None), (text, 1.55))
+        changed, value = set_median_prominence(text, 2)
+        self.assertEqual(value, 2)
+        self.assertEqual(changed, text.replace("= 1.55", "= 2.0"))
+        with self.assertRaises(ValueError):
+            set_median_prominence("[welch]\nnperseg = 1024\n", 2.0)
+
     def test_regions_group_by_axis_and_frequency(self) -> None:
         from control_run import group_by_frequency
 
@@ -205,6 +219,7 @@ class OldDetectorTests(unittest.TestCase):
     def test_keys_of_one_detector_are_refused_with_the_other(self) -> None:
         for arguments in (
             ["v", "--layouts", "8x8"],
+            ["v", "--median-prominence", "2.0"],
             ["v", "--old-detector", "--alpha", "0.05"],
             ["v", "--old-detector", "--separation-sigma", "3"],
         ):
@@ -234,6 +249,7 @@ class OldDetectorTests(unittest.TestCase):
             output = root / "control"
             code = main([
                 "old", "--old-detector", "--layouts", "8x8", "4x4", "--nperseg", "2048",
+                "--median-prominence", "1.6",
                 "--points-file", str(points), "--output", str(output),
             ])
             self.assertEqual(code, 0)
@@ -241,6 +257,7 @@ class OldDetectorTests(unittest.TestCase):
             config = (variant / "config.toml").read_text(encoding="utf-8")
             self.assertIn("nperseg = 2048", config)
             self.assertIn("noverlap = 1024", config)
+            self.assertIn("min_median_prominence_db = 1.6", config)
             self.assertTrue((variant / "tone" / "run0_raw" / "8x8" / "virtual_run01").is_dir())
             self.assertEqual(
                 len(list((variant / "tone" / "run0_raw" / "4x4").glob("virtual_run*"))), 4,
@@ -260,6 +277,8 @@ class OldDetectorTests(unittest.TestCase):
             summary = (variant / "control_summary.txt").read_text(encoding="utf-8")
             self.assertIn("Welch nperseg 2048, noverlap 1024", summary)
             self.assertIn("4x4 (4 runs)", summary)
+            self.assertIn("runs with a trusted region: 8x8 2/2, 4x4 ", summary)
+            self.assertIn("strongest trusted Med.Prom: 8x8 ", summary)
             # Runs of the two detectors are never compared with each other.
             stable = output / "stable"
             stable.mkdir()

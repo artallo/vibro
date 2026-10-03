@@ -47,6 +47,44 @@ tags: [vibro, скрипт, проверка]
 пометкой k/N у объединений. Точки, которые есть только в одном из
 прогонов, не сравниваются и перечислены отдельно.
 
+## Старый детектор, `--old-detector`
+
+Появился 02.10.2026 для проверки перехода старого детектора с nperseg 1024
+на 2048. Каждый прогон точки разбирается `main.py --replay` в раскладках
+`--layouts` с копией `config.toml`, где изменены только `[welch] nperseg`
+и `noverlap`; эта копия лежит в папке варианта. Ключи метода
+[[stable_spectrum.py]] (`--alpha`, `--band`, `--baseline-window`,
+`--min-distance`, `--separation-sigma`) здесь не действуют, скрипт на них
+отказывается.
+
+| Что | Где |
+|---|---|
+| Сводка: доверенные области по прогонам и раскладкам | `control_summary.txt` |
+| Доверенные области одной таблицей | `control_old_peaks.csv` |
+| Полный вывод replay по прогону | `<точка>/<запись>/<раскладка>/virtual_run<NN>/` и `<точка>/<запись>_replay.log` |
+
+Частота области — `Med.Freq`, максимум медианного спектра. Раскладка,
+занимающая всю запись (8×32, 16×16), даёт одну строку на область с
+поддержкой n/N сессий и `Med.Prom`. Раскладка с несколькими прогонами
+(8×8, 16×8) — в скольких из них область доверенная, k/N, области
+группируются в пределах `--tolerance`. Для точки с несколькими записями
+строка `across runs` — в скольких записях область доверенная по всей
+записи. `--compare` сравнивает такие таблицы так же, вместо z — `Med.Prom`
+в дБ; записи вида «весь прогон» сопоставляются между раскладками 8×32 и
+16×16, «части» — между 8×8 и 16×8.
+
+Ложные области считаются на синтетическом шуме: точки из
+`control_noise_points.toml`, их папки делает [[false_alarm_check.py]]
+`--save-captures`, команды записаны в самом файле.
+
+```bash
+python control_run.py old_A --old-detector
+python control_run.py old_B --old-detector --nperseg 2048
+python control_run.py old_C --old-detector --nperseg 2048 --layouts 16x16 16x8
+python control_run.py --compare old_A old_B
+python control_run.py old_A_noise --old-detector --points-file control_noise_points.toml
+```
+
 ## Ключи
 
 | Ключ | По умолчанию | Что |
@@ -55,12 +93,14 @@ tags: [vibro, скрипт, проверка]
 | `--compare A B` | — | сравнить два прежних прогона вместо нового |
 | `--points NAME …` | все | только эти точки из списка |
 | `--points-file` | `control_points.toml` | другой список точек; папки в нём считаются от места файла |
-| `--nperseg` | из `config.toml` | одна длина отрезка |
+| `--nperseg` | из `config.toml` | одна длина отрезка; с `--old-detector` — `[welch] nperseg` старого детектора, `noverlap` становится половиной |
 | `--alpha` | 0,01 | как в [[stable_spectrum.py]], см. [[Порог alpha и проверка половинами]] |
 | `--band MIN MAX` | из `config.toml` | полоса |
 | `--baseline-window` | из `config.toml` | ширина базы |
 | `--min-distance` | из `config.toml` | зазор между пиками |
 | `--separation-sigma` | из `config.toml` | порог провала между близкими пиками |
+| `--old-detector` | нет | вместо [[stable_spectrum.py]] прогнать старый детектор [[main.py]] `--replay`, см. ниже |
+| `--layouts P×S …` | `8x32 8x8` | с `--old-detector`: раскладки replay |
 | `--tolerance` | 0,2 Гц | для `--compare`: насколько может разойтись частота одного пика |
 | `--output` | `stable_results/_control` | куда писать |
 

@@ -359,6 +359,33 @@ def old_detector_config(text: str, nperseg: int | None) -> tuple[str, int, int]:
     return "".join(lines), nperseg, nperseg // 2
 
 
+def set_median_prominence(text: str, value: float | None) -> tuple[str, float]:
+    """config.toml with the Med.Prom threshold of trusted regions set.
+
+    Only ``min_median_prominence_db`` of ``[visualization.trusted_frequency]``
+    changes. Returns the text and the threshold it holds.
+    """
+    lines = text.splitlines(keepends=True)
+    start = next(
+        (i for i, line in enumerate(lines)
+         if line.strip() == "[visualization.trusted_frequency]"),
+        None,
+    )
+    if start is None:
+        raise ValueError("config.toml has no [visualization.trusted_frequency] section")
+    for i in range(start + 1, len(lines)):
+        if lines[i].lstrip().startswith("["):
+            break
+        match = re.match(r"\s*min_median_prominence_db\s*=\s*([\d.]+)", lines[i])
+        if match:
+            if value is None:
+                return text, float(match.group(1))
+            newline = lines[i][len(lines[i].rstrip("\r\n")):]
+            lines[i] = f"min_median_prominence_db = {float(value)!r}{newline}"
+            return "".join(lines), value
+    raise ValueError("[visualization.trusted_frequency] needs min_median_prominence_db")
+
+
 def read_csv_rows(path: Path) -> list[dict[str, str]]:
     if not path.exists():
         return []
@@ -402,6 +429,12 @@ def old_point_rows(
     rows: list[dict[str, Any]] = []
     lines = [f"{point.name}   {point.listed or point.folder.as_posix()}"]
     whole: dict[str, list[dict[str, Any]]] = {layout: [] for layout in layouts}
+    # Per layout: runs of that layout in all records, and those with a region.
+    hit_counts = {layout: [0, 0] for layout in layouts}
+    # Per layout: the highest Med.Prom of a trusted region. With
+    # --median-prominence 0 every region with enough support is trusted, so
+    # on noise this is the threshold a layout needs to stay clean.
+    strongest: dict[str, float] = {}
     for raw_path in raw_paths:
         folder = replay_root / raw_path.stem
         regions = read_csv_rows(folder / "replay_regions.csv")
@@ -423,6 +456,12 @@ def old_point_rows(
             if not parts:
                 lines.append(f"    {layout:<6} record too short for this layout")
                 continue
+            hit_counts[layout][0] += len(parts)
+            hit_counts[layout][1] += len({item["part"] for item in found})
+            if found:
+                strongest[layout] = max(
+                    strongest.get(layout, 0.0), max(item["prom_db"] for item in found),
+                )
             if len(parts) == 1:
                 kind = "full"
                 entries = [
@@ -454,6 +493,17 @@ def old_point_rows(
             rows.extend(
                 {**base, "record": f"{raw_path.stem} {kind}", **entry} for entry in entries
             )
+    lines.append(
+        "  runs with a trusted region: "
+        + ", ".join(
+            f"{layout} {hits}/{total}" for layout, (total, hits) in hit_counts.items() if total
+        )
+    )
+    if strongest:
+        lines.append(
+            "  strongest trusted Med.Prom: "
+            + ", ".join(f"{layout} {value:.2f} dB" for layout, value in strongest.items())
+        )
     if len(raw_paths) > 1:
         for layout, found in whole.items():
             if not found:
@@ -484,6 +534,9 @@ def run_old_variant(cli: argparse.Namespace) -> int:
         config_text, nperseg, noverlap = old_detector_config(
             CONFIG_PATH.read_text(encoding="utf-8"), cli.nperseg,
         )
+        config_text, median_prominence = set_median_prominence(
+            config_text, cli.median_prominence,
+        )
         point_paths = {}
         for point in points:
             try:
@@ -504,7 +557,8 @@ def run_old_variant(cli: argparse.Namespace) -> int:
     lines = [
         f"Old detector (main.py --replay) control run '{variant}'",
         f"Created: {datetime.now().isoformat(timespec='seconds')}",
-        f"Welch nperseg {nperseg}, noverlap {noverlap}   layouts {' '.join(cli.layouts)}",
+        f"Welch nperseg {nperseg}, noverlap {noverlap}   layouts {' '.join(cli.layouts)}   "
+        f"Med.Prom >= {median_prominence:g} dB",
         "Trusted regions at the spectral maximum of the median PSD (Med.Freq):",
         "one run of a layout: support n/N sessions and Med.Prom; several runs:",
         "in how many of them the region is trusted, grouped within "
@@ -699,6 +753,11 @@ def parse_cli_arguments(arguments: list[str] | None = None) -> argparse.Namespac
              "stable_spectrum.py and table its trusted regions",
     )
     parser.add_argument(
+        "--median-prominence", type=float, default=None, metavar="DB",
+        help="--old-detector: Med.Prom a trusted region needs "
+             "(default: min_median_prominence_db in config.toml)",
+    )
+    parser.add_argument(
         "--layouts", nargs="+", default=None, metavar="PxS",
         help="--old-detector: replay layouts, packets per session x sessions "
              f"per run (default {' '.join(DEFAULT_OLD_LAYOUTS)})",
@@ -730,8 +789,8 @@ def parse_cli_arguments(arguments: list[str] | None = None) -> argparse.Namespac
         if unused:
             parser.error(f"{', '.join(unused)}: not used by the old detector")
         cli.layouts = cli.layouts or list(DEFAULT_OLD_LAYOUTS)
-    elif cli.layouts:
-        parser.error("--layouts needs --old-detector")
+    elif cli.layouts or cli.median_prominence is not None:
+        parser.error("--layouts and --median-prominence need --old-detector")
     return cli
 
 
