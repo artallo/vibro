@@ -5,14 +5,49 @@ timeout_seconds = 2.0
 
 [session]
 packets_per_session = 8
-min_recommended_sessions = 5
+# 8 x 32 = 256 packets, about 17 minutes: the whole-record layout that is
+# calibrated in every old detector mode. Was 5 until 2026-10-03.
+min_recommended_sessions = 32
 
 [sensor]
 odr_hz = 250
 
 [welch]
-nperseg = 1024
+# Old detector mode of main.py: picks [old_detector.nperseg_<n>] below, where
+# noverlap and the calibrated layouts live; main.py --nperseg overrides it for
+# one run. 1024 until 2026-10-03. stable_spectrum.py has its own nperseg.
+nperseg = 2048
+
+# Old detector modes. Replay builds only the layouts listed for the mode, and
+# a live run must use one of them: each has its own Med.Prom threshold for a
+# trusted region. A shorter run has a noisier median PSD and needs more.
+[old_detector.nperseg_1024]
 noverlap = 512
+
+# The mode as it was until 2026-10-03: one threshold for every layout.
+[old_detector.nperseg_1024.min_median_prominence_db_by_layout]
+"4x4" = 1.55
+"4x8" = 1.55
+"4x16" = 1.55
+"4x32" = 1.55
+"4x64" = 1.55
+"8x4" = 1.55
+"8x8" = 1.55
+"8x16" = 1.55
+"8x32" = 1.55
+
+[old_detector.nperseg_2048]
+noverlap = 1024
+
+# Calibrated on 2026-10-03: 0.05 dB above the highest Med.Prom on 10 white and
+# 10 coloured synthetic noise captures, which then gave no trusted region; all
+# trusted frequencies of the control points at 8x32 stay at 8x32.
+[old_detector.nperseg_2048.min_median_prominence_db_by_layout]
+"8x32" = 2.0
+"8x16" = 2.95
+"8x8" = 4.25
+"16x16" = 1.96
+"16x8" = 2.94
 
 [stable_spectrum]
 # Width of the running-median baseline of stable_spectrum.py and
@@ -35,7 +70,7 @@ nperseg = [2048]
 
 [visualization.trusted_frequency]
 min_support_fraction = 0.50
-min_median_prominence_db = 1.55
+# The Med.Prom threshold is set per layout in [old_detector.nperseg_<n>].
 background_weight = 0.5
 min_band_contrast_db = 1.0
 weak_trusted_weight = 0.7

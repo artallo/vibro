@@ -170,62 +170,84 @@ class ControlRunTests(unittest.TestCase):
 
 
 class OldDetectorTests(unittest.TestCase):
-    def test_only_the_welch_lines_change(self) -> None:
+    MODES = (
+        "[welch]\r\nnperseg = 2048\r\n\r\n"
+        "[old_detector.nperseg_1024]\r\nnoverlap = 512\r\n\r\n"
+        "[old_detector.nperseg_1024.min_median_prominence_db_by_layout]\r\n"
+        "\"8x8\" = 1.55\r\n\"8x32\" = 1.55\r\n\r\n"
+        "[old_detector.nperseg_2048]\r\nnoverlap = 1024\r\n\r\n"
+        "[old_detector.nperseg_2048.min_median_prominence_db_by_layout]\r\n"
+        "\"8x32\" = 2.0\r\n\"8x16\" = 2.95\r\n\r\n"
+        "[stable_spectrum]\r\nnperseg = [2048]\r\n"
+    )
+
+    def test_a_mode_is_switched_by_the_welch_line_only(self) -> None:
         from control_run import old_detector_config
 
-        text = (
-            "[serial]\r\nport = \"COM8\"\r\n\r\n[welch]\r\nnperseg = 1024\r\n"
-            "noverlap = 512\r\n\r\n[stable_spectrum]\r\nnperseg = [2048]\r\n"
-        )
-        same, nperseg, noverlap = old_detector_config(text, None)
-        self.assertEqual((same, nperseg, noverlap), (text, 1024, 512))
-        changed, nperseg, noverlap = old_detector_config(text, 2048)
-        self.assertEqual((nperseg, noverlap), (2048, 1024))
+        self.assertEqual(old_detector_config(self.MODES, None), (self.MODES, 2048, 1024))
+        changed, nperseg, noverlap = old_detector_config(self.MODES, 1024)
+        self.assertEqual((nperseg, noverlap), (1024, 512))
         self.assertEqual(
             changed,
-            text.replace("nperseg = 1024", "nperseg = 2048").replace("noverlap = 512", "noverlap = 1024"),
+            self.MODES.replace("[welch]\r\nnperseg = 2048", "[welch]\r\nnperseg = 1024"),
         )
-        self.assertIn("[stable_spectrum]\r\nnperseg = [2048]", changed)
+        with self.assertRaisesRegex(ValueError, "nperseg_4096.*modes: 1024, 2048"):
+            old_detector_config(self.MODES, 4096)
         with self.assertRaises(ValueError):
             old_detector_config("[serial]\nport = 1\n", 2048)
 
-    def test_layout_thresholds_go_into_their_own_table(self) -> None:
-        from control_run import applied_thresholds, parse_threshold, set_layout_thresholds
+    def test_thresholds_go_into_the_table_of_the_mode(self) -> None:
+        from control_run import mode_thresholds, parse_threshold, run_thresholds, set_layout_thresholds
 
         self.assertEqual(parse_threshold("2.0"), (None, 2.0))
         self.assertEqual(parse_threshold("8x16=2.95"), ("8x16", 2.95))
         for bad in ("8-16=2", "x=1", "8x16=a", "-1"):
             with self.assertRaises(argparse.ArgumentTypeError):
                 parse_threshold(bad)
-        text = (
-            "[visualization.trusted_frequency]\r\nmin_median_prominence_db = 2.0\r\n\r\n"
-            "[[analysis.bands]]\r\nprominence_db = 1.8\r\n"
-        )
-        added = set_layout_thresholds(text, {"8x16": 2.95, "8x8": 4.25})
-        self.assertTrue(added.startswith(text))
-        changed = set_layout_thresholds(added, {"8x16": 3.0})
+        changed = set_layout_thresholds(self.MODES, 2048, {"8x16": 3.0, "8x8": 4.25})
+        self.assertEqual(mode_thresholds(changed, 2048), {"8x8": 4.25, "8x32": 2.0, "8x16": 3.0})
+        self.assertEqual(mode_thresholds(changed, 1024), {"8x8": 1.55, "8x32": 1.55})
         self.assertEqual(changed.count('"8x16"'), 1)
-        self.assertIn('"8x16" = 3.0\r\n', changed)
-        self.assertIn('"8x8" = 4.25\r\n', changed)
-        self.assertEqual(
-            applied_thresholds(changed, ["8x8", "8x16", "8x32"]),
-            "8x8 4.25, 8x16 3, 8x32 2 (default)",
+        self.assertEqual(set_layout_thresholds(self.MODES, 2048, {}), self.MODES)
+        # Without layouts a run takes the whole table of its mode.
+        _, layouts, thresholds = run_thresholds(self.MODES, 2048, None, None)
+        self.assertEqual(layouts, ["8x32", "8x16"])
+        self.assertEqual(thresholds, {"8x32": 2.0, "8x16": 2.95})
+        # A plain value goes to every layout of the run, LAYOUT=DB to one.
+        _, layouts, thresholds = run_thresholds(
+            self.MODES, 2048, ["8x16", "4x4"], [(None, 0.0), ("4x4", 99.0)],
         )
-        self.assertEqual(set_layout_thresholds(text, {}), text)
-
-    def test_only_the_median_prominence_line_changes(self) -> None:
-        from control_run import set_median_prominence
-
-        text = (
-            "[visualization.trusted_frequency]\r\nmin_support_fraction = 0.50\r\n"
-            "min_median_prominence_db = 1.55\r\n\r\n[[analysis.bands]]\r\nprominence_db = 1.8\r\n"
-        )
-        self.assertEqual(set_median_prominence(text, None), (text, 1.55))
-        changed, value = set_median_prominence(text, 2)
-        self.assertEqual(value, 2)
-        self.assertEqual(changed, text.replace("= 1.55", "= 2.0"))
+        self.assertEqual(thresholds, {"8x16": 0.0, "4x4": 99.0})
+        with self.assertRaisesRegex(ValueError, "no Med.Prom threshold for 4x4"):
+            run_thresholds(self.MODES, 2048, ["8x16", "4x4"], None)
         with self.assertRaises(ValueError):
-            set_median_prominence("[welch]\nnperseg = 1024\n", 2.0)
+            run_thresholds(self.MODES, 2048, None, [(None, 1.0), (None, 2.0)])
+
+    def test_main_refuses_layouts_its_mode_has_no_threshold_for(self) -> None:
+        import subprocess
+        import sys
+
+        def run(*arguments: str) -> str:
+            completed = subprocess.run(
+                [sys.executable, str(control_run.MAIN_PATH), *arguments],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            return completed.stdout + completed.stderr
+
+        # A live run is refused before the serial port is opened.
+        self.assertIn(
+            "layout 8x5 has no Med.Prom threshold for nperseg 2048",
+            run("--min-recommended-sessions", "5", "--nperseg", "2048"),
+        )
+        self.assertIn(
+            "replay layout 4x16 has no Med.Prom threshold for nperseg 2048",
+            run("--replay", "missing_raw.npz", "--virtual-mode", "4x16", "--nperseg", "2048"),
+        )
+        self.assertIn(
+            "--nperseg 4096 has no [old_detector.nperseg_4096] section",
+            run("--replay", "missing_raw.npz", "--nperseg", "4096"),
+        )
 
     def test_regions_group_by_axis_and_frequency(self) -> None:
         from control_run import group_by_frequency
@@ -251,7 +273,7 @@ class OldDetectorTests(unittest.TestCase):
             with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 control_run.parse_cli_arguments(arguments)
         cli = control_run.parse_cli_arguments(["v", "--old-detector"])
-        self.assertEqual(cli.layouts, control_run.DEFAULT_OLD_LAYOUTS)
+        self.assertIsNone(cli.layouts)
 
     def test_replay_of_a_point_tables_its_trusted_regions(self) -> None:
         from false_alarm_check import save_capture
@@ -280,13 +302,12 @@ class OldDetectorTests(unittest.TestCase):
             self.assertEqual(code, 0)
             variant = output / "old"
             config = (variant / "config.toml").read_text(encoding="utf-8")
-            self.assertIn("nperseg = 2048", config)
-            self.assertIn("noverlap = 1024", config)
-            self.assertIn("min_median_prominence_db = 1.6", config)
-            self.assertTrue((variant / "tone" / "run0_raw" / "8x8" / "virtual_run01").is_dir())
-            self.assertEqual(
-                len(list((variant / "tone" / "run0_raw" / "4x4").glob("virtual_run*"))), 4,
-            )
+            self.assertIn("[welch]\n# ", config)
+            self.assertIn('"8x8" = 1.6', config)
+            self.assertIn('"4x4" = 99.0', config)
+            replayed = variant / "tone" / "run0_raw" / "nperseg_2048"
+            self.assertTrue((replayed / "8x8" / "virtual_run01").is_dir())
+            self.assertEqual(len(list((replayed / "4x4").glob("virtual_run*"))), 4)
             rows = read_rows(variant / "control_old_peaks.csv")
             tone = [
                 row for row in rows
@@ -305,12 +326,18 @@ class OldDetectorTests(unittest.TestCase):
             self.assertIn("runs with a trusted region: 8x8 2/2, 4x4 ", summary)
             self.assertIn("strongest trusted Med.Prom: 8x8 ", summary)
             # main.py takes the threshold of the layout from its own table.
-            self.assertIn("Med.Prom thresholds, dB: 8x8 1.6 (default), 4x4 99", summary)
+            self.assertIn("Med.Prom thresholds, dB: 8x8 1.6, 4x4 99", summary)
             self.assertIn("runs with a trusted region: 8x8 2/2, 4x4 0/8", summary)
-            log = variant / "tone" / "run0_raw" / "4x4" / "virtual_run01" / "result.txt"
-            self.assertIn("Trusted Med.Prom threshold: 99 dB (layout 4x4)", log.read_text(encoding="utf-8"))
-            log = variant / "tone" / "run0_raw" / "8x8" / "virtual_run01" / "result.txt"
-            self.assertIn("Trusted Med.Prom threshold: 1.6 dB (default)", log.read_text(encoding="utf-8"))
+            log = replayed / "4x4" / "virtual_run01" / "result.txt"
+            self.assertIn(
+                "Trusted Med.Prom threshold: 99 dB (layout 4x4, nperseg 2048)",
+                log.read_text(encoding="utf-8"),
+            )
+            log = replayed / "8x8" / "virtual_run01" / "result.txt"
+            self.assertIn(
+                "Trusted Med.Prom threshold: 1.6 dB (layout 8x8, nperseg 2048)",
+                log.read_text(encoding="utf-8"),
+            )
             # Runs of the two detectors are never compared with each other.
             stable = output / "stable"
             stable.mkdir()

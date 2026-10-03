@@ -46,6 +46,9 @@ from stable_spectrum import (
 
 MATCH_TOLERANCE_HZ = 0.40
 BASELINE_LAYOUT = "8x4"
+# main.py --replay writes replay_results/<record>/nperseg_<n>/ since
+# 2026-10-03; the baseline layout belongs to the 1024 mode.
+BASELINE_NPERSEG = 1024
 
 
 def analyse_subset(
@@ -163,9 +166,10 @@ def check_capture(
             "baseline_agreement": None,
         })
     if replay_root is not None:
-        baseline = baseline_answers(
-            replay_root / raw_path.stem, BASELINE_LAYOUT,
-        )
+        directory = replay_root / raw_path.stem
+        if not (directory / "replay_regions.csv").exists():
+            directory = directory / f"nperseg_{BASELINE_NPERSEG}"
+        baseline = baseline_answers(directory, BASELINE_LAYOUT)
         if baseline is not None:
             rows[0]["baseline_agreement"] = agreement(*baseline)
     return rows

@@ -43,25 +43,10 @@ COLORS = {
     "Z": "tab:green",
 }
 
-VIRTUAL_SESSION_LAYOUTS = {
-    "4x4": (4, 4),
-    "4x8": (4, 8),
-    "4x16": (4, 16),
-    "4x32": (4, 32),
-    "4x64": (4, 64),
-    "8x4": (8, 4),
-    "8x8": (8, 8),
-    "8x16": (8, 16),
-    "8x32": (8, 32),
-    # 16 packets per session keep 15 Welch segments of 2048 samples per
-    # session, as 8 packets do at 1024. Added 2026-10-02 to compare segment
-    # lengths; not part of "all", whose output family_analysis.py reads.
-    "16x8": (16, 8),
-    "16x16": (16, 16),
-}
-REPLAY_ALL_LAYOUTS = (
-    "4x4", "4x8", "4x16", "4x32", "4x64", "8x4", "8x8", "8x16", "8x32",
-)
+# Session layouts, packets per session x sessions per run, are listed per
+# old detector mode in config.toml with their Med.Prom thresholds; replay and
+# live runs use only those.
+LAYOUT_PATTERN = r"[1-9][0-9]*x[1-9][0-9]*"
 
 # ==========================================================
 
@@ -106,16 +91,27 @@ class WelchConfig:
 @dataclass(frozen=True)
 class TrustedFrequencyVisualizationConfig:
     min_support_fraction: float
-    # The threshold a run applies: the default of config.toml, or the one
-    # its layout names in min_median_prominence_db_by_layout.
-    min_median_prominence_db: float
+    # The threshold of the run's layout in the active old detector mode;
+    # None until resolve_layout_trusted_threshold sets it for a run.
+    min_median_prominence_db: float | None
     background_weight: float
     min_band_contrast_db: float
     weak_trusted_weight: float
-    # ("8x16", 2.95), ...: packets per session x sessions per run. A shorter
-    # run has a noisier median PSD and needs a higher Med.Prom; the values
-    # were calibrated on synthetic noise at nperseg 2048 on 2026-10-03.
-    min_median_prominence_db_by_layout: tuple[tuple[str, float], ...] = ()
+
+
+@dataclass(frozen=True)
+class OldDetectorModeConfig:
+    """One old detector mode, [old_detector.nperseg_<n>] in config.toml.
+
+    ``thresholds`` holds (layout, Med.Prom dB) in config order: the layouts
+    this mode is calibrated for. A shorter run has a noisier median PSD and
+    needs a higher Med.Prom; nperseg 2048 was calibrated on synthetic noise
+    on 2026-10-03, nperseg 1024 keeps its single 1.55 dB.
+    """
+
+    nperseg: int
+    noverlap: int
+    thresholds: tuple[tuple[str, float], ...]
 
 
 @dataclass(frozen=True)
@@ -145,6 +141,7 @@ class ApplicationConfig:
     frequency_clustering: FrequencyClusteringConfig
     frequency_cluster_consolidation: FrequencyClusterConsolidationConfig
     analysis_bands: list[AnalysisBand]
+    old_detector_modes: tuple[OldDetectorModeConfig, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -219,10 +216,11 @@ def validate_config(config: ApplicationConfig) -> None:
         trusted_frequency.min_support_fraction,
         "Visualization trusted frequency min_support_fraction",
     )
-    require_finite_number(
-        trusted_frequency.min_median_prominence_db,
-        "Visualization trusted frequency min_median_prominence_db",
-    )
+    if trusted_frequency.min_median_prominence_db is not None:
+        require_finite_number(
+            trusted_frequency.min_median_prominence_db,
+            "Visualization trusted frequency min_median_prominence_db",
+        )
     require_finite_number(
         trusted_frequency.background_weight,
         "Visualization trusted frequency background_weight",
@@ -240,28 +238,38 @@ def validate_config(config: ApplicationConfig) -> None:
             "Visualization trusted frequency min_support_fraction must be "
             "greater than zero and at most one"
         )
-    if trusted_frequency.min_median_prominence_db < 0:
+    if (
+        trusted_frequency.min_median_prominence_db is not None
+        and trusted_frequency.min_median_prominence_db < 0
+    ):
         raise ValueError(
             "Visualization trusted frequency min_median_prominence_db must "
             "be non-negative"
         )
-    for layout, value in trusted_frequency.min_median_prominence_db_by_layout:
-        if not re.fullmatch(r"[1-9][0-9]*x[1-9][0-9]*", layout):
+    if not config.old_detector_modes:
+        raise ValueError("config.toml needs an [old_detector.nperseg_<n>] section")
+    for mode in config.old_detector_modes:
+        name = f"[old_detector.nperseg_{mode.nperseg}]"
+        require_positive_integer(mode.nperseg, f"{name} nperseg")
+        require_non_negative_integer(mode.noverlap, f"{name} noverlap")
+        if mode.noverlap >= mode.nperseg:
+            raise ValueError(f"{name} noverlap must be less than nperseg")
+        if not mode.thresholds:
             raise ValueError(
-                "Visualization trusted frequency "
-                "min_median_prominence_db_by_layout keys must look like "
-                f"8x16, not {layout!r}"
+                f"{name} needs min_median_prominence_db_by_layout with at "
+                "least one layout"
             )
-        require_finite_number(
-            value,
-            "Visualization trusted frequency min_median_prominence_db "
-            f"for {layout}",
-        )
-        if value < 0:
-            raise ValueError(
-                "Visualization trusted frequency min_median_prominence_db "
-                f"for {layout} must be non-negative"
-            )
+        for layout, value in mode.thresholds:
+            if not re.fullmatch(LAYOUT_PATTERN, layout):
+                raise ValueError(
+                    f"{name} layouts must look like 8x16, not {layout!r}"
+                )
+            require_finite_number(value, f"{name} Med.Prom threshold of {layout}")
+            if value < 0:
+                raise ValueError(
+                    f"{name} Med.Prom threshold of {layout} must be non-negative"
+                )
+    active_old_detector_mode(config)
     if not 0 <= trusted_frequency.background_weight <= 1:
         raise ValueError(
             "Visualization trusted frequency background_weight must be "
@@ -431,6 +439,30 @@ def load_config(
     band_entries = raw_config["analysis"]["bands"]
 
     sensor_odr_hz = float(sensor_data["odr_hz"])
+    old_detector_modes = tuple(
+        OldDetectorModeConfig(
+            nperseg=int(name.removeprefix("nperseg_")),
+            noverlap=mode_data["noverlap"],
+            thresholds=tuple(
+                (str(layout), float(value))
+                for layout, value in mode_data[
+                    "min_median_prominence_db_by_layout"
+                ].items()
+            ),
+        )
+        for name, mode_data in raw_config.get("old_detector", {}).items()
+        if re.fullmatch(r"nperseg_[1-9][0-9]*", name)
+    )
+    welch_nperseg = welch_data["nperseg"]
+    welch_mode = next(
+        (mode for mode in old_detector_modes if mode.nperseg == welch_nperseg),
+        None,
+    )
+    if welch_mode is None:
+        raise ValueError(
+            f"[welch] nperseg {welch_nperseg} has no "
+            f"[old_detector.nperseg_{welch_nperseg}] section"
+        )
     frequency_clustering = FrequencyClusteringConfig(
         frequency_tolerance_hz_250=frequency_clustering_data[
             "frequency_tolerance_hz_250"
@@ -478,17 +510,15 @@ def load_config(
             odr_hz=sensor_odr_hz,
         ),
         welch=WelchConfig(
-            nperseg=welch_data["nperseg"],
-            noverlap=welch_data["noverlap"],
+            nperseg=welch_mode.nperseg,
+            noverlap=welch_mode.noverlap,
         ),
         visualization=VisualizationConfig(
             trusted_frequency=TrustedFrequencyVisualizationConfig(
                 min_support_fraction=trusted_frequency_data[
                     "min_support_fraction"
                 ],
-                min_median_prominence_db=trusted_frequency_data[
-                    "min_median_prominence_db"
-                ],
+                min_median_prominence_db=None,
                 background_weight=trusted_frequency_data[
                     "background_weight"
                 ],
@@ -498,12 +528,6 @@ def load_config(
                 weak_trusted_weight=trusted_frequency_data[
                     "weak_trusted_weight"
                 ],
-                min_median_prominence_db_by_layout=tuple(
-                    (str(layout), float(value))
-                    for layout, value in trusted_frequency_data.get(
-                        "min_median_prominence_db_by_layout", {},
-                    ).items()
-                ),
             ),
         ),
         frequency_clustering=frequency_clustering,
@@ -513,6 +537,7 @@ def load_config(
             ],
         ),
         analysis_bands=analysis_bands,
+        old_detector_modes=old_detector_modes,
     )
     if validate:
         validate_config(config)
@@ -531,10 +556,17 @@ def parse_cli_arguments(
     parser.add_argument(
         "--virtual-mode",
         nargs="+",
-        choices=(*VIRTUAL_SESSION_LAYOUTS, "all"),
-        default=["8x8"],
-        help="replay layouts, packets per session x sessions per run; "
-             "several may be given; all = the nine original layouts",
+        default=["all"],
+        help="replay layouts, packets per session x sessions per run, e.g. "
+             "8x16; only those listed for the mode in config.toml; all (the "
+             "default) = every layout of the mode",
+    )
+    parser.add_argument(
+        "--nperseg",
+        type=int,
+        default=None,
+        help="old detector mode for this run, e.g. 1024 or 2048; it needs an "
+             "[old_detector.nperseg_<n>] section (default: [welch] nperseg)",
     )
     parser.add_argument(
         "--config",
@@ -597,6 +629,9 @@ def apply_cli_overrides(
         config.frequency_clustering,
         odr_hz,
     )
+    nperseg = getattr(arguments, "nperseg", None)
+    if nperseg is not None:
+        config = select_old_detector_mode(config, nperseg)
     effective_config = replace(
         config,
         sensor=replace(config.sensor, odr_hz=odr_hz),
@@ -641,19 +676,76 @@ def session_layout_name(config: ApplicationConfig) -> str:
     )
 
 
+def parse_layout(layout: str) -> tuple[int, int]:
+    """``8x16`` -> 8 packets per session, 16 sessions per run."""
+    if not re.fullmatch(LAYOUT_PATTERN, layout):
+        raise ValueError(f"layout {layout!r} must look like 8x16")
+    packets_per_session, sessions = layout.split("x")
+    return int(packets_per_session), int(sessions)
+
+
+def active_old_detector_mode(config: ApplicationConfig) -> OldDetectorModeConfig:
+    mode = next(
+        (
+            mode for mode in config.old_detector_modes
+            if mode.nperseg == config.welch.nperseg
+        ),
+        None,
+    )
+    if mode is None:
+        raise ValueError(
+            f"Welch nperseg {config.welch.nperseg} has no "
+            f"[old_detector.nperseg_{config.welch.nperseg}] section; "
+            f"modes: {old_detector_mode_names(config)}"
+        )
+    return mode
+
+
+def old_detector_mode_names(config: ApplicationConfig) -> str:
+    return ", ".join(str(mode.nperseg) for mode in config.old_detector_modes)
+
+
+def mode_layouts(config: ApplicationConfig) -> list[str]:
+    """Layouts the active mode is calibrated for, in config order."""
+    return [layout for layout, _ in active_old_detector_mode(config).thresholds]
+
+
+def select_old_detector_mode(
+    config: ApplicationConfig,
+    nperseg: int,
+) -> ApplicationConfig:
+    mode = next(
+        (mode for mode in config.old_detector_modes if mode.nperseg == nperseg),
+        None,
+    )
+    if mode is None:
+        raise ValueError(
+            f"--nperseg {nperseg} has no [old_detector.nperseg_{nperseg}] "
+            f"section in config.toml; modes: {old_detector_mode_names(config)}"
+        )
+    return replace(
+        config,
+        welch=replace(config.welch, nperseg=mode.nperseg, noverlap=mode.noverlap),
+    )
+
+
 def resolve_layout_trusted_threshold(
     config: ApplicationConfig,
 ) -> ApplicationConfig:
     """The run config with the Med.Prom threshold of its own layout.
 
-    Layouts not named in min_median_prominence_db_by_layout keep the
-    default min_median_prominence_db.
+    The layout must be listed for the active mode: an uncalibrated layout
+    is refused rather than judged with another layout's threshold.
     """
-    trusted_frequency = config.visualization.trusted_frequency
-    thresholds = dict(trusted_frequency.min_median_prominence_db_by_layout)
     layout = session_layout_name(config)
+    thresholds = dict(active_old_detector_mode(config).thresholds)
     if layout not in thresholds:
-        return config
+        raise ValueError(
+            f"layout {layout} has no Med.Prom threshold for nperseg "
+            f"{config.welch.nperseg}; calibrated layouts: "
+            f"{', '.join(thresholds)}"
+        )
+    trusted_frequency = config.visualization.trusted_frequency
     return replace(
         config,
         visualization=replace(
@@ -667,17 +759,32 @@ def resolve_layout_trusted_threshold(
 
 
 def trusted_threshold_line(config: ApplicationConfig) -> str:
-    trusted_frequency = config.visualization.trusted_frequency
-    layout = session_layout_name(config)
-    source = (
-        f"layout {layout}"
-        if layout in dict(trusted_frequency.min_median_prominence_db_by_layout)
-        else "default"
-    )
+    threshold = config.visualization.trusted_frequency.min_median_prominence_db
     return (
-        "Trusted Med.Prom threshold: "
-        f"{trusted_frequency.min_median_prominence_db:g} dB ({source})\n"
+        f"Trusted Med.Prom threshold: {threshold:g} dB "
+        f"(layout {session_layout_name(config)}, "
+        f"nperseg {config.welch.nperseg})\n"
     )
+
+
+def resolve_replay_layouts(
+    virtual_modes: list[str],
+    config: ApplicationConfig,
+) -> list[str]:
+    available = mode_layouts(config)
+    layouts = []
+    for mode in virtual_modes:
+        if mode == "all":
+            layouts.extend(available)
+        elif mode in available:
+            layouts.append(mode)
+        else:
+            raise ValueError(
+                f"replay layout {mode} has no Med.Prom threshold for nperseg "
+                f"{config.welch.nperseg}; calibrated layouts: "
+                f"{', '.join(available)}"
+            )
+    return list(dict.fromkeys(layouts))
 
 
 def build_effective_config_from_cli(
@@ -3568,16 +3675,18 @@ try:
     CONFIG_PATH = cli_arguments.config
     REPLAY_RESULTS_DIRECTORY = cli_arguments.replay_root
     config = build_effective_config_from_cli(CONFIG_PATH, cli_arguments)
+    if cli_arguments.replay is None:
+        # A live run needs a threshold for its own layout, checked before the
+        # sensor is opened; replay resolves the threshold of each layout.
+        config = resolve_layout_trusted_threshold(config)
+    else:
+        resolve_replay_layouts(cli_arguments.virtual_mode, config)
 except FileNotFoundError:
     raise SystemExit(f"Configuration file not found: {CONFIG_PATH}")
 except tomllib.TOMLDecodeError as error:
     raise SystemExit(f"Invalid TOML configuration: {error}")
 except (KeyError, TypeError, ValueError) as error:
     raise SystemExit(f"Invalid configuration: {error}")
-
-if cli_arguments.replay is None:
-    # Replay resolves the threshold for each of its layouts instead.
-    config = resolve_layout_trusted_threshold(config)
 
 total_runs = cli_arguments.repeat
 
@@ -4358,14 +4467,19 @@ def run_measurement(
     return stop_requested
 
 
+def replay_mode_directory(source_raw_path: Path, nperseg: int) -> Path:
+    """replay_results/<record>/nperseg_<n>: modes never overwrite each other."""
+    return REPLAY_RESULTS_DIRECTORY / source_raw_path.stem / f"nperseg_{nperseg}"
+
+
 def build_replay_result_paths(
     source_raw_path: Path,
     virtual_mode: str,
     virtual_run_number: int,
+    nperseg: int,
 ) -> RunResultPaths:
     result_directory = (
-        REPLAY_RESULTS_DIRECTORY
-        / source_raw_path.stem
+        replay_mode_directory(source_raw_path, nperseg)
         / virtual_mode
         / f"virtual_run{virtual_run_number:02d}"
     )
@@ -4635,12 +4749,16 @@ def save_replay_summaries(
             f"Raw packets: {raw.x.shape[0]}\n"
             f"ODR: {raw.requested_odr_hz:g} Hz\n"
             f"Effective frequency tolerance: {effective_tolerance:.2f} Hz\n"
+            f"Old detector mode: Welch nperseg {base_config.welch.nperseg}, "
+            f"noverlap {base_config.welch.noverlap}\n"
             "Region frequency_std_hz: maximum source-cluster sigma_f\n"
             "\nLayouts:\n"
         )
+        thresholds = dict(active_old_detector_mode(base_config).thresholds)
         for layout in layout_rows:
             metadata_file.write(
                 f"\n{layout['mode']}:\n"
+                f"  Med.Prom threshold: {thresholds[layout['mode']]:g} dB\n"
                 f"  packets/session: {layout['packets_per_session']}\n"
                 f"  sessions/run: {layout['sessions_per_run']}\n"
                 f"  packets/run: {layout['packets_per_run']}\n"
@@ -4655,19 +4773,17 @@ def replay_raw_measurement(
     virtual_modes: list[str],
     base_config: ApplicationConfig,
 ) -> None:
+    modes = resolve_replay_layouts(virtual_modes, base_config)
     raw = load_raw_measurement(source_raw_path)
     replay_run_rows = []
     replay_region_rows = []
     layout_rows = []
-    result_root = REPLAY_RESULTS_DIRECTORY / source_raw_path.stem
+    result_root = replay_mode_directory(
+        source_raw_path, base_config.welch.nperseg,
+    )
     result_root.mkdir(parents=True, exist_ok=False)
-    modes = list(dict.fromkeys(
-        layout
-        for mode in virtual_modes
-        for layout in (REPLAY_ALL_LAYOUTS if mode == "all" else (mode,))
-    ))
     for mode in modes:
-        packets_per_session, target_sessions = VIRTUAL_SESSION_LAYOUTS[mode]
+        packets_per_session, target_sessions = parse_layout(mode)
         packets_per_run = packets_per_session * target_sessions
         run_slices = build_virtual_run_slices(
             raw.x.shape[0],
@@ -4708,6 +4824,7 @@ def replay_raw_measurement(
                 source_raw_path,
                 mode,
                 virtual_run_index,
+                replay_config.welch.nperseg,
             )
             initialize_replay_log(
                 paths,

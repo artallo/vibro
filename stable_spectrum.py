@@ -380,7 +380,12 @@ def load_settings(
     min_distance_hz: float | None = None,
     separation_sigma: float | None = None,
 ) -> SpectrumSettings:
-    """Read Welch, band and baseline settings from config.toml when it is available."""
+    """Read band and baseline settings from config.toml when it is available.
+
+    The segment length stays DEFAULT_NPERSEG: [welch] of config.toml is the
+    mode of the old detector in main.py (since 2026-10-03), and the scripts
+    here set their own nperseg ([stable_spectrum] nperseg, --nperseg).
+    """
     nperseg = DEFAULT_NPERSEG
     noverlap = DEFAULT_NOVERLAP
     minimum, maximum = DEFAULT_BAND_HZ
@@ -390,9 +395,6 @@ def load_settings(
     if CONFIG_PATH.exists():
         with CONFIG_PATH.open("rb") as config_file:
             config = tomllib.load(config_file)
-        welch_config = config.get("welch", {})
-        nperseg = int(welch_config.get("nperseg", nperseg))
-        noverlap = int(welch_config.get("noverlap", noverlap))
         bands = config.get("analysis", {}).get("bands", [])
         if bands:
             minimum = min(float(band["min_frequency"]) for band in bands)

@@ -71,7 +71,6 @@ from stable_spectrum import (
 
 POINTS_PATH = Path(__file__).with_name("control_points.toml")
 MAIN_PATH = Path(__file__).with_name("main.py")
-DEFAULT_OLD_LAYOUTS = ["8x32", "8x8"]
 CONTROL_DIRECTORY = STABLE_RESULTS_DIRECTORY / "_control"
 POOL_RECORD = "pool"
 
@@ -327,70 +326,58 @@ def run_variant(cli: argparse.Namespace) -> int:
 # The old detector of main.py
 # ==========================================================
 
+def mode_table_name(nperseg: int) -> str:
+    return f"[old_detector.nperseg_{nperseg}.min_median_prominence_db_by_layout]"
+
+
 def old_detector_config(text: str, nperseg: int | None) -> tuple[str, int, int]:
-    """config.toml with [welch] nperseg and noverlap set; nothing else changes.
+    """config.toml switched to an old detector mode; nothing else changes.
 
-    Returns the text and the segment length and overlap it holds. Without
-    ``nperseg`` the configured values stay.
+    Only ``nperseg`` of ``[welch]`` is rewritten, and only when ``nperseg``
+    is given. Returns the text with the mode's segment length and overlap.
+    The mode needs its ``[old_detector.nperseg_<n>]`` section.
     """
-    lines = text.splitlines(keepends=True)
-    start = next(
-        (i for i, line in enumerate(lines) if line.strip() == "[welch]"), None,
-    )
-    if start is None:
-        raise ValueError("config.toml has no [welch] section")
-    end = next(
-        (i for i in range(start + 1, len(lines)) if lines[i].lstrip().startswith("[")),
-        len(lines),
-    )
-    values = {}
-    for i in range(start + 1, end):
-        match = re.match(r"\s*(nperseg|noverlap)\s*=\s*(\d+)", lines[i])
-        if match:
-            values[match.group(1)] = (i, int(match.group(2)))
-    if set(values) != {"nperseg", "noverlap"}:
-        raise ValueError("[welch] of config.toml needs nperseg and noverlap")
-    if nperseg is None:
-        return text, values["nperseg"][1], values["noverlap"][1]
-    for key, value in (("nperseg", nperseg), ("noverlap", nperseg // 2)):
-        line = lines[values[key][0]]
-        newline = line[len(line.rstrip("\r\n")):]
-        lines[values[key][0]] = f"{key} = {value}{newline}"
-    return "".join(lines), nperseg, nperseg // 2
+    if nperseg is not None:
+        lines = text.splitlines(keepends=True)
+        start = next(
+            (i for i, line in enumerate(lines) if line.strip() == "[welch]"), None,
+        )
+        if start is None:
+            raise ValueError("config.toml has no [welch] section")
+        for i in range(start + 1, len(lines)):
+            if lines[i].lstrip().startswith("["):
+                raise ValueError("[welch] of config.toml needs nperseg")
+            if re.match(r"\s*nperseg\s*=", lines[i]):
+                newline = lines[i][len(lines[i].rstrip("\r\n")):]
+                lines[i] = f"nperseg = {nperseg}{newline}"
+                text = "".join(lines)
+                break
+        else:
+            raise ValueError("[welch] of config.toml needs nperseg")
+    config = tomllib.loads(text)
+    active = int(config["welch"]["nperseg"])
+    mode = config.get("old_detector", {}).get(f"nperseg_{active}")
+    if mode is None:
+        modes = ", ".join(
+            name.removeprefix("nperseg_") for name in config.get("old_detector", {})
+        )
+        raise ValueError(
+            f"config.toml has no [old_detector.nperseg_{active}] section; modes: {modes}"
+        )
+    return text, active, int(mode["noverlap"])
 
 
-def set_median_prominence(text: str, value: float | None) -> tuple[str, float]:
-    """config.toml with the Med.Prom threshold of trusted regions set.
-
-    Only ``min_median_prominence_db`` of ``[visualization.trusted_frequency]``
-    changes. Returns the text and the threshold it holds.
-    """
-    lines = text.splitlines(keepends=True)
-    start = next(
-        (i for i, line in enumerate(lines)
-         if line.strip() == "[visualization.trusted_frequency]"),
-        None,
-    )
-    if start is None:
-        raise ValueError("config.toml has no [visualization.trusted_frequency] section")
-    for i in range(start + 1, len(lines)):
-        if lines[i].lstrip().startswith("["):
-            break
-        match = re.match(r"\s*min_median_prominence_db\s*=\s*([\d.]+)", lines[i])
-        if match:
-            if value is None:
-                return text, float(match.group(1))
-            newline = lines[i][len(lines[i].rstrip("\r\n")):]
-            lines[i] = f"min_median_prominence_db = {float(value)!r}{newline}"
-            return "".join(lines), value
-    raise ValueError("[visualization.trusted_frequency] needs min_median_prominence_db")
-
-
-LAYOUT_TABLE = "[visualization.trusted_frequency.min_median_prominence_db_by_layout]"
+def mode_thresholds(text: str, nperseg: int) -> dict[str, float]:
+    """Layouts of an old detector mode and their Med.Prom thresholds."""
+    mode = tomllib.loads(text).get("old_detector", {}).get(f"nperseg_{nperseg}", {})
+    return {
+        layout: float(value)
+        for layout, value in mode.get("min_median_prominence_db_by_layout", {}).items()
+    }
 
 
 def parse_threshold(text: str) -> tuple[str | None, float]:
-    """``2.0`` is the default threshold, ``8x16=2.95`` the one of a layout."""
+    """``2.0`` for every layout of the run, ``8x16=2.95`` for one layout."""
     layout, _, value = text.rpartition("=")
     if layout and not re.fullmatch(r"[1-9][0-9]*x[1-9][0-9]*", layout):
         raise argparse.ArgumentTypeError(f"'{text}': the layout must look like 8x16")
@@ -403,21 +390,22 @@ def parse_threshold(text: str) -> tuple[str | None, float]:
     return (layout or None), number
 
 
-def set_layout_thresholds(text: str, thresholds: dict[str, float]) -> str:
-    """config.toml with these entries in the table of thresholds by layout.
+def set_layout_thresholds(text: str, nperseg: int, thresholds: dict[str, float]) -> str:
+    """config.toml with these entries in the layout table of one mode.
 
     Entries already there for other layouts stay; the table is added at the
-    end when the file has none.
+    end when the mode has none.
     """
     if not thresholds:
         return text
+    table = mode_table_name(nperseg)
     newline = "\r\n" if "\r\n" in text else "\n"
     lines = text.splitlines(keepends=True)
-    start = next((i for i, line in enumerate(lines) if line.strip() == LAYOUT_TABLE), None)
+    start = next((i for i, line in enumerate(lines) if line.strip() == table), None)
     if start is None:
         if lines and not lines[-1].endswith(("\n", "\r")):
             lines[-1] += newline
-        lines += [newline, LAYOUT_TABLE + newline]
+        lines += [newline, table + newline]
         start = len(lines) - 1
     end = next(
         (i for i in range(start + 1, len(lines)) if lines[i].lstrip().startswith("[")),
@@ -438,15 +426,34 @@ def set_layout_thresholds(text: str, thresholds: dict[str, float]) -> str:
     return "".join(lines)
 
 
-def applied_thresholds(text: str, layouts: list[str]) -> str:
-    """What each layout of a run will use, as main.py resolves it."""
-    trusted = tomllib.loads(text)["visualization"]["trusted_frequency"]
-    table = trusted.get("min_median_prominence_db_by_layout", {})
-    return ", ".join(
-        f"{layout} {table[layout]:g}" if layout in table
-        else f"{layout} {trusted['min_median_prominence_db']:g} (default)"
-        for layout in layouts
-    )
+def run_thresholds(
+    text: str, nperseg: int, layouts: list[str] | None,
+    requested: list[tuple[str | None, float]] | None,
+) -> tuple[str, list[str], dict[str, float]]:
+    """The config text, layouts and thresholds of one old detector run.
+
+    Without ``layouts`` the run takes every layout of the mode. A plain
+    ``--median-prominence`` value goes to all of them, ``8x16=2.95`` to one.
+    Every layout must end up with a threshold, as main.py requires.
+    """
+    layouts = list(layouts or mode_thresholds(text, nperseg))
+    if not layouts:
+        raise ValueError(f"{mode_table_name(nperseg)} lists no layout")
+    plain = [value for layout, value in requested or [] if layout is None]
+    if len(plain) > 1:
+        raise ValueError("--median-prominence takes one value for all layouts")
+    entries = {layout: plain[0] for layout in layouts} if plain else {}
+    entries.update({layout: value for layout, value in requested or [] if layout})
+    text = set_layout_thresholds(text, nperseg, entries)
+    thresholds = mode_thresholds(text, nperseg)
+    missing = [layout for layout in layouts if layout not in thresholds]
+    if missing:
+        raise ValueError(
+            f"no Med.Prom threshold for {', '.join(missing)} at nperseg {nperseg}; "
+            f"calibrated layouts: {', '.join(thresholds)}; give one with "
+            "--median-prominence LAYOUT=DB"
+        )
+    return text, layouts, {layout: thresholds[layout] for layout in layouts}
 
 
 def read_csv_rows(path: Path) -> list[dict[str, str]]:
@@ -499,7 +506,7 @@ def old_point_rows(
     # on noise this is the threshold a layout needs to stay clean.
     strongest: dict[str, float] = {}
     for raw_path in raw_paths:
-        folder = replay_root / raw_path.stem
+        folder = replay_root / raw_path.stem / f"nperseg_{nperseg}"
         regions = read_csv_rows(folder / "replay_regions.csv")
         runs = read_csv_rows(folder / "replay_runs.csv")
         lines.append(f"  {raw_path.stem}")
@@ -597,14 +604,10 @@ def run_old_variant(cli: argparse.Namespace) -> int:
         config_text, nperseg, noverlap = old_detector_config(
             CONFIG_PATH.read_text(encoding="utf-8"), cli.nperseg,
         )
-        defaults = [value for layout, value in cli.median_prominence or [] if layout is None]
-        if len(defaults) > 1:
-            raise ValueError("--median-prominence takes one default value")
-        config_text, _ = set_median_prominence(config_text, defaults[0] if defaults else None)
-        config_text = set_layout_thresholds(config_text, {
-            layout: value for layout, value in cli.median_prominence or [] if layout
-        })
-        thresholds_text = applied_thresholds(config_text, cli.layouts)
+        config_text, layouts, thresholds = run_thresholds(
+            config_text, nperseg, cli.layouts, cli.median_prominence,
+        )
+        thresholds_text = ", ".join(f"{layout} {value:g}" for layout, value in thresholds.items())
         point_paths = {}
         for point in points:
             try:
@@ -625,7 +628,7 @@ def run_old_variant(cli: argparse.Namespace) -> int:
     lines = [
         f"Old detector (main.py --replay) control run '{variant}'",
         f"Created: {datetime.now().isoformat(timespec='seconds')}",
-        f"Welch nperseg {nperseg}, noverlap {noverlap}   layouts {' '.join(cli.layouts)}",
+        f"Welch nperseg {nperseg}, noverlap {noverlap}   layouts {' '.join(layouts)}",
         f"Med.Prom thresholds, dB: {thresholds_text}",
         "Trusted regions at the spectral maximum of the median PSD (Med.Freq):",
         "one run of a layout: support n/N sessions and Med.Prom; several runs:",
@@ -639,7 +642,7 @@ def run_old_variant(cli: argparse.Namespace) -> int:
             completed = subprocess.run(
                 [
                     sys.executable, str(MAIN_PATH), "--replay", str(raw_path),
-                    "--virtual-mode", *cli.layouts,
+                    "--virtual-mode", *layouts,
                     "--config", str(config_path), "--replay-root", str(replay_root),
                 ],
                 capture_output=True, text=True, encoding="utf-8", errors="replace",
@@ -652,7 +655,7 @@ def run_old_variant(cli: argparse.Namespace) -> int:
                 print(f"error: main.py --replay failed on {raw_path}, see the log in {replay_root}")
                 return 1
         rows, point_lines = old_point_rows(
-            point, point_paths[point.name], replay_root, cli.layouts, nperseg, cli.tolerance,
+            point, point_paths[point.name], replay_root, layouts, nperseg, cli.tolerance,
         )
         all_rows.extend(rows)
         lines.extend(point_lines + [""])
@@ -812,8 +815,9 @@ def parse_cli_arguments(arguments: list[str] | None = None) -> argparse.Namespac
     parser.add_argument(
         "--nperseg", type=int, default=None, metavar="SAMPLES",
         help="one segment length (default: [stable_spectrum] nperseg in "
-             "config.toml, which must hold one value; with --old-detector "
-             "[welch] nperseg, and noverlap becomes half of it)",
+             "config.toml, which must hold one value); with --old-detector the "
+             "old detector mode, [old_detector.nperseg_<n>] (default: [welch] "
+             "nperseg)",
     )
     parser.add_argument(
         "--old-detector", action="store_true",
@@ -823,14 +827,14 @@ def parse_cli_arguments(arguments: list[str] | None = None) -> argparse.Namespac
     parser.add_argument(
         "--median-prominence", type=parse_threshold, nargs="+", default=None,
         metavar="DB|PxS=DB",
-        help="--old-detector: Med.Prom a trusted region needs; a plain value "
-             "sets the default, 8x16=2.95 the threshold of one layout "
-             "(default: config.toml)",
+        help="--old-detector: Med.Prom a trusted region needs, written into the "
+             "config copy of the run; a plain value for every layout of the run, "
+             "8x16=2.95 for one (default: the mode's table in config.toml)",
     )
     parser.add_argument(
         "--layouts", nargs="+", default=None, metavar="PxS",
         help="--old-detector: replay layouts, packets per session x sessions "
-             f"per run (default {' '.join(DEFAULT_OLD_LAYOUTS)})",
+             "per run (default: every layout of the mode in config.toml)",
     )
     parser.add_argument("--alpha", type=float, default=DEFAULT_ALPHA)
     parser.add_argument(
@@ -858,7 +862,6 @@ def parse_cli_arguments(arguments: list[str] | None = None) -> argparse.Namespac
         ]
         if unused:
             parser.error(f"{', '.join(unused)}: not used by the old detector")
-        cli.layouts = cli.layouts or list(DEFAULT_OLD_LAYOUTS)
     elif cli.layouts or cli.median_prominence is not None:
         parser.error("--layouts and --median-prominence need --old-detector")
     return cli
