@@ -37,6 +37,14 @@ tags: [vibro, скрипт]
 python repeatability_check.py real_results/*_raw.npz --replay-root replay_results
 ```
 
+Сравнение со старым детектором идёт по раскладке 8×4 режима 1024: скрипт
+ищет `replay_regions.csv` в папке записи, а если его там нет — в
+`nperseg_1024/` (так пишет `main.py` с 03.10.2026). Нужен replay в
+режиме 1024: `main.py --replay … --nperseg 1024`.
+
+```bash
+```
+
 ## Как читать
 
 Сравнения, где обе половины ничего не нашли, считаются отдельно: повторить

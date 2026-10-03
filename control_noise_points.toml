@@ -1,0 +1,14 @@
+# Synthetic noise as control points, for the false alarms of the old
+# detector (control_run.py --old-detector). The folders are not in git:
+# make them with false_alarm_check.py --save-captures, as below, before use.
+#
+#   python false_alarm_check.py --runs 10 --nperseg 2048 --seed 2026 --save-captures stable_results/_noise/white --output stable_results/_noise/white_report
+#   python false_alarm_check.py --runs 10 --nperseg 2048 --seed 2027 --save-captures stable_results/_noise/coloured --output stable_results/_noise/coloured_report --noise-shape "tumen_results/260912 Тюмень/*_raw.npz" "tumen_results/260916 Тюмень, три прогона/*_raw.npz"
+
+[[point]]
+name = "noise_white"
+folder = "stable_results/_noise/white"
+
+[[point]]
+name = "noise_coloured"
+folder = "stable_results/_noise/coloured"

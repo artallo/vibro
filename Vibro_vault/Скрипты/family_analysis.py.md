@@ -18,7 +18,7 @@ replay и группирует их в повторяющиеся семейст
 
 | Ключ | По умолчанию | Что делает |
 |---|---|---|
-| `папки replay или отчёты .txt` | обязательно | одна или несколько папок `replay_results/<запись>`; старые отчёты `.txt` без сырых данных входят как одно окно своей раскладки |
+| `папки replay или отчёты .txt` | обязательно | одна или несколько папок с `replay_regions.csv`: с 03.10.2026 это папка режима `replay_results/<запись>/nperseg_<n>`, раньше — `replay_results/<запись>`; старые отчёты `.txt` без сырых данных входят как одно окно своей раскладки |
 | `--output папка` | `family_results/<первая папка>/`, для нескольких `family_results/multi_<время>/` | куда писать |
 | `--link-tolerance-hz` | допуск ODR из replay, 0.40 при 250 | порог склейки в семейство |
 | `--max-family-span-hz` | 2 × допуск | наибольший разброс частот внутри семейства |
@@ -29,7 +29,7 @@ replay и группирует их в повторяющиеся семейст
 
 ```bash
 python main.py --replay "real_results/20260903_000346_ODR250_run01_raw.npz" --virtual-mode all
-python family_analysis.py replay_results/20260903_000346_ODR250_run01_raw
+python family_analysis.py replay_results/20260903_000346_ODR250_run01_raw/nperseg_1024
 python family_analysis.py replay_results/2026090*_raw results/<старый отчёт>.txt --output family_results/real_all_captures
 ```
 
