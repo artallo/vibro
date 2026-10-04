@@ -3114,6 +3114,101 @@ def print_trusted_frequency_regions(
             )
 
 
+CANDIDATE_RANKS = ("Med.Prom", "support x Med.Prom")
+
+
+def select_candidate_regions(
+    axis_regions: list[ConsolidatedFrequencyRegion],
+    config: TrustedFrequencyVisualizationConfig,
+) -> list[tuple[str, ConsolidatedFrequencyRegion]]:
+    """At most two regions below the Med.Prom threshold, on an axis with no
+    trusted region; for the user to judge, never a result.
+
+    Eligible are regions with enough support whose median PSD maximum lies
+    inside their own range of session peaks: a region given the maximum of a
+    neighbour through the search window says nothing about its own frequency.
+    The first is the highest Med.Prom (then the larger support), the second
+    the highest support fraction x Med.Prom among the rest, at another
+    maximum. Decisions of the detector do not depend on this.
+    """
+    if any(is_trusted_frequency_cluster(region, config) for region in axis_regions):
+        return []
+    eligible = [
+        region for region in axis_regions
+        if region.support_fraction >= config.min_support_fraction
+        and region.median_evidence.peak_frequency is not None
+        and region.median_evidence.prominence_db is not None
+        and region.minimum_frequency
+        <= region.median_evidence.peak_frequency
+        <= region.maximum_frequency
+    ]
+    if not eligible:
+        return []
+    first = max(
+        eligible,
+        key=lambda region: (
+            region.median_evidence.prominence_db, region.support_count,
+        ),
+    )
+    selected = [(CANDIDATE_RANKS[0], first)]
+    rest = [
+        region for region in eligible
+        if region.median_evidence.peak_frequency
+        != first.median_evidence.peak_frequency
+    ]
+    if rest:
+        second = max(
+            rest,
+            key=lambda region: (
+                region.support_fraction * region.median_evidence.prominence_db
+            ),
+        )
+        selected.append((CANDIDATE_RANKS[1], second))
+    return selected
+
+
+def print_candidate_regions(
+    regions: ConsolidatedFrequencyRegions,
+    config: TrustedFrequencyVisualizationConfig,
+    total_sessions: int,
+) -> None:
+    validate_trusted_frequency_visualization_config(config)
+    for axis_name, axis_regions in (
+        ("X", regions.x),
+        ("Y", regions.y),
+        ("Z", regions.z),
+    ):
+        print()
+        print(f"Candidates below the threshold — {axis_name}")
+        if any(is_trusted_frequency_cluster(region, config) for region in axis_regions):
+            print("Trusted frequency regions present; no candidates.")
+            continue
+        candidates = select_candidate_regions(axis_regions, config)
+        if not candidates:
+            print("No candidate regions.")
+            continue
+        print(
+            f"Below Med.Prom {config.min_median_prominence_db:g} dB: not a "
+            "result, noise reaches such levels too; open circles on figure 2."
+        )
+        print(
+            f"{'Picked by':<18}  {'Freq Hz':>7}  {'Support':>7}  "
+            f"{'Med.Freq':>8}  {'Med.Prom':>8}  {'Supp x Prom':>11}  "
+            f"{'Range Hz':>13}"
+        )
+        for rank, region in candidates:
+            evidence = region.median_evidence
+            print(
+                f"{rank:<18}  {region.frequency:7.2f}  "
+                f"{region.support_count:>3}/{total_sessions:<3}  "
+                f"{reported_median_frequency(evidence):8.2f}  "
+                f"{evidence.prominence_db:8.2f}  "
+                f"{region.support_fraction * evidence.prominence_db:11.2f}  "
+                f"{region.minimum_frequency:.2f}–"
+                f"{region.maximum_frequency:.2f}"
+            )
+
+
 def draw_analysis_bands(
     ax,
     analysis_bands: list[AnalysisBand],
@@ -4292,13 +4387,48 @@ def build_analysis_figures(
                 config.visualization.trusted_frequency,
             )
         ]
+        candidates = select_candidate_regions(
+            trusted_regions_by_axis[axis_name],
+            config.visualization.trusted_frequency,
+        )
         # The tops of the plotted curve: Med.Freq is computed on the median
         # PSD, and the trusted weight is the same over the peak.
-        curve_frequency, curve_psd, region_tops = peak_tops_on_curve(
+        curve_frequency, curve_psd, tops = peak_tops_on_curve(
             axis_data.frequency,
             axis_data.trusted_frequency_psd,
-            [region.median_evidence.peak_frequency for region in trusted_regions],
+            [
+                region.median_evidence.peak_frequency
+                for region in (
+                    *trusted_regions, *(region for _, region in candidates),
+                )
+            ],
         )
+        region_tops = tops[:len(trusted_regions)]
+        for (_, region), (top_frequency, top_psd) in zip(
+            candidates, tops[len(trusted_regions):],
+        ):
+            # Open circle: the strongest of what stayed below the threshold.
+            trusted_axis.scatter(
+                top_frequency,
+                top_psd,
+                facecolors="none",
+                edgecolors=COLORS[axis_name],
+                marker="o",
+                s=45,
+            )
+            trusted_axis.annotate(
+                f"{reported_median_frequency(region.median_evidence):.2f} Hz\n"
+                f"{region.support_count}/"
+                f"{aligned_psd.x_stack.shape[0]}\n"
+                f"{region.median_evidence.prominence_db:.2f} dB",
+                xy=(top_frequency, top_psd),
+                xytext=(0, 6),
+                textcoords="offset points",
+                ha="center",
+                va="bottom",
+                fontsize=7,
+                color="0.35",
+            )
         trusted_axis.plot(
             curve_frequency,
             curve_psd,
@@ -4526,6 +4656,13 @@ def run_measurement(
             config.visualization.trusted_frequency,
             aligned_psd.x_stack.shape[0],
         )
+        append_run_diagnostics(
+            run_result_paths.log,
+            print_candidate_regions,
+            consolidated_frequency_regions,
+            config.visualization.trusted_frequency,
+            aligned_psd.x_stack.shape[0],
+        )
 
     if not sessions:
         print("No completed sessions available for analysis.")
@@ -4654,6 +4791,13 @@ def save_replay_analysis(
         run_config.visualization.trusted_frequency,
         session_count,
     )
+    append_run_diagnostics(
+        paths.log,
+        print_candidate_regions,
+        analysis_result.consolidated_frequency_regions,
+        run_config.visualization.trusted_frequency,
+        session_count,
+    )
     stat_fig, trusted_fig = build_analysis_figures(
         analysis_result,
         run_config,
@@ -4676,9 +4820,10 @@ def build_replay_summary_rows(
     end_packet: int,
     analysis_result: AnalysisResult,
     run_config: ApplicationConfig,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     run_rows = []
     region_rows = []
+    candidate_rows = []
     axis_values = (
         (
             "X",
@@ -4788,7 +4933,34 @@ def build_replay_summary_rows(
                     run_config.visualization.trusted_frequency,
                 ),
             })
-    return run_rows, region_rows
+        for rank, region in select_candidate_regions(
+            consolidated_regions,
+            run_config.visualization.trusted_frequency,
+        ):
+            evidence = region.median_evidence
+            candidate_rows.append({
+                **common_values,
+                "axis": axis_name,
+                "band": region.band_name,
+                "picked_by": rank,
+                "freq_hz": region.frequency,
+                "med_freq_hz": reported_median_frequency(evidence),
+                "med_freq_bin_hz": evidence.peak_frequency,
+                "support_n": region.support_count,
+                "support_total": support_total,
+                "support_fraction": region.support_fraction,
+                "med_prom_db": evidence.prominence_db,
+                "support_x_med_prom": (
+                    region.support_fraction * evidence.prominence_db
+                ),
+                "threshold_db": (
+                    run_config.visualization.trusted_frequency
+                    .min_median_prominence_db
+                ),
+                "range_min_hz": region.minimum_frequency,
+                "range_max_hz": region.maximum_frequency,
+            })
+    return run_rows, region_rows, candidate_rows
 
 
 def write_csv_rows(
@@ -4810,6 +4982,7 @@ def save_replay_summaries(
     region_rows: list[dict[str, Any]],
     layout_rows: list[dict[str, Any]],
     base_config: ApplicationConfig,
+    candidate_rows: list[dict[str, Any]] | None = None,
 ) -> None:
     run_fields = [
         "source", "source_packet_count", "used_packet_count",
@@ -4836,6 +5009,18 @@ def save_replay_summaries(
         result_root / "replay_regions.csv",
         region_rows,
         region_fields,
+    )
+    candidate_fields = [
+        *region_fields[:region_fields.index("axis")],
+        "axis", "band", "picked_by", "freq_hz", "med_freq_hz",
+        "med_freq_bin_hz", "support_n", "support_total", "support_fraction",
+        "med_prom_db", "support_x_med_prom", "threshold_db",
+        "range_min_hz", "range_max_hz",
+    ]
+    write_csv_rows(
+        result_root / "replay_candidates.csv",
+        candidate_rows or [],
+        candidate_fields,
     )
     effective_tolerance = resolve_frequency_tolerance_hz(
         base_config.frequency_clustering,
@@ -4879,6 +5064,7 @@ def replay_raw_measurement(
     raw = load_raw_measurement(source_raw_path)
     replay_run_rows = []
     replay_region_rows = []
+    replay_candidate_rows = []
     layout_rows = []
     result_root = replay_mode_directory(
         source_raw_path, base_config.welch.nperseg,
@@ -4940,7 +5126,7 @@ def replay_raw_measurement(
                 sessions,
             )
             save_replay_analysis(paths, analysis_result, replay_config)
-            run_rows, region_rows = build_replay_summary_rows(
+            run_rows, region_rows, candidate_rows = build_replay_summary_rows(
                 source_raw_path,
                 raw,
                 mode,
@@ -4952,6 +5138,7 @@ def replay_raw_measurement(
             )
             replay_run_rows.extend(run_rows)
             replay_region_rows.extend(region_rows)
+            replay_candidate_rows.extend(candidate_rows)
             print(
                 f"Saved replay {mode} run "
                 f"{virtual_run_index}/{len(run_slices)}: "
@@ -4965,6 +5152,7 @@ def replay_raw_measurement(
         replay_region_rows,
         layout_rows,
         base_config,
+        replay_candidate_rows,
     )
 
 
