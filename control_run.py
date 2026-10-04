@@ -456,6 +456,40 @@ def run_thresholds(
     return text, layouts, {layout: thresholds[layout] for layout in layouts}
 
 
+CONSOLIDATION_SECTION = "[analysis.frequency_cluster_consolidation]"
+
+
+def set_max_shared_sessions(text: str, value: int | None) -> tuple[str, int]:
+    """config.toml with max_shared_sessions of the cluster consolidation set.
+
+    The key is added to its section when missing. Returns the text and the
+    value it holds (0 when the key is absent and nothing is set).
+    """
+    lines = text.splitlines(keepends=True)
+    start = next(
+        (i for i, line in enumerate(lines) if line.strip() == CONSOLIDATION_SECTION),
+        None,
+    )
+    if start is None:
+        raise ValueError(f"config.toml has no {CONSOLIDATION_SECTION} section")
+    newline = "\r\n" if "\r\n" in text else "\n"
+    end = next(
+        (i for i in range(start + 1, len(lines)) if lines[i].lstrip().startswith("[")),
+        len(lines),
+    )
+    for i in range(start + 1, end):
+        match = re.match(r"\s*max_shared_sessions\s*=\s*(\d+)", lines[i])
+        if match:
+            if value is None:
+                return text, int(match.group(1))
+            lines[i] = f"max_shared_sessions = {value}{newline}"
+            return "".join(lines), value
+    if value is None:
+        return text, 0
+    lines.insert(start + 1, f"max_shared_sessions = {value}{newline}")
+    return "".join(lines), value
+
+
 def read_csv_rows(path: Path) -> list[dict[str, str]]:
     if not path.exists():
         return []
@@ -501,6 +535,8 @@ def old_point_rows(
     whole: dict[str, list[dict[str, Any]]] = {layout: [] for layout in layouts}
     # Per layout: runs of that layout in all records, and those with a region.
     hit_counts = {layout: [0, 0] for layout in layouts}
+    # Per layout: regions after consolidation, summed over runs and axes.
+    region_counts: dict[str, int] = {}
     # Per layout: the highest Med.Prom of a trusted region. With
     # --median-prominence 0 every region with enough support is trusted, so
     # on noise this is the threshold a layout needs to stay clean.
@@ -528,6 +564,9 @@ def old_point_rows(
                 continue
             hit_counts[layout][0] += len(parts)
             hit_counts[layout][1] += len({item["part"] for item in found})
+            region_counts[layout] = region_counts.get(layout, 0) + sum(
+                int(row["consolidated_regions"]) for row in runs if row["mode"] == layout
+            )
             if found:
                 strongest[layout] = max(
                     strongest.get(layout, 0.0), max(item["prom_db"] for item in found),
@@ -563,6 +602,10 @@ def old_point_rows(
             rows.extend(
                 {**base, "record": f"{raw_path.stem} {kind}", **entry} for entry in entries
             )
+    lines.append(
+        "  regions after consolidation: "
+        + ", ".join(f"{layout} {count}" for layout, count in region_counts.items())
+    )
     lines.append(
         "  runs with a trusted region: "
         + ", ".join(
@@ -608,6 +651,9 @@ def run_old_variant(cli: argparse.Namespace) -> int:
             config_text, nperseg, cli.layouts, cli.median_prominence,
         )
         thresholds_text = ", ".join(f"{layout} {value:g}" for layout, value in thresholds.items())
+        config_text, max_shared = set_max_shared_sessions(
+            config_text, cli.max_shared_sessions,
+        )
         point_paths = {}
         for point in points:
             try:
@@ -630,6 +676,7 @@ def run_old_variant(cli: argparse.Namespace) -> int:
         f"Created: {datetime.now().isoformat(timespec='seconds')}",
         f"Welch nperseg {nperseg}, noverlap {noverlap}   layouts {' '.join(layouts)}",
         f"Med.Prom thresholds, dB: {thresholds_text}",
+        f"Clusters merge with up to {max_shared} shared session(s)",
         "Trusted regions at the spectral maximum of the median PSD (Med.Freq):",
         "one run of a layout: support n/N sessions and Med.Prom; several runs:",
         "in how many of them the region is trusted, grouped within "
@@ -825,6 +872,11 @@ def parse_cli_arguments(arguments: list[str] | None = None) -> argparse.Namespac
              "stable_spectrum.py and table its trusted regions",
     )
     parser.add_argument(
+        "--max-shared-sessions", type=int, default=None, metavar="N",
+        help="--old-detector: how many sessions two clusters may share and "
+             "still merge, written into the config copy (default: config.toml)",
+    )
+    parser.add_argument(
         "--median-prominence", type=parse_threshold, nargs="+", default=None,
         metavar="DB|PxS=DB",
         help="--old-detector: Med.Prom a trusted region needs, written into the "
@@ -862,8 +914,8 @@ def parse_cli_arguments(arguments: list[str] | None = None) -> argparse.Namespac
         ]
         if unused:
             parser.error(f"{', '.join(unused)}: not used by the old detector")
-    elif cli.layouts or cli.median_prominence is not None:
-        parser.error("--layouts and --median-prominence need --old-detector")
+    elif cli.layouts or cli.median_prominence is not None or cli.max_shared_sessions is not None:
+        parser.error("--layouts, --median-prominence and --max-shared-sessions need --old-detector")
     return cli
 
 

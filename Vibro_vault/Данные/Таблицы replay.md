@@ -56,19 +56,20 @@ sources, weight
 
 ## replay_candidates.csv
 
-С 04.10.2026. Строка на каждого кандидата ниже порога — до двух на ось,
+С 04.10.2026. Строка на каждого кандидата ниже порога — один на ось,
 только на осях без доверенных частот, см. [[Старый детектор — как он
 устроен]], раздел «Кандидаты ниже порога».
 
 ```text
 <те же первые столбцы, что в replay_regions.csv>,
-axis, band, picked_by, freq_hz, med_freq_hz, med_freq_bin_hz,
+axis, band, freq_hz, med_freq_hz, med_freq_bin_hz,
 support_n, support_total, support_fraction, med_prom_db,
-support_x_med_prom, threshold_db, range_min_hz, range_max_hz
+threshold_db, range_min_hz, range_max_hz
 ```
 
-`picked_by` — `Med.Prom` для первого кандидата и `support x Med.Prom` для
-второго, `threshold_db` — порог раскладки, которого кандидат не достиг.
+`threshold_db` — порог раскладки, которого кандидат не достиг. В первый
+день, 04.10.2026, файл ещё держал второго кандидата и столбцы `picked_by` и
+`support_x_med_prom`.
 
 ## replay_metadata.txt
 

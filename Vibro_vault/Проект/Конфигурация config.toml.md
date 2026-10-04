@@ -28,6 +28,7 @@ tags: [vibro, конфигурация]
 | | `background_weight`, `min_band_contrast_db`, `weak_trusted_weight` | 0.7, 1.0, 0.8 | только оформление `figure2` и столбец `Weight`: вес вне доверенных областей, порог `Band.Contr` для сильной доверенной, вес слабой доверенной; на доверенные решения не влияют; до 04.10.2026 веса были 0.5 и 0.7 |
 | `[analysis.frequency_clustering]` | `frequency_tolerance_hz_250/125/62p5` | 0.40 / 0.35 / 0.25 | допуск склейки частот между сессиями |
 | `[analysis.frequency_cluster_consolidation]` | `median_frequency_tolerance_hz` | 0.20 | склейка кластеров по пику медианного спектра |
+| | `max_shared_sessions` | 1 | сколько общих сессий могут иметь два кластера и всё же склеиться; до 04.10.2026 — 0 (без ключа), см. [[Старый детектор — как он устроен]] |
 | `[[analysis.bands]]` | `Low frequency` | 0,2–10 Гц | полосы; их читают все скрипты: старый детектор, [[stable_spectrum.py]], [[overview_figure.py]]; общая полоса анализа 0,2–15 Гц |
 | | `High frequency` | 10–15 Гц | |
 | | `prominence_db`, `min_stability` и др. | 1.8, 4.1 … | пороги старого детектора |

@@ -223,6 +223,25 @@ class OldDetectorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             run_thresholds(self.MODES, 2048, None, [(None, 1.0), (None, 2.0)])
 
+    def test_shared_sessions_go_into_the_consolidation_section(self) -> None:
+        from control_run import set_max_shared_sessions
+
+        text = (
+            "[analysis.frequency_cluster_consolidation]\r\n"
+            "median_frequency_tolerance_hz = 0.20\r\n\r\n[[analysis.bands]]\r\n"
+        )
+        self.assertEqual(set_max_shared_sessions(text, None), (text, 0))
+        added, value = set_max_shared_sessions(text, 2)
+        self.assertEqual(value, 2)
+        self.assertIn(
+            "[analysis.frequency_cluster_consolidation]\r\nmax_shared_sessions = 2\r\n", added,
+        )
+        changed, _ = set_max_shared_sessions(added, 1)
+        self.assertEqual(changed.count("max_shared_sessions"), 1)
+        self.assertEqual(set_max_shared_sessions(changed, None)[1], 1)
+        with self.assertRaises(ValueError):
+            set_max_shared_sessions("[welch]\nnperseg = 2048\n", 1)
+
     def test_regions_group_by_axis_and_frequency(self) -> None:
         from control_run import group_by_frequency
 
@@ -241,6 +260,7 @@ class OldDetectorTests(unittest.TestCase):
         for arguments in (
             ["v", "--layouts", "8x8"],
             ["v", "--median-prominence", "2.0"],
+            ["v", "--max-shared-sessions", "1"],
             ["v", "--old-detector", "--alpha", "0.05"],
             ["v", "--old-detector", "--separation-sigma", "3"],
         ):
