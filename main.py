@@ -13,6 +13,7 @@ from typing import Any
 import serial
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.ticker import AutoMinorLocator
 from scipy.signal import welch
 from scipy.signal import find_peaks
 
@@ -127,6 +128,23 @@ THEMES: dict[str, Theme] = {
     ),
 }
 DEFAULT_THEME = "light"
+
+
+def apply_grid(ax, theme: Theme) -> None:
+    """Solid grid at the major ticks; dotted lines between them on x.
+
+    The frequencies read off the plot sit between the 2 Hz major ticks, so
+    the x axis gets a thin dotted line every quarter step, 0.5 Hz at the
+    usual band; y keeps only the major grid.
+    """
+    ax.grid(True, which="major")
+    ax.xaxis.set_minor_locator(AutoMinorLocator(4))
+    ax.grid(
+        True, which="minor", axis="x", color=theme.grid,
+        linestyle=(0, (2, 3)), linewidth=0.7,
+    )
+    ax.tick_params(axis="x", which="minor", length=2, color=theme.spine)
+    ax.set_axisbelow(True)
 
 
 def resolve_theme(name: str) -> Theme:
@@ -4590,8 +4608,7 @@ def draw_trusted_panels(
         # Headroom so the labels of the highest peaks stay under the title.
         trusted_axis.set_ylim(0, float(np.max(curve_psd)) * 1.22)
         trusted_axis.set_xlim(analysis_min_frequency, analysis_max_frequency)
-        trusted_axis.grid(True)
-        trusted_axis.set_axisbelow(True)
+        apply_grid(trusted_axis, theme)
         if panel_index == 0:
             trusted_axis.legend(loc="upper right")
         annotation = trusted_axis.annotate(
@@ -4944,8 +4961,7 @@ def draw_statistics_figure(
         psd_axis.set_title(f"{axis_name} axis — Median PSD")
         psd_axis.set_ylabel("PSD [g²/Hz]")
         psd_axis.set_xlim(analysis_min_frequency, analysis_max_frequency)
-        psd_axis.grid(True)
-        psd_axis.set_axisbelow(True)
+        apply_grid(psd_axis, theme)
         if axis_index == 0:
             psd_axis.legend(loc="upper right")
 
@@ -4994,8 +5010,7 @@ def draw_statistics_figure(
             analysis_min_frequency,
             analysis_max_frequency,
         )
-        stability_axis.grid(True)
-        stability_axis.set_axisbelow(True)
+        apply_grid(stability_axis, theme)
         if axis_index == 0:
             stability_axis.legend(loc="upper right")
 
