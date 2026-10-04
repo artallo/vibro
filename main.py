@@ -4538,8 +4538,15 @@ def show_trusted_viewer(
             if item[0] in ("Home", "Save")
         ]
     fig = plt.figure(figsize=(14, 10), constrained_layout=True)
-    if fig.canvas.manager is not None:
-        fig.canvas.manager.set_window_title(title)
+    manager = fig.canvas.manager
+    if manager is not None:
+        manager.set_window_title(title)
+        window = getattr(manager, "window", None)
+        if window is not None and hasattr(window, "state"):
+            try:
+                window.state("zoomed")  # Tk on Windows: open on the whole screen
+            except Exception:
+                pass
     state: dict[str, Any] = {
         "run": 0,
         "shown": {name: True for name in AXIS_NAMES},
