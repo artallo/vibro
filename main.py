@@ -4483,6 +4483,9 @@ def add_tk_controls(fig, labels: list[str], state: dict[str, Any], redraw) -> bo
         return False
     if not isinstance(toolbar, tk.Widget):
         return False
+    # The toolbar goes above the figure.
+    toolbar.pack_forget()
+    toolbar.pack(side=tk.TOP, fill=tk.X, before=fig.canvas.get_tk_widget())
     if len(labels) > 1:
         tk.Label(toolbar, text="   Run:").pack(side=tk.LEFT)
         choice = ttk.Combobox(
@@ -4526,7 +4529,17 @@ def show_trusted_viewer(
     a tooltip with the frequency and, at a marked peak, its numbers. Without
     a Tk window the arrow keys change the run and x, y, z toggle the axes.
     """
+    if plt.get_backend().lower() == "tkagg":
+        from matplotlib.backends.backend_tkagg import NavigationToolbar2Tk
+
+        # Only Home and Save: the window is for reading the figure.
+        NavigationToolbar2Tk.toolitems = [
+            item for item in NavigationToolbar2Tk.toolitems
+            if item[0] in ("Home", "Save")
+        ]
     fig = plt.figure(figsize=(14, 10), constrained_layout=True)
+    if fig.canvas.manager is not None:
+        fig.canvas.manager.set_window_title(title)
     state: dict[str, Any] = {
         "run": 0,
         "shown": {name: True for name in AXIS_NAMES},
