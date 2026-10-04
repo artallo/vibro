@@ -71,9 +71,9 @@ nperseg = [2048]
 [visualization.trusted_frequency]
 min_support_fraction = 0.50
 # The Med.Prom threshold is set per layout in [old_detector.nperseg_<n>].
-background_weight = 0.5
+background_weight = 0.7
 min_band_contrast_db = 1.0
-weak_trusted_weight = 0.7
+weak_trusted_weight = 0.8
 
 [analysis.frequency_cluster_consolidation]
 median_frequency_tolerance_hz = 0.20

@@ -25,7 +25,7 @@ tags: [vibro, конфигурация]
 | | `baseline_window_hz` | 10.0 | ширина скользящей медианы, от которой [[stable_spectrum.py]] и [[overview_figure.py]] меряют превышение пика; старый детектор её не читает |
 | `[visualization.trusted_frequency]` | `min_support_fraction` | 0.50 | порог старого детектора «доверенных» частот, общий для режимов |
 | | `min_median_prominence_db` | — | до 03.10.2026 здесь было 1.55 на все раскладки; теперь порог задан по раскладкам в секции режима |
-| | `background_weight`, `min_band_contrast_db`, `weak_trusted_weight` | 0.5, 1.0, 0.7 | оформление старых графиков |
+| | `background_weight`, `min_band_contrast_db`, `weak_trusted_weight` | 0.7, 1.0, 0.8 | только оформление `figure2` и столбец `Weight`: вес вне доверенных областей, порог `Band.Contr` для сильной доверенной, вес слабой доверенной; на доверенные решения не влияют; до 04.10.2026 веса были 0.5 и 0.7 |
 | `[analysis.frequency_clustering]` | `frequency_tolerance_hz_250/125/62p5` | 0.40 / 0.35 / 0.25 | допуск склейки частот между сессиями |
 | `[analysis.frequency_cluster_consolidation]` | `median_frequency_tolerance_hz` | 0.20 | склейка кластеров по пику медианного спектра |
 | `[[analysis.bands]]` | `Low frequency` | 0,2–10 Гц | полосы; их читают все скрипты: старый детектор, [[stable_spectrum.py]], [[overview_figure.py]]; общая полоса анализа 0,2–15 Гц |

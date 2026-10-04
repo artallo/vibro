@@ -23,11 +23,21 @@ MAIN_PATH = Path(__file__).with_name("main.py")
 RATE_HZ = 250.0
 
 
-def run_main(*arguments: str) -> subprocess.CompletedProcess:
+def run_main(*arguments: str, env: dict | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, str(MAIN_PATH), *arguments],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
+        env=env,
     )
+
+
+def write_tone_record(path: Path, tone_hz: float = 3.0, packets: int = 64) -> None:
+    generator = np.random.default_rng(7)
+    time = np.arange(packets * 1024) / RATE_HZ
+    axes = {key: generator.normal(0.0, 1.0, packets * 1024) for key in "xyz"}
+    axes["y"] += 0.4 * np.sin(2.0 * np.pi * tone_hz * time)
+    axes = {key: value.reshape(packets, 1024) for key, value in axes.items()}
+    save_capture(path, axes, RATE_HZ, "test")
 
 
 class RefusalTests(unittest.TestCase):
@@ -50,6 +60,34 @@ class RefusalTests(unittest.TestCase):
             "--nperseg 4096 has no [old_detector.nperseg_4096] section",
             self.refused("--replay", "missing_raw.npz", "--nperseg", "4096"),
         )
+
+    def test_show_needs_a_replay_of_one_layout(self) -> None:
+        message = "--show needs --replay and --virtual-mode with one layout"
+        for arguments in (
+            ("--show",),
+            ("--replay", "missing_raw.npz", "--show"),
+            ("--replay", "missing_raw.npz", "--show", "--virtual-mode", "all"),
+            ("--replay", "missing_raw.npz", "--show", "--virtual-mode", "8x8", "8x16"),
+        ):
+            self.assertIn(message, self.refused(*arguments))
+
+
+class ShowTests(unittest.TestCase):
+    def test_show_opens_the_window_and_writes_nothing(self) -> None:
+        import os
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw = root / "tone_raw.npz"
+            write_tone_record(raw, packets=128)
+            # Without a display the window is a no-op; the analysis still runs.
+            env = {**os.environ, "MPLBACKEND": "Agg"}
+            completed = run_main(
+                "--replay", str(raw), "--nperseg", "2048", "--virtual-mode", "8x8",
+                "--show", "--replay-root", str(root / "replay"), env=env,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertFalse((root / "replay").exists())
 
 
 class RefinedFrequencyTests(unittest.TestCase):

@@ -562,6 +562,13 @@ def parse_cli_arguments(
              "default) = every layout of the mode",
     )
     parser.add_argument(
+        "--show",
+        action="store_true",
+        help="with --replay and one --virtual-mode layout: open figure 2 of "
+             "its virtual runs in one interactive window instead of writing "
+             "files",
+    )
+    parser.add_argument(
         "--nperseg",
         type=int,
         default=None,
@@ -3862,6 +3869,15 @@ try:
     CONFIG_PATH = cli_arguments.config
     REPLAY_RESULTS_DIRECTORY = cli_arguments.replay_root
     config = build_effective_config_from_cli(CONFIG_PATH, cli_arguments)
+    if cli_arguments.show and (
+        cli_arguments.replay is None
+        or len(cli_arguments.virtual_mode) != 1
+        or cli_arguments.virtual_mode[0] == "all"
+    ):
+        raise ValueError(
+            "--show needs --replay and --virtual-mode with one layout, "
+            "e.g. --virtual-mode 8x16"
+        )
     if cli_arguments.replay is None:
         # A live run needs a threshold for its own layout, checked before the
         # sensor is opened; replay resolves the threshold of each layout.
@@ -4235,6 +4251,317 @@ def analyze_sessions(
 
 # ==========================================================
 
+AXIS_NAMES = ("X", "Y", "Z")
+
+
+@dataclass
+class HoverPanel:
+    """One axis panel of figure 2 and what the mouse can point at in it."""
+
+    ax: Any
+    axis_name: str
+    frequency: np.ndarray
+    psd: np.ndarray
+    # (frequency, PSD, text) of each marked peak: trusted or candidate.
+    peaks: list[tuple[float, float, str]]
+    annotation: Any
+
+
+def peak_hover_text(
+    axis_name: str,
+    region: ConsolidatedFrequencyRegion,
+    total_sessions: int,
+    config: TrustedFrequencyVisualizationConfig,
+    candidate_rank: str | None = None,
+) -> str:
+    evidence = region.median_evidence
+    kind = (
+        f"candidate below the threshold, by {candidate_rank}"
+        if candidate_rank else "trusted"
+    )
+    lines = [
+        f"{axis_name} {reported_median_frequency(evidence):.2f} Hz — {kind}",
+        f"Med.Freq bin {evidence.peak_frequency:.3f} Hz",
+        f"Freq {region.frequency:.2f} Hz, session peaks "
+        f"{region.minimum_frequency:.2f}–{region.maximum_frequency:.2f}",
+        f"support {region.support_count}/{total_sessions}",
+        f"Med.Prom {evidence.prominence_db:.2f} dB "
+        f"(threshold {config.min_median_prominence_db:g})",
+    ]
+    if evidence.band_contrast_db is not None:
+        lines.append(
+            f"Band.Contr {evidence.band_contrast_db:.2f} dB, weight "
+            f"{get_trusted_frequency_weight(region, config):.1f}"
+        )
+    return "\n".join(lines)
+
+
+def draw_trusted_figure(
+    fig,
+    analysis_result: AnalysisResult,
+    run_config: ApplicationConfig,
+    axis_names: tuple[str, ...] = AXIS_NAMES,
+    title: str = "Trusted Median PSD",
+) -> list[HoverPanel]:
+    """Figure 2 on ``fig``: one panel per axis in ``axis_names``.
+
+    Returns the panels with what hover tooltips need. The saved figure 2
+    and the interactive window draw it alike.
+    """
+    fig.clear()
+    fig.suptitle(title)
+    if not axis_names:
+        fig.text(0.5, 0.5, "All axes are hidden", ha="center", va="center")
+        return []
+    aligned_psd = analysis_result.aligned_psd
+    visualization_data = analysis_result.visualization_data
+    regions = analysis_result.consolidated_frequency_regions
+    trusted_config = run_config.visualization.trusted_frequency
+    total_sessions = aligned_psd.x_stack.shape[0]
+    analysis_min_frequency, analysis_max_frequency = (
+        get_analysis_frequency_limits(run_config.analysis_bands)
+    )
+    visualization_axes = {
+        "X": visualization_data.x,
+        "Y": visualization_data.y,
+        "Z": visualization_data.z,
+    }
+    regions_by_axis = {"X": regions.x, "Y": regions.y, "Z": regions.z}
+    axes = fig.subplots(len(axis_names), 1, sharex=True, squeeze=False)[:, 0]
+    panels = []
+    for panel_index, (trusted_axis, axis_name) in enumerate(zip(axes, axis_names)):
+        axis_data = visualization_axes[axis_name]
+        trusted_regions = [
+            region for region in regions_by_axis[axis_name]
+            if is_trusted_frequency_cluster(region, trusted_config)
+        ]
+        candidates = select_candidate_regions(
+            regions_by_axis[axis_name], trusted_config,
+        )
+        # The tops of the plotted curve: Med.Freq is computed on the median
+        # PSD, and the trusted weight is the same over the peak.
+        curve_frequency, curve_psd, tops = peak_tops_on_curve(
+            axis_data.frequency,
+            axis_data.trusted_frequency_psd,
+            [
+                region.median_evidence.peak_frequency
+                for region in (
+                    *trusted_regions, *(region for _, region in candidates),
+                )
+            ],
+        )
+        trusted_axis.plot(
+            curve_frequency,
+            curve_psd,
+            color=COLORS[axis_name],
+            label=f"{axis_name} Trusted Median PSD",
+        )
+        hover_peaks = []
+        for region, (peak_frequency, peak_psd) in zip(
+            trusted_regions, tops[:len(trusted_regions)],
+        ):
+            trusted_axis.scatter(
+                peak_frequency, peak_psd, color=COLORS[axis_name], marker="x",
+            )
+            trusted_axis.annotate(
+                f"{reported_median_frequency(region.median_evidence):.2f} Hz\n"
+                f"{region.support_count}/{total_sessions}",
+                xy=(peak_frequency, peak_psd),
+                xytext=(0, 6),
+                textcoords="offset points",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+            )
+            hover_peaks.append((
+                peak_frequency, peak_psd,
+                peak_hover_text(axis_name, region, total_sessions, trusted_config),
+            ))
+        for (rank, region), (top_frequency, top_psd) in zip(
+            candidates, tops[len(trusted_regions):],
+        ):
+            # Open circle: the strongest of what stayed below the threshold.
+            trusted_axis.scatter(
+                top_frequency,
+                top_psd,
+                facecolors="none",
+                edgecolors=COLORS[axis_name],
+                marker="o",
+                s=45,
+            )
+            trusted_axis.annotate(
+                f"{reported_median_frequency(region.median_evidence):.2f} Hz\n"
+                f"{region.support_count}/{total_sessions}",
+                xy=(top_frequency, top_psd),
+                xytext=(0, 6),
+                textcoords="offset points",
+                ha="center",
+                va="bottom",
+                fontsize=7,
+                color="0.35",
+            )
+            hover_peaks.append((
+                top_frequency, top_psd,
+                peak_hover_text(
+                    axis_name, region, total_sessions, trusted_config, rank,
+                ),
+            ))
+        trusted_axis.set_title(f"{axis_name} axis — Trusted Median PSD")
+        trusted_axis.set_ylabel("Trusted PSD [g²/Hz]")
+        # Headroom so the labels of the highest peaks stay under the title.
+        trusted_axis.set_ylim(0, float(np.max(curve_psd)) * 1.22)
+        trusted_axis.set_xlim(analysis_min_frequency, analysis_max_frequency)
+        trusted_axis.grid(True, alpha=0.25, linewidth=0.6)
+        if panel_index == 0:
+            trusted_axis.legend()
+        annotation = trusted_axis.annotate(
+            "",
+            xy=(0, 0),
+            xytext=(14, 14),
+            textcoords="offset points",
+            fontsize=8,
+            bbox={"boxstyle": "round", "fc": "white", "ec": "0.5", "alpha": 0.95},
+            zorder=10,
+        )
+        annotation.set_visible(False)
+        panels.append(HoverPanel(
+            trusted_axis, axis_name, curve_frequency, curve_psd,
+            hover_peaks, annotation,
+        ))
+    axes[-1].set_xlabel("Frequency, Hz")
+    return panels
+
+
+def attach_hover(fig, state: dict[str, Any]) -> None:
+    """Tooltip at the curve point under the mouse, or at a marked peak."""
+
+    def on_move(event) -> None:
+        changed = False
+        for panel in state["panels"]:
+            if event.inaxes is not panel.ax or event.xdata is None:
+                if panel.annotation.get_visible():
+                    panel.annotation.set_visible(False)
+                    changed = True
+                continue
+            nearest = None
+            for frequency, psd, text in panel.peaks:
+                x, y = panel.ax.transData.transform((frequency, psd))
+                distance = float(np.hypot(x - event.x, y - event.y))
+                if distance <= 12.0 and (nearest is None or distance < nearest[0]):
+                    nearest = (distance, frequency, psd, text)
+            if nearest is not None:
+                _, frequency, psd, text = nearest
+            else:
+                index = int(np.argmin(np.abs(panel.frequency - event.xdata)))
+                frequency = float(panel.frequency[index])
+                psd = float(panel.psd[index])
+                text = f"{panel.axis_name} {frequency:.3f} Hz\nPSD {psd:.3g} g²/Hz"
+            right_side = event.x > fig.bbox.width * 0.7
+            upper_half = event.y > panel.ax.bbox.y0 + 0.5 * panel.ax.bbox.height
+            panel.annotation.xy = (frequency, psd)
+            panel.annotation.set_text(text)
+            panel.annotation.set_position(
+                (-14 if right_side else 14, -14 if upper_half else 14),
+            )
+            panel.annotation.set_horizontalalignment("right" if right_side else "left")
+            panel.annotation.set_verticalalignment("top" if upper_half else "bottom")
+            panel.annotation.set_visible(True)
+            changed = True
+        if changed:
+            fig.canvas.draw_idle()
+
+    fig.canvas.mpl_connect("motion_notify_event", on_move)
+
+
+def add_tk_controls(fig, labels: list[str], state: dict[str, Any], redraw) -> bool:
+    """Run list and axis check boxes in the toolbar of a Tk window."""
+    toolbar = getattr(fig.canvas.manager, "toolbar", None)
+    try:
+        import tkinter as tk
+        from tkinter import ttk
+    except ImportError:
+        return False
+    if not isinstance(toolbar, tk.Widget):
+        return False
+    if len(labels) > 1:
+        tk.Label(toolbar, text="   Run:").pack(side=tk.LEFT)
+        choice = ttk.Combobox(
+            toolbar,
+            values=labels,
+            state="readonly",
+            width=max(len(label) for label in labels) + 2,
+        )
+        choice.current(state["run"])
+        choice.pack(side=tk.LEFT)
+
+        def on_select(_event) -> None:
+            state["run"] = choice.current()
+            redraw()
+
+        choice.bind("<<ComboboxSelected>>", on_select)
+    tk.Label(toolbar, text="   Axes:").pack(side=tk.LEFT)
+    state["tk_variables"] = []
+    for axis_name in AXIS_NAMES:
+        variable = tk.BooleanVar(master=toolbar, value=state["shown"][axis_name])
+
+        def toggle(name: str = axis_name, value=variable) -> None:
+            state["shown"][name] = bool(value.get())
+            redraw()
+
+        tk.Checkbutton(
+            toolbar, text=axis_name, variable=variable, command=toggle,
+        ).pack(side=tk.LEFT)
+        state["tk_variables"].append(variable)
+    return True
+
+
+def show_trusted_viewer(
+    runs: list[tuple[str, AnalysisResult, ApplicationConfig]],
+    title: str,
+) -> None:
+    """One interactive window with figure 2.
+
+    A list chooses the virtual run when there are several, check boxes show
+    or hide the axes and the shown ones fill the window, and the mouse gives
+    a tooltip with the frequency and, at a marked peak, its numbers. Without
+    a Tk window the arrow keys change the run and x, y, z toggle the axes.
+    """
+    fig = plt.figure(figsize=(14, 10), constrained_layout=True)
+    state: dict[str, Any] = {
+        "run": 0,
+        "shown": {name: True for name in AXIS_NAMES},
+        "panels": [],
+    }
+
+    def redraw() -> None:
+        label, analysis_result, run_config = runs[state["run"]]
+        state["panels"] = draw_trusted_figure(
+            fig,
+            analysis_result,
+            run_config,
+            tuple(name for name in AXIS_NAMES if state["shown"][name]),
+            f"{title} — {label}" if label else title,
+        )
+        fig.canvas.draw_idle()
+
+    redraw()
+    attach_hover(fig, state)
+    if not add_tk_controls(fig, [label for label, _, _ in runs], state, redraw):
+
+        def on_key(event) -> None:
+            if event.key in ("left", "right") and len(runs) > 1:
+                step = 1 if event.key == "right" else -1
+                state["run"] = (state["run"] + step) % len(runs)
+                redraw()
+            elif event.key in ("x", "y", "z"):
+                name = event.key.upper()
+                state["shown"][name] = not state["shown"][name]
+                redraw()
+
+        fig.canvas.mpl_connect("key_press_event", on_key)
+    plt.show()
+
+
 def build_analysis_figures(
     analysis_result: AnalysisResult,
     run_config: ApplicationConfig,
@@ -4362,112 +4689,8 @@ def build_analysis_figures(
     if consolidated_frequency_regions is None:
         raise RuntimeError("Consolidated frequency regions were not built")
 
-    trusted_fig, trusted_axes = plt.subplots(
-        3,
-        1,
-        figsize=(14, 10),
-        sharex=True,
-        constrained_layout=True,
-    )
-
-    trusted_regions_by_axis = {
-        "X": consolidated_frequency_regions.x,
-        "Y": consolidated_frequency_regions.y,
-        "Z": consolidated_frequency_regions.z,
-    }
-
-    for trusted_axis, (axis_name, axis_data) in zip(
-        trusted_axes,
-        visualization_axes.items(),
-    ):
-        trusted_regions = [
-            region for region in trusted_regions_by_axis[axis_name]
-            if is_trusted_frequency_cluster(
-                region,
-                config.visualization.trusted_frequency,
-            )
-        ]
-        candidates = select_candidate_regions(
-            trusted_regions_by_axis[axis_name],
-            config.visualization.trusted_frequency,
-        )
-        # The tops of the plotted curve: Med.Freq is computed on the median
-        # PSD, and the trusted weight is the same over the peak.
-        curve_frequency, curve_psd, tops = peak_tops_on_curve(
-            axis_data.frequency,
-            axis_data.trusted_frequency_psd,
-            [
-                region.median_evidence.peak_frequency
-                for region in (
-                    *trusted_regions, *(region for _, region in candidates),
-                )
-            ],
-        )
-        region_tops = tops[:len(trusted_regions)]
-        for (_, region), (top_frequency, top_psd) in zip(
-            candidates, tops[len(trusted_regions):],
-        ):
-            # Open circle: the strongest of what stayed below the threshold.
-            trusted_axis.scatter(
-                top_frequency,
-                top_psd,
-                facecolors="none",
-                edgecolors=COLORS[axis_name],
-                marker="o",
-                s=45,
-            )
-            trusted_axis.annotate(
-                f"{reported_median_frequency(region.median_evidence):.2f} Hz\n"
-                f"{region.support_count}/"
-                f"{aligned_psd.x_stack.shape[0]}\n"
-                f"{region.median_evidence.prominence_db:.2f} dB",
-                xy=(top_frequency, top_psd),
-                xytext=(0, 6),
-                textcoords="offset points",
-                ha="center",
-                va="bottom",
-                fontsize=7,
-                color="0.35",
-            )
-        trusted_axis.plot(
-            curve_frequency,
-            curve_psd,
-            color=COLORS[axis_name],
-            label=f"{axis_name} Trusted Median PSD",
-        )
-        for region, (peak_frequency, peak_psd) in zip(trusted_regions, region_tops):
-            evidence = region.median_evidence
-            trusted_axis.scatter(
-                peak_frequency,
-                peak_psd,
-                color=COLORS[axis_name],
-                marker="x",
-            )
-            trusted_axis.annotate(
-                f"{reported_median_frequency(evidence):.2f} Hz\n"
-                f"{region.support_count}/"
-                f"{aligned_psd.x_stack.shape[0]}\n"
-                f"{evidence.prominence_db:.2f} dB",
-                xy=(peak_frequency, peak_psd),
-                xytext=(0, 6),
-                textcoords="offset points",
-                ha="center",
-                va="bottom",
-                fontsize=8,
-            )
-        trusted_axis.set_title(f"{axis_name} axis — Trusted Median PSD")
-        trusted_axis.set_ylabel("Trusted PSD [g²/Hz]")
-        trusted_axis.set_ylim(bottom=0)
-        trusted_axis.set_xlim(
-            analysis_min_frequency,
-            analysis_max_frequency,
-        )
-        trusted_axis.grid(True, alpha=0.25, linewidth=0.6)
-        if axis_name == "X":
-            trusted_axis.legend()
-
-    trusted_axes[-1].set_xlabel("Frequency, Hz")
-    trusted_fig.suptitle("Trusted Median PSD")
+    trusted_fig = plt.figure(figsize=(14, 10), constrained_layout=True)
+    draw_trusted_figure(trusted_fig, analysis_result, run_config)
 
     return stat_fig, trusted_fig
 
@@ -4694,11 +4917,15 @@ def run_measurement(
     if run_result_paths.raw.exists():
         print(f"  {run_result_paths.raw}")
 
+    plt.close(stat_fig)
+    plt.close(trusted_fig)
     if show_figures:
-        plt.show()
-    else:
-        plt.close(stat_fig)
-        plt.close(trusted_fig)
+        # Figure 1 is only saved; figure 2 opens as the interactive window.
+        show_trusted_viewer(
+            [("", analysis_result, config)],
+            f"{run_result_paths.log.stem} — {session_layout_name(config)}, "
+            f"nperseg {config.welch.nperseg}",
+        )
 
     return stop_requested
 
@@ -5055,6 +5282,39 @@ def save_replay_summaries(
             )
 
 
+def show_replay_layout(
+    source_raw_path: Path,
+    layout: str,
+    base_config: ApplicationConfig,
+) -> None:
+    """Analyse every virtual run of one layout and open figure 2 of them in
+    one interactive window; nothing is written."""
+    raw = load_raw_measurement(source_raw_path)
+    packets_per_session, target_sessions = parse_layout(layout)
+    run_slices = build_virtual_run_slices(
+        raw.x.shape[0], packets_per_session, target_sessions,
+    )
+    if not run_slices:
+        raise ValueError(f"{source_raw_path.name} is too short for layout {layout}")
+    replay_config = build_replay_config(
+        base_config, raw, packets_per_session, target_sessions,
+    )
+    runs = []
+    for index, (start_packet, end_packet) in enumerate(run_slices, start=1):
+        sessions = build_sessions_from_raw(
+            raw, start_packet, end_packet, replay_config,
+        )
+        runs.append((
+            f"run {index}/{len(run_slices)}, packets {start_packet + 1}–{end_packet}",
+            analyze_sessions(sessions, replay_config),
+            replay_config,
+        ))
+    show_trusted_viewer(
+        runs,
+        f"{source_raw_path.stem} — {layout}, nperseg {replay_config.welch.nperseg}",
+    )
+
+
 def replay_raw_measurement(
     source_raw_path: Path,
     virtual_modes: list[str],
@@ -5160,11 +5420,18 @@ try:
     if cli_arguments.replay is not None:
         if total_runs != 1:
             raise ValueError("--repeat cannot be used with --replay")
-        replay_raw_measurement(
-            cli_arguments.replay,
-            cli_arguments.virtual_mode,
-            config,
-        )
+        if cli_arguments.show:
+            show_replay_layout(
+                cli_arguments.replay,
+                cli_arguments.virtual_mode[0],
+                config,
+            )
+        else:
+            replay_raw_measurement(
+                cli_arguments.replay,
+                cli_arguments.virtual_mode,
+                config,
+            )
     else:
         for run_number in range(1, total_runs + 1):
             stop_series = run_measurement(
