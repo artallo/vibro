@@ -96,6 +96,11 @@ layout (`4x4 ... 4x64`, `8x4 ... 8x32`) and per virtual run, plus
 On Windows, when stdout is redirected to a file, run with `PYTHONUTF8=1`
 (the report contains `σ`).
 
+The figures and the `--show` viewer window come in four themes: `light`
+(default), `light-contrast`, `dark` and `dark-contrast`. Set `theme` in
+`[visualization]` of `config.toml`, pass `--theme dark` for one run, or
+pick one from the Theme list of the window.
+
 ## Frequency-family analysis (research layer)
 
 `family_analysis.py` reads one or more replay result directories and groups

@@ -68,6 +68,12 @@ separation_sigma = 2.0
 # [1024, 2048, 4096] until 2026-10-02.
 nperseg = [2048]
 
+[visualization]
+# Colours of the figures of main.py and of its viewer window: light,
+# light-contrast, dark or dark-contrast. main.py --theme overrides it for one
+# run; the viewer window has a Theme list.
+theme = "light"
+
 [visualization.trusted_frequency]
 min_support_fraction = 0.50
 # The Med.Prom threshold is set per layout in [old_detector.nperseg_<n>].

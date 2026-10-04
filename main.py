@@ -37,11 +37,145 @@ ODR_PARAMETER_BY_HZ = {
     62.5: 0x02,
 }
 
-COLORS = {
-    "X": "tab:blue",
-    "Y": "tab:orange",
-    "Z": "tab:green",
+@dataclass(frozen=True)
+class Theme:
+    """Colours and line weights of the figures and of the viewer window.
+
+    THEMES holds four: light and dark, each with a high-contrast variant.
+    The series colours of X, Y and Z were checked with a colour-vision
+    validator on their surface; the high-contrast variants raise contrast
+    moderately, they do not go to pure black on white.
+    """
+
+    name: str
+    figure_background: str
+    axes_background: str
+    text: str
+    muted_text: str
+    grid: str
+    spine: str
+    series: dict[str, str]
+    # Band boundaries and threshold lines of figure 1.
+    accent: str
+    # The local window power stability curve of figure 1.
+    secondary: str
+    tooltip_background: str
+    tooltip_border: str
+    line_width: float
+
+
+THEMES: dict[str, Theme] = {
+    "light": Theme(
+        name="light",
+        figure_background="#f4f4f1",
+        axes_background="#ffffff",
+        text="#1f2328",
+        muted_text="#5b6168",
+        grid="#dcdee2",
+        spine="#b8bcc2",
+        series={"X": "#2a78d6", "Y": "#eb6834", "Z": "#1baf7a"},
+        accent="#6b7280",
+        secondary="#8b5cf6",
+        tooltip_background="#ffffff",
+        tooltip_border="#9aa0a6",
+        line_width=1.4,
+    ),
+    "light-contrast": Theme(
+        name="light-contrast",
+        figure_background="#ffffff",
+        axes_background="#ffffff",
+        text="#000000",
+        muted_text="#2d3136",
+        grid="#b4b8be",
+        spine="#000000",
+        series={"X": "#1c5cab", "Y": "#c2491c", "Z": "#0f7a52"},
+        accent="#3b3f45",
+        secondary="#6d28d9",
+        tooltip_background="#ffffff",
+        tooltip_border="#000000",
+        line_width=1.8,
+    ),
+    "dark": Theme(
+        name="dark",
+        figure_background="#1b1d21",
+        axes_background="#24262b",
+        text="#e3e6ea",
+        muted_text="#9aa1aa",
+        grid="#363a41",
+        spine="#4a4f58",
+        series={"X": "#3987e5", "Y": "#d95926", "Z": "#199e70"},
+        accent="#9aa1aa",
+        secondary="#b39ddb",
+        tooltip_background="#2c2f36",
+        tooltip_border="#5b616b",
+        line_width=1.4,
+    ),
+    "dark-contrast": Theme(
+        name="dark-contrast",
+        figure_background="#0e0f11",
+        axes_background="#121315",
+        text="#fafafa",
+        muted_text="#cfd3d8",
+        grid="#4a5059",
+        spine="#8a9099",
+        series={"X": "#4f93e8", "Y": "#e5602f", "Z": "#1fa872"},
+        accent="#cfd3d8",
+        secondary="#c4b5fd",
+        tooltip_background="#1c1e22",
+        tooltip_border="#c0c4ca",
+        line_width=1.8,
+    ),
 }
+DEFAULT_THEME = "light"
+
+
+def resolve_theme(name: str) -> Theme:
+    try:
+        return THEMES[name]
+    except KeyError:
+        raise ValueError(
+            f"unknown theme {name!r}; one of {', '.join(THEMES)}"
+        ) from None
+
+
+def theme_rc_params(theme: Theme) -> dict[str, Any]:
+    """matplotlib settings of a theme, for ``plt.rc_context`` around drawing.
+
+    Only artists created inside the context take them, so a redraw of the
+    viewer window recreates its axes under the chosen theme.
+    """
+    return {
+        "figure.facecolor": theme.figure_background,
+        "figure.edgecolor": theme.figure_background,
+        "figure.titlesize": 13,
+        "figure.titleweight": "bold",
+        "axes.facecolor": theme.axes_background,
+        "axes.edgecolor": theme.spine,
+        "axes.linewidth": 0.8,
+        "axes.labelcolor": theme.text,
+        "axes.labelsize": 10,
+        "axes.titlecolor": theme.text,
+        "axes.titlelocation": "left",
+        "axes.titlesize": 11,
+        "axes.titleweight": "bold",
+        "axes.titlepad": 8,
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+        "xtick.color": theme.spine,
+        "ytick.color": theme.spine,
+        "xtick.labelcolor": theme.muted_text,
+        "ytick.labelcolor": theme.muted_text,
+        "xtick.direction": "out",
+        "ytick.direction": "out",
+        "grid.color": theme.grid,
+        "grid.alpha": 1.0,
+        "grid.linewidth": 0.6,
+        "text.color": theme.text,
+        "legend.frameon": False,
+        "legend.labelcolor": theme.text,
+        "legend.fontsize": 9,
+        "lines.linewidth": theme.line_width,
+    }
 
 # Session layouts, packets per session x sessions per run, are listed per
 # old detector mode in config.toml with their Med.Prom thresholds; replay and
@@ -132,6 +266,8 @@ class FrequencyClusteringConfig:
 @dataclass(frozen=True)
 class VisualizationConfig:
     trusted_frequency: TrustedFrequencyVisualizationConfig
+    # A key of THEMES: [visualization] theme in config.toml, --theme for a run.
+    theme: str = DEFAULT_THEME
 
 
 @dataclass(frozen=True)
@@ -433,6 +569,8 @@ def load_config(
     trusted_frequency_data = raw_config["visualization"][
         "trusted_frequency"
     ]
+    theme_name = str(raw_config["visualization"].get("theme", DEFAULT_THEME))
+    resolve_theme(theme_name)
     consolidation_data = raw_config["analysis"][
         "frequency_cluster_consolidation"
     ]
@@ -532,6 +670,7 @@ def load_config(
                     "weak_trusted_weight"
                 ],
             ),
+            theme=theme_name,
         ),
         frequency_clustering=frequency_clustering,
         frequency_cluster_consolidation=FrequencyClusterConsolidationConfig(
@@ -580,6 +719,13 @@ def parse_cli_arguments(
         default=None,
         help="old detector mode for this run, e.g. 1024 or 2048; it needs an "
              "[old_detector.nperseg_<n>] section (default: [welch] nperseg)",
+    )
+    parser.add_argument(
+        "--theme",
+        choices=list(THEMES),
+        default=None,
+        help="colours of the figures and the viewer window "
+             "(default: [visualization] theme, light)",
     )
     parser.add_argument(
         "--config",
@@ -645,6 +791,13 @@ def apply_cli_overrides(
     nperseg = getattr(arguments, "nperseg", None)
     if nperseg is not None:
         config = select_old_detector_mode(config, nperseg)
+    theme_name = getattr(arguments, "theme", None)
+    if theme_name is not None:
+        resolve_theme(theme_name)
+        config = replace(
+            config,
+            visualization=replace(config.visualization, theme=theme_name),
+        )
     effective_config = replace(
         config,
         sensor=replace(config.sensor, odr_hz=odr_hz),
@@ -3218,7 +3371,10 @@ def print_candidate_regions(
 def draw_analysis_bands(
     ax,
     analysis_bands: list[AnalysisBand],
+    theme: Theme | None = None,
 ) -> None:
+    if theme is None:
+        theme = THEMES[DEFAULT_THEME]
     boundaries = sorted({
         boundary
         for band in analysis_bands
@@ -3228,9 +3384,10 @@ def draw_analysis_bands(
     for boundary in boundaries:
         ax.axvline(
             boundary,
+            color=theme.accent,
             linestyle="--",
             linewidth=0.8,
-            alpha=0.5,
+            alpha=0.6,
         )
 
     for band in analysis_bands:
@@ -3243,7 +3400,7 @@ def draw_analysis_bands(
             ha="center",
             va="top",
             fontsize="small",
-            alpha=0.7,
+            color=theme.muted_text,
         )
 
 
@@ -4300,13 +4457,32 @@ def draw_trusted_figure(
     run_config: ApplicationConfig,
     axis_names: tuple[str, ...] = AXIS_NAMES,
     title: str = "Trusted Median PSD",
+    theme: Theme | None = None,
 ) -> list[HoverPanel]:
     """Figure 2 on ``fig``: one panel per axis in ``axis_names``.
 
     Returns the panels with what hover tooltips need. The saved figure 2
-    and the interactive window draw it alike.
+    and the interactive window draw it alike, in ``theme`` or in the one of
+    ``run_config``.
     """
+    if theme is None:
+        theme = resolve_theme(run_config.visualization.theme)
+    with plt.rc_context(theme_rc_params(theme)):
+        return draw_trusted_panels(
+            fig, analysis_result, run_config, axis_names, title, theme,
+        )
+
+
+def draw_trusted_panels(
+    fig,
+    analysis_result: AnalysisResult,
+    run_config: ApplicationConfig,
+    axis_names: tuple[str, ...],
+    title: str,
+    theme: Theme,
+) -> list[HoverPanel]:
     fig.clear()
+    fig.set_facecolor(theme.figure_background)
     fig.suptitle(title)
     if not axis_names:
         fig.text(0.5, 0.5, "All axes are hidden", ha="center", va="center")
@@ -4351,7 +4527,7 @@ def draw_trusted_figure(
         trusted_axis.plot(
             curve_frequency,
             curve_psd,
-            color=COLORS[axis_name],
+            color=theme.series[axis_name],
             label=f"{axis_name} Trusted Median PSD",
         )
         hover_peaks = []
@@ -4359,17 +4535,20 @@ def draw_trusted_figure(
             trusted_regions, tops[:len(trusted_regions)],
         ):
             trusted_axis.scatter(
-                peak_frequency, peak_psd, color=COLORS[axis_name], marker="x",
+                peak_frequency, peak_psd, color=theme.series[axis_name],
+                marker="x", s=50, linewidths=1.6, zorder=4,
             )
             trusted_axis.annotate(
                 f"{reported_median_frequency(region.median_evidence):.2f} Hz\n"
                 f"{region.support_count}/{total_sessions}",
                 xy=(peak_frequency, peak_psd),
-                xytext=(0, 6),
+                xytext=(0, 7),
                 textcoords="offset points",
                 ha="center",
                 va="bottom",
                 fontsize=8,
+                fontweight="bold",
+                color=theme.text,
             )
             hover_peaks.append((
                 peak_frequency, peak_psd,
@@ -4383,20 +4562,22 @@ def draw_trusted_figure(
                 top_frequency,
                 top_psd,
                 facecolors="none",
-                edgecolors=COLORS[axis_name],
+                edgecolors=theme.series[axis_name],
                 marker="o",
                 s=45,
+                linewidths=1.2,
+                zorder=4,
             )
             trusted_axis.annotate(
                 f"{reported_median_frequency(region.median_evidence):.2f} Hz\n"
                 f"{region.support_count}/{total_sessions}",
                 xy=(top_frequency, top_psd),
-                xytext=(0, 6),
+                xytext=(0, 7),
                 textcoords="offset points",
                 ha="center",
                 va="bottom",
                 fontsize=7,
-                color="0.35",
+                color=theme.muted_text,
             )
             hover_peaks.append((
                 top_frequency, top_psd,
@@ -4409,16 +4590,23 @@ def draw_trusted_figure(
         # Headroom so the labels of the highest peaks stay under the title.
         trusted_axis.set_ylim(0, float(np.max(curve_psd)) * 1.22)
         trusted_axis.set_xlim(analysis_min_frequency, analysis_max_frequency)
-        trusted_axis.grid(True, alpha=0.25, linewidth=0.6)
+        trusted_axis.grid(True)
+        trusted_axis.set_axisbelow(True)
         if panel_index == 0:
-            trusted_axis.legend()
+            trusted_axis.legend(loc="upper right")
         annotation = trusted_axis.annotate(
             "",
             xy=(0, 0),
             xytext=(14, 14),
             textcoords="offset points",
             fontsize=8,
-            bbox={"boxstyle": "round", "fc": "white", "ec": "0.5", "alpha": 0.95},
+            color=theme.text,
+            bbox={
+                "boxstyle": "round,pad=0.4",
+                "fc": theme.tooltip_background,
+                "ec": theme.tooltip_border,
+                "alpha": 0.96,
+            },
             zorder=10,
         )
         annotation.set_visible(False)
@@ -4471,8 +4659,66 @@ def attach_hover(fig, state: dict[str, Any]) -> None:
     fig.canvas.mpl_connect("motion_notify_event", on_move)
 
 
+def style_tk_toolbar(toolbar, window, theme: Theme) -> None:
+    """Paint the Tk toolbar, its widgets and the window in ``theme``."""
+    import tkinter as tk
+    from tkinter import ttk
+
+    def paint(widget, **options) -> None:
+        for key, value in options.items():
+            try:
+                widget.configure({key: value})
+            except tk.TclError:
+                pass
+
+    paint(toolbar, bg=theme.figure_background)
+    if window is not None:
+        paint(window, bg=theme.figure_background)
+    for child in toolbar.winfo_children():
+        paint(
+            child,
+            bg=theme.figure_background,
+            fg=theme.text,
+            activebackground=theme.axes_background,
+            activeforeground=theme.text,
+            selectcolor=theme.axes_background,
+            highlightthickness=0,
+        )
+    # The Home and Save icons: matplotlib draws them light on a dark bar
+    # when it is asked to repaint them.
+    for button in getattr(toolbar, "_buttons", {}).values():
+        try:
+            toolbar._set_image_for_button(button)
+        except Exception:
+            pass
+    style = ttk.Style(toolbar)
+    try:
+        style.theme_use("clam")
+    except tk.TclError:
+        pass
+    style.configure(
+        "TCombobox",
+        fieldbackground=theme.axes_background,
+        background=theme.figure_background,
+        foreground=theme.text,
+        arrowcolor=theme.text,
+        bordercolor=theme.spine,
+        lightcolor=theme.figure_background,
+        darkcolor=theme.figure_background,
+    )
+    style.map(
+        "TCombobox",
+        fieldbackground=[("readonly", theme.axes_background)],
+        foreground=[("readonly", theme.text)],
+        selectbackground=[("readonly", theme.axes_background)],
+        selectforeground=[("readonly", theme.text)],
+    )
+    toolbar.option_add("*TCombobox*Listbox.background", theme.axes_background)
+    toolbar.option_add("*TCombobox*Listbox.foreground", theme.text)
+
+
 def add_tk_controls(fig, labels: list[str], state: dict[str, Any], redraw) -> bool:
-    """Run list and axis check boxes in the toolbar of a Tk window."""
+    """Run list, axis check boxes and theme list in the toolbar of a Tk window."""
     toolbar = getattr(fig.canvas.manager, "toolbar", None)
     try:
         import tkinter as tk
@@ -4513,6 +4759,25 @@ def add_tk_controls(fig, labels: list[str], state: dict[str, Any], redraw) -> bo
             toolbar, text=axis_name, variable=variable, command=toggle,
         ).pack(side=tk.LEFT)
         state["tk_variables"].append(variable)
+    tk.Label(toolbar, text="   Theme:").pack(side=tk.LEFT)
+    theme_names = list(THEMES)
+    theme_choice = ttk.Combobox(
+        toolbar,
+        values=theme_names,
+        state="readonly",
+        width=max(len(name) for name in theme_names) + 2,
+    )
+    theme_choice.current(theme_names.index(state["theme"]))
+    theme_choice.pack(side=tk.LEFT)
+    window = getattr(fig.canvas.manager, "window", None)
+
+    def on_theme(_event) -> None:
+        state["theme"] = theme_names[theme_choice.current()]
+        style_tk_toolbar(toolbar, window, THEMES[state["theme"]])
+        redraw()
+
+    theme_choice.bind("<<ComboboxSelected>>", on_theme)
+    style_tk_toolbar(toolbar, window, THEMES[state["theme"]])
     return True
 
 
@@ -4523,9 +4788,10 @@ def show_trusted_viewer(
     """One interactive window with figure 2.
 
     A list chooses the virtual run when there are several, check boxes show
-    or hide the axes and the shown ones fill the window, and the mouse gives
-    a tooltip with the frequency and, at a marked peak, its numbers. Without
-    a Tk window the arrow keys change the run and x, y, z toggle the axes.
+    or hide the axes and the shown ones fill the window, a list switches the
+    theme, and the mouse gives a tooltip with the frequency and, at a marked
+    peak, its numbers. Without a Tk window the arrow keys change the run,
+    x, y, z toggle the axes and t cycles the themes.
     """
     if plt.get_backend().lower() == "tkagg":
         from matplotlib.backends.backend_tkagg import NavigationToolbar2Tk
@@ -4549,6 +4815,7 @@ def show_trusted_viewer(
         "run": 0,
         "shown": {name: True for name in AXIS_NAMES},
         "panels": [],
+        "theme": runs[0][2].visualization.theme,
     }
 
     def redraw() -> None:
@@ -4559,6 +4826,7 @@ def show_trusted_viewer(
             run_config,
             tuple(name for name in AXIS_NAMES if state["shown"][name]),
             f"{title} — {label}" if label else title,
+            THEMES[state["theme"]],
         )
         fig.canvas.draw_idle()
 
@@ -4575,6 +4843,10 @@ def show_trusted_viewer(
                 name = event.key.upper()
                 state["shown"][name] = not state["shown"][name]
                 redraw()
+            elif event.key == "t":
+                names = list(THEMES)
+                state["theme"] = names[(names.index(state["theme"]) + 1) % len(names)]
+                redraw()
 
         fig.canvas.mpl_connect("key_press_event", on_key)
     plt.show()
@@ -4584,24 +4856,42 @@ def build_analysis_figures(
     analysis_result: AnalysisResult,
     run_config: ApplicationConfig,
 ):
-    aligned_psd = analysis_result.aligned_psd
     visualization_data = analysis_result.visualization_data
     consolidated_frequency_regions = (
         analysis_result.consolidated_frequency_regions
     )
-    config = run_config
     analysis_bands = run_config.analysis_bands
     analysis_min_frequency, analysis_max_frequency = (
         get_analysis_frequency_limits(analysis_bands)
     )
-
-    # ==========================================================
-    # Statistical PSD visualization
-    # ==========================================================
-
     if visualization_data is None:
         raise RuntimeError("Visualization data was not built")
 
+    theme = resolve_theme(run_config.visualization.theme)
+    with plt.rc_context(theme_rc_params(theme)):
+        stat_fig = draw_statistics_figure(
+            visualization_data, analysis_bands, theme,
+            analysis_min_frequency, analysis_max_frequency,
+        )
+
+    if consolidated_frequency_regions is None:
+        raise RuntimeError("Consolidated frequency regions were not built")
+
+    with plt.rc_context(theme_rc_params(theme)):
+        trusted_fig = plt.figure(figsize=(14, 10), constrained_layout=True)
+    draw_trusted_figure(trusted_fig, analysis_result, run_config, theme=theme)
+
+    return stat_fig, trusted_fig
+
+
+def draw_statistics_figure(
+    visualization_data: VisualizationData,
+    analysis_bands: list[AnalysisBand],
+    theme: Theme,
+    analysis_min_frequency: float,
+    analysis_max_frequency: float,
+):
+    """Figure 1: median PSD and stability per axis, in ``theme``."""
     stat_fig, stat_axes = plt.subplots(
         6,
         1,
@@ -4620,7 +4910,7 @@ def build_analysis_figures(
         psd_axis = stat_axes[axis_index * 2]
         stability_axis = stat_axes[axis_index * 2 + 1]
 
-        draw_analysis_bands(psd_axis, analysis_bands)
+        draw_analysis_bands(psd_axis, analysis_bands, theme)
         curve_frequency, curve_psd, peak_tops = peak_tops_on_curve(
             axis_data.frequency,
             axis_data.median_psd,
@@ -4629,7 +4919,7 @@ def build_analysis_figures(
         psd_axis.plot(
             curve_frequency,
             curve_psd,
-            color=COLORS[axis_name],
+            color=theme.series[axis_name],
             label=f"{axis_name} Median PSD",
         )
         peak_top_frequencies = np.array([top[0] for top in peak_tops])
@@ -4637,8 +4927,11 @@ def build_analysis_figures(
         psd_axis.scatter(
             peak_top_frequencies,
             peak_top_values,
-            color=COLORS[axis_name],
+            color=theme.series[axis_name],
             marker="x",
+            s=50,
+            linewidths=1.6,
+            zorder=4,
             label="Stable peaks",
         )
         annotate_peak_frequencies(
@@ -4651,22 +4944,23 @@ def build_analysis_figures(
         psd_axis.set_title(f"{axis_name} axis — Median PSD")
         psd_axis.set_ylabel("PSD [g²/Hz]")
         psd_axis.set_xlim(analysis_min_frequency, analysis_max_frequency)
-        psd_axis.grid(True, alpha=0.25, linewidth=0.6)
+        psd_axis.grid(True)
+        psd_axis.set_axisbelow(True)
         if axis_index == 0:
-            psd_axis.legend()
+            psd_axis.legend(loc="upper right")
 
         stability_axis.plot(
             axis_data.frequency,
             axis_data.stability,
-            color=COLORS[axis_name],
+            color=theme.series[axis_name],
             label="Bin stability",
         )
         stability_axis.plot(
             axis_data.frequency,
             axis_data.local_window_power_stability,
-            color="tab:purple",
+            color=theme.secondary,
             linewidth=1.0,
-            alpha=0.75,
+            alpha=0.85,
             label="Local window power stability",
         )
         for band_index, band in enumerate(analysis_bands):
@@ -4674,9 +4968,10 @@ def build_analysis_figures(
                 band.min_stability,
                 band.min_frequency,
                 band.max_frequency,
+                color=theme.accent,
                 linestyle="--",
                 linewidth=1.0,
-                alpha=0.6,
+                alpha=0.8,
                 label=(
                     "Minimum window-power stability"
                     if band_index == 0
@@ -4686,8 +4981,11 @@ def build_analysis_figures(
         stability_axis.scatter(
             axis_data.peak_frequencies,
             axis_data.peak_window_power_stability,
-            color=COLORS[axis_name],
+            color=theme.series[axis_name],
             marker="x",
+            s=50,
+            linewidths=1.6,
+            zorder=4,
             label="Stable peaks — window power",
         )
         stability_axis.set_title(f"{axis_name} axis — Stability")
@@ -4696,21 +4994,14 @@ def build_analysis_figures(
             analysis_min_frequency,
             analysis_max_frequency,
         )
-        stability_axis.grid(True, alpha=0.25, linewidth=0.6)
+        stability_axis.grid(True)
+        stability_axis.set_axisbelow(True)
         if axis_index == 0:
-            stability_axis.legend()
+            stability_axis.legend(loc="upper right")
 
     stat_axes[-1].set_xlabel("Frequency, Hz")
     stat_fig.suptitle("Statistical vibration analysis")
-
-
-    if consolidated_frequency_regions is None:
-        raise RuntimeError("Consolidated frequency regions were not built")
-
-    trusted_fig = plt.figure(figsize=(14, 10), constrained_layout=True)
-    draw_trusted_figure(trusted_fig, analysis_result, run_config)
-
-    return stat_fig, trusted_fig
+    return stat_fig
 
 
 

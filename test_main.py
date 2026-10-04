@@ -9,6 +9,7 @@ Run with: python -m unittest test_main
 from __future__ import annotations
 
 import csv
+import os
 import subprocess
 import sys
 import tempfile
@@ -88,6 +89,70 @@ class ShowTests(unittest.TestCase):
             )
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
             self.assertFalse((root / "replay").exists())
+
+
+def figure2_background(replay_root: Path) -> np.ndarray:
+    """Mean RGB of the top-left corner of the only figure2.png under ``replay_root``."""
+    import matplotlib.image
+
+    (figure_path,) = list(replay_root.rglob("figure2.png"))
+    image = matplotlib.image.imread(figure_path)
+    return image[:8, :8, :3].mean(axis=(0, 1))
+
+
+def write_config_with_theme(path: Path, theme: str) -> None:
+    """A copy of config.toml whose [visualization] theme is ``theme``."""
+    text = MAIN_PATH.with_name("config.toml").read_text(encoding="utf-8")
+    assert text.count('theme = "light"') == 1
+    path.write_text(text.replace('theme = "light"', f'theme = "{theme}"'), encoding="utf-8")
+
+
+class ThemeTests(unittest.TestCase):
+    """The colours of the figures: --theme, [visualization] theme, refusals."""
+
+    def replay(self, root: Path, *arguments: str) -> None:
+        raw = root / "tone_raw.npz"
+        if not raw.exists():
+            write_tone_record(raw, packets=64)
+        env = {**os.environ, "MPLBACKEND": "Agg"}
+        completed = run_main(
+            "--replay", str(raw), "--nperseg", "2048", "--virtual-mode", "8x8",
+            *arguments, env=env,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+
+    def test_theme_from_the_command_line_colours_the_saved_figures(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.replay(root, "--replay-root", str(root / "default"))
+            self.replay(root, "--replay-root", str(root / "dark"), "--theme", "dark")
+            # The default theme is light; the saved file carries the colours.
+            self.assertGreater(figure2_background(root / "default").min(), 0.9)
+            self.assertLess(figure2_background(root / "dark").max(), 0.2)
+
+    def test_theme_from_the_config_file_and_its_override(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "config.toml"
+            write_config_with_theme(config, "dark-contrast")
+            self.replay(root, "--config", str(config), "--replay-root", str(root / "config"))
+            self.replay(
+                root, "--config", str(config), "--replay-root", str(root / "cli"),
+                "--theme", "light-contrast",
+            )
+            self.assertLess(figure2_background(root / "config").max(), 0.2)
+            self.assertGreater(figure2_background(root / "cli").min(), 0.9)
+
+    def test_unknown_themes_are_refused(self) -> None:
+        completed = run_main("--replay", "missing_raw.npz", "--theme", "neon")
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("invalid choice: 'neon'", completed.stderr)
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config.toml"
+            write_config_with_theme(config, "neon")
+            completed = run_main("--replay", "missing_raw.npz", "--config", str(config))
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("unknown theme 'neon'", completed.stdout + completed.stderr)
 
 
 class RefinedFrequencyTests(unittest.TestCase):
