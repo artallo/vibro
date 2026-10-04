@@ -117,6 +117,9 @@ class OldDetectorModeConfig:
 @dataclass(frozen=True)
 class FrequencyClusterConsolidationConfig:
     median_frequency_tolerance_hz: float
+    # How many sessions two clusters may share and still merge. 0 is the
+    # rule until 2026-10-04: their sessions must not overlap at all.
+    max_shared_sessions: int = 0
 
 
 @dataclass(frozen=True)
@@ -535,6 +538,9 @@ def load_config(
             median_frequency_tolerance_hz=consolidation_data[
                 "median_frequency_tolerance_hz"
             ],
+            max_shared_sessions=consolidation_data.get(
+                "max_shared_sessions", 0,
+            ),
         ),
         analysis_bands=analysis_bands,
         old_detector_modes=old_detector_modes,
@@ -829,6 +835,9 @@ def trusted_threshold_line(config: ApplicationConfig) -> str:
         f"Trusted Med.Prom threshold: {threshold:g} dB "
         f"(layout {session_layout_name(config)}, "
         f"nperseg {config.welch.nperseg})\n"
+        "Clusters merge with up to "
+        f"{config.frequency_cluster_consolidation.max_shared_sessions} "
+        "shared session(s)\n"
     )
 
 
@@ -1913,6 +1922,12 @@ def validate_frequency_cluster_consolidation_config(
         raise ValueError(
             "Frequency cluster consolidation tolerance must be positive"
         )
+    shared = config.max_shared_sessions
+    if not isinstance(shared, int) or isinstance(shared, bool) or shared < 0:
+        raise ValueError(
+            "Frequency cluster consolidation max_shared_sessions must be a "
+            "non-negative integer"
+        )
 
 
 def consolidate_frequency_cluster_diagnostics(
@@ -1989,7 +2004,12 @@ def consolidate_frequency_cluster_diagnostics(
                 for source in source_group
                 for session_index in source.cluster.session_indices
             }
-            if not diagnostic_sessions.isdisjoint(group_sessions):
+            # Sessions with a peak in both clusters: two lines side by side,
+            # or one line whose session also caught a noise peak nearby.
+            if (
+                len(diagnostic_sessions & group_sessions)
+                > config.max_shared_sessions
+            ):
                 continue
             frequencies = [
                 float(frequency) for frequency in group_frequencies
@@ -3121,22 +3141,18 @@ def print_trusted_frequency_regions(
             )
 
 
-CANDIDATE_RANKS = ("Med.Prom", "support x Med.Prom")
-
-
 def select_candidate_regions(
     axis_regions: list[ConsolidatedFrequencyRegion],
     config: TrustedFrequencyVisualizationConfig,
-) -> list[tuple[str, ConsolidatedFrequencyRegion]]:
-    """At most two regions below the Med.Prom threshold, on an axis with no
-    trusted region; for the user to judge, never a result.
+) -> list[ConsolidatedFrequencyRegion]:
+    """The one region below the Med.Prom threshold worth a look, on an axis
+    with no trusted region; for the user to judge, never a result.
 
     Eligible are regions with enough support whose median PSD maximum lies
     inside their own range of session peaks: a region given the maximum of a
     neighbour through the search window says nothing about its own frequency.
-    The first is the highest Med.Prom (then the larger support), the second
-    the highest support fraction x Med.Prom among the rest, at another
-    maximum. Decisions of the detector do not depend on this.
+    The candidate is the highest Med.Prom, then the larger support. Decisions
+    of the detector do not depend on it.
     """
     if any(is_trusted_frequency_cluster(region, config) for region in axis_regions):
         return []
@@ -3151,27 +3167,12 @@ def select_candidate_regions(
     ]
     if not eligible:
         return []
-    first = max(
+    return [max(
         eligible,
         key=lambda region: (
             region.median_evidence.prominence_db, region.support_count,
         ),
-    )
-    selected = [(CANDIDATE_RANKS[0], first)]
-    rest = [
-        region for region in eligible
-        if region.median_evidence.peak_frequency
-        != first.median_evidence.peak_frequency
-    ]
-    if rest:
-        second = max(
-            rest,
-            key=lambda region: (
-                region.support_fraction * region.median_evidence.prominence_db
-            ),
-        )
-        selected.append((CANDIDATE_RANKS[1], second))
-    return selected
+    )]
 
 
 def print_candidate_regions(
@@ -3199,18 +3200,16 @@ def print_candidate_regions(
             "result, noise reaches such levels too; open circles on figure 2."
         )
         print(
-            f"{'Picked by':<18}  {'Freq Hz':>7}  {'Support':>7}  "
-            f"{'Med.Freq':>8}  {'Med.Prom':>8}  {'Supp x Prom':>11}  "
-            f"{'Range Hz':>13}"
+            f"{'Freq Hz':>7}  {'Support':>7}  "
+            f"{'Med.Freq':>8}  {'Med.Prom':>8}  {'Range Hz':>13}"
         )
-        for rank, region in candidates:
+        for region in candidates:
             evidence = region.median_evidence
             print(
-                f"{rank:<18}  {region.frequency:7.2f}  "
+                f"{region.frequency:7.2f}  "
                 f"{region.support_count:>3}/{total_sessions:<3}  "
                 f"{reported_median_frequency(evidence):8.2f}  "
                 f"{evidence.prominence_db:8.2f}  "
-                f"{region.support_fraction * evidence.prominence_db:11.2f}  "
                 f"{region.minimum_frequency:.2f}–"
                 f"{region.maximum_frequency:.2f}"
             )
@@ -4272,12 +4271,11 @@ def peak_hover_text(
     region: ConsolidatedFrequencyRegion,
     total_sessions: int,
     config: TrustedFrequencyVisualizationConfig,
-    candidate_rank: str | None = None,
+    candidate: bool = False,
 ) -> str:
     evidence = region.median_evidence
     kind = (
-        f"candidate below the threshold, by {candidate_rank}"
-        if candidate_rank else "trusted"
+        "candidate below the threshold" if candidate else "trusted"
     )
     lines = [
         f"{axis_name} {reported_median_frequency(evidence):.2f} Hz — {kind}",
@@ -4346,7 +4344,7 @@ def draw_trusted_figure(
             [
                 region.median_evidence.peak_frequency
                 for region in (
-                    *trusted_regions, *(region for _, region in candidates),
+                    *trusted_regions, *candidates,
                 )
             ],
         )
@@ -4377,7 +4375,7 @@ def draw_trusted_figure(
                 peak_frequency, peak_psd,
                 peak_hover_text(axis_name, region, total_sessions, trusted_config),
             ))
-        for (rank, region), (top_frequency, top_psd) in zip(
+        for region, (top_frequency, top_psd) in zip(
             candidates, tops[len(trusted_regions):],
         ):
             # Open circle: the strongest of what stayed below the threshold.
@@ -4403,7 +4401,7 @@ def draw_trusted_figure(
             hover_peaks.append((
                 top_frequency, top_psd,
                 peak_hover_text(
-                    axis_name, region, total_sessions, trusted_config, rank,
+                    axis_name, region, total_sessions, trusted_config, True,
                 ),
             ))
         trusted_axis.set_title(f"{axis_name} axis — Trusted Median PSD")
@@ -5180,7 +5178,7 @@ def build_replay_summary_rows(
                     run_config.visualization.trusted_frequency,
                 ),
             })
-        for rank, region in select_candidate_regions(
+        for region in select_candidate_regions(
             consolidated_regions,
             run_config.visualization.trusted_frequency,
         ):
@@ -5189,7 +5187,6 @@ def build_replay_summary_rows(
                 **common_values,
                 "axis": axis_name,
                 "band": region.band_name,
-                "picked_by": rank,
                 "freq_hz": region.frequency,
                 "med_freq_hz": reported_median_frequency(evidence),
                 "med_freq_bin_hz": evidence.peak_frequency,
@@ -5197,9 +5194,6 @@ def build_replay_summary_rows(
                 "support_total": support_total,
                 "support_fraction": region.support_fraction,
                 "med_prom_db": evidence.prominence_db,
-                "support_x_med_prom": (
-                    region.support_fraction * evidence.prominence_db
-                ),
                 "threshold_db": (
                     run_config.visualization.trusted_frequency
                     .min_median_prominence_db
@@ -5259,9 +5253,9 @@ def save_replay_summaries(
     )
     candidate_fields = [
         *region_fields[:region_fields.index("axis")],
-        "axis", "band", "picked_by", "freq_hz", "med_freq_hz",
+        "axis", "band", "freq_hz", "med_freq_hz",
         "med_freq_bin_hz", "support_n", "support_total", "support_fraction",
-        "med_prom_db", "support_x_med_prom", "threshold_db",
+        "med_prom_db", "threshold_db",
         "range_min_hz", "range_max_hz",
     ]
     write_csv_rows(

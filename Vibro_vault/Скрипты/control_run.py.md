@@ -79,7 +79,9 @@ tags: [vibro, скрипт, проверка]
 (8×8, 16×8) — в скольких из них область доверенная, k/N, области
 группируются в пределах `--tolerance`. Для точки с несколькими записями
 строка `across runs` — в скольких записях область доверенная по всей
-записи. Ещё по каждой раскладке: `runs with a trusted region` — сколько
+записи. Ещё по каждой раскладке: `regions after consolidation` — сколько
+областей осталось после объединения (сумма по прогонам и осям),
+`runs with a trusted region` — сколько
 виртуальных прогонов дали хотя бы одну доверенную область (на шуме это
 доля ложных), `strongest trusted Med.Prom` — наибольший `Med.Prom`
 доверенной области (на шуме при пороге 0 — то, от чего считается порог). `--compare` сравнивает такие таблицы так же, вместо z — `Med.Prom`
@@ -108,6 +110,7 @@ python control_run.py t_8x16 --old-detector --layouts 8x16 --median-prominence 8
 | `--points-file` | `control_points.toml` | другой список точек; папки в нём считаются от места файла |
 | `--nperseg` | из `config.toml` | одна длина отрезка; с `--old-detector` — режим старого детектора, `[old_detector.nperseg_<n>]` |
 | `--median-prominence DB / P×S=DB …` | таблица режима | с `--old-detector`: пороги `Med.Prom` в копии конфига |
+| `--max-shared-sessions N` | из `config.toml` | с `--old-detector`: сколько общих сессий допускает объединение кластеров, в копии конфига |
 | `--alpha` | 0,01 | как в [[stable_spectrum.py]], см. [[Порог alpha и проверка половинами]] |
 | `--band MIN MAX` | из `config.toml` | полоса |
 | `--baseline-window` | из `config.toml` | ширина базы |

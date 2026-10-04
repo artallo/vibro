@@ -77,6 +77,10 @@ weak_trusted_weight = 0.8
 
 [analysis.frequency_cluster_consolidation]
 median_frequency_tolerance_hz = 0.20
+# How many sessions two clusters of one band may share and still merge into
+# one region. 0: their sessions must not overlap, the rule until 2026-10-04;
+# 1 since then: one stray session no longer splits a region.
+max_shared_sessions = 1
 
 [analysis.frequency_clustering]
 frequency_tolerance_hz_250 = 0.40

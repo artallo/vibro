@@ -125,7 +125,7 @@ class RefinedFrequencyTests(unittest.TestCase):
             self.assertTrue((run / "figure1.png").exists())
             self.assertTrue((run / "figure2.png").exists())
             # Candidates below the threshold: none on the axis with a trusted
-            # region, at most two on each other axis, each at its own maximum.
+            # region, at most one on each other axis, at its own maximum.
             self.assertIn(
                 "Candidates below the threshold — Y\nTrusted frequency regions present; no candidates.",
                 report,
@@ -135,17 +135,12 @@ class RefinedFrequencyTests(unittest.TestCase):
             self.assertFalse([row for row in candidates if row["axis"] == "Y"])
             for axis in "XZ":
                 picked = [row for row in candidates if row["axis"] == axis]
-                self.assertLessEqual(len(picked), 2)
+                self.assertLessEqual(len(picked), 1)
                 for row in picked:
                     self.assertLessEqual(float(row["range_min_hz"]), float(row["med_freq_bin_hz"]))
                     self.assertLessEqual(float(row["med_freq_bin_hz"]), float(row["range_max_hz"]))
                     self.assertGreaterEqual(float(row["support_fraction"]), 0.5)
                     self.assertLess(float(row["med_prom_db"]), float(row["threshold_db"]))
-                if len(picked) == 2:
-                    self.assertEqual(
-                        [row["picked_by"] for row in picked], ["Med.Prom", "support x Med.Prom"],
-                    )
-                    self.assertGreaterEqual(float(picked[0]["med_prom_db"]), float(picked[1]["med_prom_db"]))
 
 
 if __name__ == "__main__":
